@@ -243,6 +243,61 @@ func TestCompletionWiresEnums(t *testing.T) {
 	}
 }
 
+// TestFishCompletionMarksValueFlags 断言 fish 生成物给吃取值的自有选项加了 `-r`，
+// 布尔开关与有枚举的选项没加。
+//
+// 逐行比字面串，不比「包含某个选项名」：`-r` 在行尾，只查名字的话加了没加都能过。
+func TestFishCompletionMarksValueFlags(t *testing.T) {
+	lines := map[string]bool{}
+	for _, line := range strings.Split(fishCompletionScript(buildCompletionData()), "\n") {
+		lines[line] = true
+	}
+
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "吃取值的选项带 -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l schedule-file -r",
+			want: true,
+		},
+		{
+			name: "布尔开关不带 -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-stdin",
+			want: true,
+		},
+		{
+			name: "布尔开关（--all）也不带 -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l all",
+			want: true,
+		},
+		{
+			name: "有枚举的选项，普通行不加 -r",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l endpoint",
+			want: true,
+		},
+		{
+			name: "全局选项 --format 不加 -r",
+			line: "complete -c larkaxctl -l format",
+			want: true,
+		},
+		{
+			name: "布尔开关带上 -r 的那一行不存在",
+			line: "complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-stdin -r",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lines[tc.line]; got != tc.want {
+				t.Errorf("这一行在脚本里存在 = %v，期望 %v：\n%s", got, tc.want, tc.line)
+			}
+		})
+	}
+}
+
 // TestCompletionBehaviorInRealShells 在真 shell 里跑一遍生成出来的补全。
 //
 // 只比生成物里的字面串挡不住 case 模式里的元字符：`|` 在 case 里是多模式
@@ -260,8 +315,8 @@ func TestCompletionWiresEnums(t *testing.T) {
 func TestCompletionBehaviorInRealShells(t *testing.T) {
 	data := buildCompletionData()
 	// 每格一张判据，shell 名传进去：fish 的补全模型与 bash / zsh 的手写分派
-	// 有两处不同（见下面两格的注释），同一条判据在那两处要分叉，但期望值只有
-	// 一份，不抄第二张表。
+	// 有一处不同（fish 会把候选排过序，见 `--format` 那格的注释），同一条判据
+	// 在那里要分叉，但期望值只有一份，不抄第二张表。
 	cases := []struct {
 		name  string
 		words []string // `larkaxctl` 之后、正在输入的那个词之前的部分
@@ -274,10 +329,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 				// fish 的 `complete -C` 会把候选按字典序排过再返回：顺序不归我们
 				// 定，也不钉成契约，所以这一格按排序后的副本比较。生成物里
 				// `-a 'table json'` 的书写顺序仍由 TestCompletionWiresEnums 的
-				// 字面串钉住，bash 与 zsh 照旧按顺序比。
-				//
-				// 本例有两格在 fish 上放宽，原因不同：这一格是候选顺序；
-				// `--id` 那格是生成物缺 `-r`（见 #1171）。比较用副本，报错仍按
+				// 字面串钉住，bash 与 zsh 照旧按顺序比。比较用副本，报错仍按
 				// 契约顺序打期望值——否则失败信息会把 `[json table]` 说成期望。
 				gotCmp = slices.Clone(got)
 				slices.Sort(gotCmp)
@@ -300,17 +352,7 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 				t.Errorf("候选 = %v，缺动作 get", got)
 			}
 		}},
-		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, shell string, got []string) {
-			if shell == "fish" {
-				// 已知缺陷，见 #1171：生成物没给吃取值的选项声明 `-r`，fish 就
-				// 把 `--id` 当开关，下一个词按位置补出 channel 的动作；bash /
-				// zsh 的手写分派遇到选项就 break，所以那边是空。
-				//
-				// 本格只判候选里不出现 `--format` 的取值：通配分支一旦吃掉所有
-				// 键，`--id` 后面就会冒 table/json，这一格照样红。
-				requireNoFormatValues(t, got)
-				return
-			}
+		{"--id 后面不补取值", []string{"channel", "get", "--id"}, func(t *testing.T, _ string, got []string) {
 			if len(got) != 0 {
 				t.Errorf("候选 = %v，期望空", got)
 			}
@@ -358,6 +400,27 @@ func TestCompletionBehaviorInRealShells(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestFishCompletionValueFlagOffersFiles 断言 `-r` 在取值位置保留文件补全，
+// 而不是像 `-x` 那样把取值补全整个关掉。
+//
+// 别处的行为用例都在空目录里跑（见 runFishCompletion）。在空目录里 `-r` 与 `-x`
+// 给出的候选都是空，只有这一格能把两者分开。
+func TestFishCompletionValueFlagOffersFiles(t *testing.T) {
+	fish, ok := requireCompletionShell(t, "fish")
+	if !ok {
+		return
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "schedule.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("写候选文件失败：%v", err)
+	}
+	got := runFishCompletionIn(t, fish, fishCompletionScript(buildCompletionData()),
+		[]string{"price", "create", "--schedule-file"}, dir)
+	if !slices.Contains(got, "schedule.json") {
+		t.Errorf("候选 = %v，期望有 schedule.json：`-r` 应当保留文件补全", got)
+	}
 }
 
 // completionShellsRequiredEnv 设上之后，缺壳不再是「记一行日志就过」，而是失败。
@@ -475,10 +538,22 @@ func runZshCompletion(t *testing.T, zsh, script string, words []string) []string
 	return candidates
 }
 
-// runFishCompletion 用 fish 的 `complete -C` 非交互地取候选。
+// runFishCompletion 用 fish 的 `complete -C` 非交互地取候选，工作目录是一个
+// 空目录。
+//
+// 目录不是随便挑的：吃取值的选项带 `-r`，fish 会给它补文件名。在仓库目录里跑，
+// 「取值位置应当没有候选」那几格会被当前目录的文件填满——红的不是生成物，而是
+// 工作目录。空的临时目录让「文件补全开着」退化成「没有候选」；要验文件补全的
+// 那一格自己指定目录（见 runFishCompletionIn）。
 //
 // 每条候选可能带一段描述（制表符分隔），这里只要名字。
 func runFishCompletion(t *testing.T, fish, script string, words []string) []string {
+	t.Helper()
+	return runFishCompletionIn(t, fish, script, words, t.TempDir())
+}
+
+// runFishCompletionIn 与 runFishCompletion 相同，但把 fish 的工作目录设成 dir。
+func runFishCompletionIn(t *testing.T, fish, script string, words []string, dir string) []string {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "completion.fish")
 	if writeErr := os.WriteFile(file, []byte(script), 0o600); writeErr != nil {
@@ -486,7 +561,9 @@ func runFishCompletion(t *testing.T, fish, script string, words []string) []stri
 	}
 	line := "larkaxctl " + strings.Join(words, " ") + " "
 	driver := "source " + fishQuote(file) + "; complete -C " + fishQuote(line)
-	out, runErr := exec.CommandContext(t.Context(), fish, "--no-config", "-c", driver).CombinedOutput()
+	cmd := exec.CommandContext(t.Context(), fish, "--no-config", "-c", driver)
+	cmd.Dir = dir
+	out, runErr := cmd.CombinedOutput()
 	if runErr != nil {
 		t.Fatalf("fish 取候选失败：%v\n%s", runErr, out)
 	}

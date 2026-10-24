@@ -118,8 +118,9 @@ type completionData struct {
 	// words 按路径列出下一层能接哪些词：键 "" 是全部一级命令，
 	// `channel` 是它的动作，`channel map` 是三级动词。
 	words map[string][]string
-	// flags 以命令路径为键，值是该路径注册过的选项名（含旧名与别名）。
-	flags map[string][]string
+	// flags 以命令路径为键，值是该路径注册过的选项（名字，以及它吃不吃取值；
+	// 含旧名与别名）。吃不吃取值只有 fish 用得上，见 fishCompletionScript。
+	flags map[string][]collectedFlag
 	// enums 以「命令路径|--选项名」为键，值是那个选项的合法取值。
 	enums map[string][]string
 	// globalEnums 以选项名（如 `--format`）为键，值是全局选项的合法取值。
@@ -268,16 +269,22 @@ func completionPaths(commands []completionCommand) [][]string {
 var (
 	collectingCommandFlags bool
 	currentCommandPath     string
-	collectedFlags         map[string][]string
+	collectedFlags         map[string][]collectedFlag
 )
+
+// collectedFlag 是收集到的一个选项：名字，以及它注册时判出来的「吃不吃取值」。
+type collectedFlag struct {
+	name       string
+	takesValue bool
+}
 
 // collectCommandFlags 把每条命令路径按 `<路径> -h` 走一遍，记下它注册的选项。
 //
 // `-h` 让 flag 在解析阶段返回 ErrHelp，命令走不到连库与写库；万一有哪条路径
 // 在解析之前就要连库，openDB 在收集期间直接失败（见 db.go），
 // 不会真的碰到数据库。输出一律丢掉：这里要的只是 flag 注册这件副作用。
-func collectCommandFlags(paths [][]string) map[string][]string {
-	collectedFlags = make(map[string][]string, len(paths))
+func collectCommandFlags(paths [][]string) map[string][]collectedFlag {
+	collectedFlags = make(map[string][]collectedFlag, len(paths))
 	collectingCommandFlags = true
 
 	savedOut, savedErr := os.Stdout, os.Stderr
@@ -318,18 +325,51 @@ func completionOptionNames(data completionData, path string) []string {
 	return slices.Compact(out)
 }
 
-// ownOptionNames 是这条路径自己注册的正式长选项（不含全局选项），按字典序。
-func ownOptionNames(data completionData, path string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, name := range data.flags[path] {
-		if len(name) < 2 || strings.HasPrefix(name, "-") || seen[name] {
+// completionFlag 是一条路径自己的一个正式长选项在补全里的样子。
+type completionFlag struct {
+	// name 带前导 `--`，例如 `--schedule-file`。
+	name string
+	// takesValue 为 true 时选项后面跟一个取值，fish 要用 `-r` 声明它。
+	takesValue bool
+}
+
+// ownOptions 是这条路径自己注册的正式长选项（不含全局选项），按名字字典序。
+//
+// 注册过的名字里混着短选项与旧名（`u`、`m`、`owner` 这类）。短名字只有一两个
+// 字母，写在 Tab 里反而把真正要选的那几个挤走；旧名不占 Tab 的位置（见帮助
+// 文本末段）。所以只列正式的长选项。
+//
+// 同一个名字注册两次时，两次判出的「吃不吃取值」理应一致。不一致说明两条注册
+// 路径对同一个选项的认识分叉了——这里把它写进 stderr，不静默挑一边。
+func ownOptions(data completionData, path string) []completionFlag {
+	index := map[string]int{}
+	out := make([]completionFlag, 0, len(data.flags[path]))
+	for _, entry := range data.flags[path] {
+		if len(entry.name) < 2 || strings.HasPrefix(entry.name, "-") {
 			continue
 		}
-		seen[name] = true
-		out = append(out, "--"+name)
+		if i, seen := index[entry.name]; seen {
+			if out[i].takesValue != entry.takesValue {
+				fmt.Fprintf(os.Stderr,
+					"补全：%s 的 --%s 注册了两次，一次吃取值一次不吃，按第一次的算\n",
+					path, entry.name)
+			}
+			continue
+		}
+		index[entry.name] = len(out)
+		out = append(out, completionFlag{name: "--" + entry.name, takesValue: entry.takesValue})
 	}
-	slices.Sort(out)
+	slices.SortFunc(out, func(a, b completionFlag) int { return strings.Compare(a.name, b.name) })
+	return out
+}
+
+// ownOptionNames 是这条路径自己注册的正式长选项（不含全局选项），按字典序。
+func ownOptionNames(data completionData, path string) []string {
+	options := ownOptions(data, path)
+	out := make([]string, len(options))
+	for i, option := range options {
+		out[i] = option.name
+	}
 	return out
 }
 

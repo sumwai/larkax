@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-// 这一层给每个命令的 flag.FlagSet 包一层：注册选项时把**名字**记下来。
+// 这一层给每个命令的 flag.FlagSet 包一层：注册选项时把**名字**记下来，
+// 顺带记下它吃不吃取值（fish 的补全靠后者决定给不给选项加 `-r`）。
 //
 // 补全要列出「这条命令能写哪些长选项」，而选项名只存在于各命令自己构造的
 // flag.FlagSet 里（见 channel.go 的 parseChannelCreate 这一类）。补全不能
@@ -30,41 +31,52 @@ func newFlagSet(name string, handling flag.ErrorHandling) *flagSet {
 	return &flagSet{FlagSet: flag.NewFlagSet(name, handling)}
 }
 
-// record 在收集期间记下一个选项名。
-func (f *flagSet) record(name string) {
+// takesValue 判断一种 flag.Value 吃不吃取值。
+//
+// 判据是标准库的 IsBoolFlag 约定：实现了它并返回 true 的是布尔开关，后面的词
+// 不是它的取值；其余（String、Int、Duration，以及别名共用的 stringStorage）
+// 都要跟一个值。fish 的补全靠这个决定给不给选项加 `-r`。
+func takesValue(value flag.Value) bool {
+	b, ok := value.(interface{ IsBoolFlag() bool })
+	return !ok || !b.IsBoolFlag()
+}
+
+// record 在收集期间记下一个选项名，以及它吃不吃取值。
+func (f *flagSet) record(name string, takesValue bool) {
 	if !collectingCommandFlags {
 		return
 	}
-	collectedFlags[currentCommandPath] = append(collectedFlags[currentCommandPath], name)
+	collectedFlags[currentCommandPath] = append(collectedFlags[currentCommandPath],
+		collectedFlag{name: name, takesValue: takesValue})
 }
 
 // Var 见 flag.FlagSet.Var。
 func (f *flagSet) Var(value flag.Value, name, usage string) {
-	f.record(name)
+	f.record(name, takesValue(value))
 	f.FlagSet.Var(value, name, usage)
 }
 
 // String 见 flag.FlagSet.String。
 func (f *flagSet) String(name, value, usage string) *string {
-	f.record(name)
+	f.record(name, true)
 	return f.FlagSet.String(name, value, usage)
 }
 
 // Bool 见 flag.FlagSet.Bool。
 func (f *flagSet) Bool(name string, value bool, usage string) *bool {
-	f.record(name)
+	f.record(name, false)
 	return f.FlagSet.Bool(name, value, usage)
 }
 
 // Int 见 flag.FlagSet.Int。
 func (f *flagSet) Int(name string, value int, usage string) *int {
-	f.record(name)
+	f.record(name, true)
 	return f.FlagSet.Int(name, value, usage)
 }
 
 // Int64 见 flag.FlagSet.Int64。
 func (f *flagSet) Int64(name string, value int64, usage string) *int64 {
-	f.record(name)
+	f.record(name, true)
 	return f.FlagSet.Int64(name, value, usage)
 }
 
@@ -95,6 +107,6 @@ func (f *flagSet) aliasInt(p *int, name string) {
 
 // Duration 见 flag.FlagSet.Duration。
 func (f *flagSet) Duration(name string, value time.Duration, usage string) *time.Duration {
-	f.record(name)
+	f.record(name, true)
 	return f.FlagSet.Duration(name, value, usage)
 }

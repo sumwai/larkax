@@ -178,9 +178,22 @@ func fishCompletionScript(data completionData) string {
 	}
 	for _, path := range flaggedPaths(data) {
 		cond := fishSeenCondition(strings.Split(path, " "))
-		for _, name := range ownOptionNames(data, path) {
-			fmt.Fprintf(&b, "complete -c larkaxctl -n %s -l %s\n",
-				fishQuote(cond), strings.TrimPrefix(name, "--"))
+		for _, option := range ownOptions(data, path) {
+			// 吃取值的选项要声明 `-r`，fish 才会停下来等取值；不声明的话它把
+			// 选项当开关，敲完按 Tab 会按位置接着补动词。
+			//
+			// 有枚举的选项不加：取值由下面那条 `-x -a` 补。`-r` 与 `-x` 也不是
+			// 同一件事——`-r` 只说明后面跟一个取值，文件补全仍然开着；`-x` 才
+			// 连文件一起关掉。补文件路径的选项（如 `--schedule-file`）要的正是
+			// 前者。
+			suffix := ""
+			if option.takesValue {
+				if _, wired := data.enums[path+"|"+option.name]; !wired {
+					suffix = " -r"
+				}
+			}
+			fmt.Fprintf(&b, "complete -c larkaxctl -n %s -l %s%s\n",
+				fishQuote(cond), strings.TrimPrefix(option.name, "--"), suffix)
 		}
 	}
 	for _, key := range sortedEnumKeys(data.enums) {

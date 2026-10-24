@@ -189,434 +189,434 @@ complete -c larkaxctl -l format
 complete -c larkaxctl -l quiet
 complete -c larkaxctl -l verbose
 complete -c larkaxctl -l format -x -a 'table json'
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l overrides
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l upstream
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from delete' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from list' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from list' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from resolve' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from resolve' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from update' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from update' -l overrides
-complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from update' -l upstream
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l expires-at
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l overrides -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from create' -l upstream -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from delete' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from list' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from list' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from resolve' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from resolve' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from update' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from update' -l overrides -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from alias and __fish_seen_subcommand_from update' -l upstream -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l expires-at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l forever
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l quota
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l rpm
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from get' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from list' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l quota -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l rpm -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from get' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from list' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l clear-quota
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l clear-rpm
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l expires-at
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l expires-at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l forever
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l quota
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l rpm
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l quota -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l rpm -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l status
-complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l base-url
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l credential-env
+complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l base-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l credential-stdin
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l priority
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l priority -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l protocols
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l setting
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l setting -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l type
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l weight
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from delete' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from disable' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from enable' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from get' -l id
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l weight -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from delete' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from disable' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from enable' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from get' -l id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from health' -l all
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from health' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from health' -l since
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from health' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from health' -l since -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from list' -l all
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map and __fish_seen_subcommand_from add' -l overrides
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map and __fish_seen_subcommand_from list' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l base-url
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l credential-env
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map and __fish_seen_subcommand_from add' -l overrides -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from map and __fish_seen_subcommand_from list' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l base-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l credential-stdin
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l type
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from restore' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from sync-models' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l base-url
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l credential-env
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from probe' -l type -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from restore' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from sync-models' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l base-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l credential-stdin
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l priority
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l priority -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l protocols
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l setting
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l setting -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l type
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l weight
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from upstream-models' -l id
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from update' -l weight -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from upstream-models' -l id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l agree
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l expires-at
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l expires-at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l forever
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l request-id
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l request-id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l scope
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l to
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from list' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l base-url
-complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-env
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from grant' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from consent and __fish_seen_subcommand_from list' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l base-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l credential-stdin
 complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l endpoint
 complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l live
-complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l model
+complete -c larkaxctl -n '__fish_seen_subcommand_from doctor' -l model -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from idempotency and __fish_seen_subcommand_from cleanup' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l account
+complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l account -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l all
 complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from balance' -l asset
-complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from runs' -l limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from verify' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from verify' -l max-txns
-complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from verify' -l to
+complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from runs' -l limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from verify' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from verify' -l max-txns -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from ledger and __fish_seen_subcommand_from verify' -l to -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from maintenance and __fish_seen_subcommand_from idempotency' -l dry-run
 complete -c larkaxctl -n '__fish_seen_subcommand_from maintenance and __fish_seen_subcommand_from session' -l dry-run
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l audio
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l batch
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l cache
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l context-limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l display
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l endpoints
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l family
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l input-limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l input-modalities
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l knowledge-cutoff
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l output-limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l output-modalities
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l context-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l display -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l endpoints -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l family -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l input-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l input-modalities -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l knowledge-cutoff -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l output-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l output-modalities -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l reasoning
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l release-date
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l release-date -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l tools
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l vendor
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l vendor -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from create' -l vision
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from delete' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from get' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l cost-expr
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l display
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from delete' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from get' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l cost-expr -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l display -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l price-expr
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l price-expr -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l update
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l upstream
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from trace' -l channel
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from onboard' -l upstream -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from trace' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l audio
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l batch
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l cache
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l context-limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l display
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l endpoints
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l family
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l input-limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l input-modalities
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l knowledge-cutoff
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l output-limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l output-modalities
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l context-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l display -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l endpoints -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l family -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l input-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l input-modalities -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l knowledge-cutoff -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l output-limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l output-modalities -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l reasoning
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l release-date
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l release-date -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l tools
-complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l vendor
+complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l vendor -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from model and __fish_seen_subcommand_from update' -l vision
-complete -c larkaxctl -n '__fish_seen_subcommand_from partition and __fish_seen_subcommand_from check' -l months
-complete -c larkaxctl -n '__fish_seen_subcommand_from partition and __fish_seen_subcommand_from ensure' -l months
+complete -c larkaxctl -n '__fish_seen_subcommand_from partition and __fish_seen_subcommand_from check' -l months -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from partition and __fish_seen_subcommand_from ensure' -l months -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l asset
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l description
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l face-value
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l quota
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l unit
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from disable' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from enable' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from get' -l key
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l description -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l face-value -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l quota -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from create' -l unit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from disable' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from enable' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from get' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l expires-at
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l expires-at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l forever
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l plan
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l plan -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from set' -l all
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from set' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from set' -l plans
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from show' -l id
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from set' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from set' -l plans -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from key and __fish_seen_subcommand_from show' -l id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l clear
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l order
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from show' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from subscriptions' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l order -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from show' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from subscriptions' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l ref
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l ref -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l status
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from delete' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from delete' -l plugin
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from delete' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from get' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from get' -l plugin
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from get' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l plugin
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l value
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from publish' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from publish' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from publish' -l priority
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l channel
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from delete' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from delete' -l plugin -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from delete' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from get' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from get' -l plugin -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from get' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l plugin -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from kv and __fish_seen_subcommand_from set' -l value -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from publish' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from publish' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plugin and __fish_seen_subcommand_from publish' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l disabled
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l effective-from
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l effective-to
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l expr
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l priority
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l schedule-file
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l effective-from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l effective-to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l expr -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l schedule-file -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l scope
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l at
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l channel
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from create' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l at -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from explain' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l clear-effective-to
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l clear-schedule
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l disable
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l effective-from
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l effective-to
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l effective-from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l effective-to -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l enable
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l expr
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l priority
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l schedule-file
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l expr -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l schedule-file -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l scope
-complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from price and __fish_seen_subcommand_from update' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from rotate' -l apply
-complete -c larkaxctl -n '__fish_seen_subcommand_from rotate' -l batch-size
+complete -c larkaxctl -n '__fish_seen_subcommand_from rotate' -l batch-size -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from rotate' -l verify
 complete -c larkaxctl -n '__fish_seen_subcommand_from secret and __fish_seen_subcommand_from rotate' -l apply
-complete -c larkaxctl -n '__fish_seen_subcommand_from secret and __fish_seen_subcommand_from rotate' -l batch-size
+complete -c larkaxctl -n '__fish_seen_subcommand_from secret and __fish_seen_subcommand_from rotate' -l batch-size -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from secret and __fish_seen_subcommand_from rotate' -l verify
-complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from get' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from set' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from set' -l key
-complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from set' -l value
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l request-id
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l to
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from get' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from set' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from set' -l key -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from settings and __fish_seen_subcommand_from set' -l value -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l request-id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from access-log' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from allowlist' -l direction
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from allowlist' -l surface
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from cleanup' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from get' -l actor
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from get' -l actor -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from get' -l direction
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from get' -l reason
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from get' -l reason -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from redact' -l direction
-complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from redact' -l max-bytes
+complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from redact' -l max-bytes -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from snapshot and __fish_seen_subcommand_from redact' -l surface
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l effective-from
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l effective-to
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l expr
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l priority
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from list' -l at
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from list' -l channel
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from list' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l channel
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l effective-from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l effective-to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l expr -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from create' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from list' -l at -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from list' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from list' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l clear-effective-to
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l effective-from
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l effective-to
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l expr
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l models
-complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l priority
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l to
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l since
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l status
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l to
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l from
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l effective-from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l effective-to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l expr -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from upstream-cost and __fish_seen_subcommand_from update' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l since -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l status -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l from -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l this-month
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l to
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l to -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l today
-complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from create' -l email
+complete -c larkaxctl -n '__fish_seen_subcommand_from usage and __fish_seen_subcommand_from summary' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from create' -l email -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from create' -l generate-password
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from create' -l name
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from create' -l name -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from create' -l role
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from purge' -l confirm
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from purge' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from request' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from revert' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from get' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l expires-at
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from purge' -l confirm -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from purge' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from request' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from delete and __fish_seen_subcommand_from revert' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from get' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l expires-at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l forever
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l name
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l quota
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l rpm
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from list' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l quota -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l rpm -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from create' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from list' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from set' -l all
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from set' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from set' -l plans
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from show' -l id
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from set' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from set' -l plans -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from key and __fish_seen_subcommand_from plans and __fish_seen_subcommand_from show' -l id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from list' -l role
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from list' -l status
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from password' -l generate
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from password' -l stdin
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from password' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from password' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l expires-at
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l expires-at -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l forever
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l plan
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ttl
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from list' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l plan -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from grant' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from list' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l clear
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l order
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from show' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l order -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from set' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from order and __fish_seen_subcommand_from show' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l status
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from unlock' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from plan and __fish_seen_subcommand_from void' -l status -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from unlock' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l admin
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l display-name
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l email
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l display-name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l email -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l merchant
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l no-admin
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l no-merchant
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l status
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l to
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l from
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l limit
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l model
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l since
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l status
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l to
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from update' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from events' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l from -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l limit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l model -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l since -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l status -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l to -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from usage and __fish_seen_subcommand_from requests' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l auto-ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l by
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l by -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l memo
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l memo -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l asset
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l gateway
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l gateway -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l asset
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l memo
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant-share
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l upstream-cost
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from show' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l memo -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant-share -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l upstream-cost -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from user and __fish_seen_subcommand_from wallet and __fish_seen_subcommand_from show' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l auto-ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l by
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l by -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l memo
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l memo -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from adjust' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from create' -l asset
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from create' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from create' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l asset
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l gateway
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from list' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l gateway -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from credit' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from list' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l asset
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l notify-url
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from status' -l order
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from approve' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from approve' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from approve' -l note
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from paid' -l gateway
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from paid' -l gateway-ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from paid' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from reject' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from reject' -l id
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from reject' -l note
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l notify-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from create' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payment and __fish_seen_subcommand_from status' -l order -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from approve' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from approve' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from approve' -l note -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from paid' -l gateway -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from paid' -l gateway-ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from paid' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from reject' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from reject' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from reject' -l note -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l asset
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l auto-ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l destination
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l destination -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from request' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l auto-ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l by
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l destination
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l by -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l destination -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l note
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l user
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l amount
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l note -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from payout and __fish_seen_subcommand_from settle' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l amount -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l asset
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l dry-run
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l memo
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant-share
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l ref
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l upstream-cost
-complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l user
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l memo -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l merchant-share -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l ref -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l upstream-cost -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet and __fish_seen_subcommand_from refund' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from create' -l status -x -a 'active disabled revoked'
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey and __fish_seen_subcommand_from update' -l status -x -a 'active disabled revoked'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel and __fish_seen_subcommand_from create' -l protocols -x -a 'anthropic openai openai-responses systemone'
