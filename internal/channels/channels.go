@@ -189,8 +189,8 @@ func (s *Source) Supplies(ctx context.Context) ([]Supply, error) {
 //
 // 单模型页走这一条：它是公开、无会话的读点。`WHERE` 去掉了目录那一维
 // （`canonical_name` 上有唯一索引），所以成本不再随目录规模增长；渠道侧
-// 仍是一次扫描——判据 suppliesModel 没变，`channels(models)` 上没有 GIN
-// 索引，`c.models @> ARRAY[…]` 仍要扫一遍渠道。
+// 由 `channels_models_gin_idx` 支撑 `c.models @> ARRAY[…]`——命中渠道少时
+// 走位图索引扫描，模型由大量渠道在供时计划器仍可能选整表扫描。
 func (s *Source) SuppliesFor(ctx context.Context, model string) ([]Supply, error) {
 	return s.querySupplies(ctx, ` WHERE m.canonical_name = $1 ORDER BY c.id`, model)
 }

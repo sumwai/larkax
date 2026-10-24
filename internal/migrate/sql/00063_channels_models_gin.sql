@@ -7,10 +7,21 @@
 --
 -- CONCURRENTLY 不阻塞写入，但它不能跑在事务里；而迁移器（goose）默认把每条
 -- 迁移包在事务里，绕开这一点要写它的 NO TRANSACTION 注解，那是本仓库从未
--- 用过的迁移写法。渠道表在十万行量级上构建这把索引约 1 秒、索引约 9.6 MB
--- （#1113 的实测），这 1 秒的写入锁对一张由后台操作写入的表可以接受，不值得
--- 为它引入一种新的迁移形态。普通写法跟着既有的事务包装走，up → down → up 的
--- 往返也天然被 internal/migrate 的集成用例覆盖。
+-- 用过的迁移写法。
+--
+-- 要看清建索引那一秒锁住的是谁：CREATE INDEX 拿的是 ShareLock，只挡写、
+-- 不挡读——迁移期间读渠道的请求（目录页、报价、选路）不受影响。被挡住的是
+-- 写，而且都是单行写（INSERT 一行、UPDATE 按主键一行）：其中 streak 更新
+-- 在请求路径上、每次调用一次（RecordCall 同步跑一遍 streakSQL，改
+-- consecutive_failures 与 last_failure_at，见 internal/channels/record.go
+-- 与 gateway.recordCall）；其余是管理面的偶发操作（建渠道、改配置、切换
+-- 状态、软删/恢复、轮换凭证）。它们在这 1 秒里排队；排队时间超过写健康度的
+-- 5 秒上限（recordTimeout），这些写入才会失败（错误只记日志，不影响请求）；
+-- 而实测建索引约 1 秒（#1113），所以正常情况下它们只是晚到，不会丢。
+--
+-- 结论：为这 1 秒的写锁引入本仓从未用过的迁移形态不划算。普通写法跟着既有
+-- 的事务包装走，往返由 internal/migrate 的集成用例
+-- TestChannelsModelsGINMigration 钉住。索引约 9.6 MB（#1113 实测）。
 --
 -- # fastupdate 保持默认
 --
