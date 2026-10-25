@@ -30,7 +30,7 @@ func createCostChannel(t *testing.T) (int64, string) {
 	model := uniqueName("model")
 	withStdin(t, testSecret)
 	out, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", model, "--credential-stdin",
 		}); err != nil {

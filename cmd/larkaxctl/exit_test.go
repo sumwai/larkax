@@ -24,7 +24,7 @@ import (
 // TestExitCodeUsageIsTwo 取一次参数错。
 func TestExitCodeUsageIsTwo(t *testing.T) {
 	cases := map[string]func() error{
-		"缺字段":   func() error { return runChannelCreate(nil) },
+		"缺字段":   func() error { return runChannelAdd(nil) },
 		"未知子命令": func() error { return runChannel([]string{"bogus"}) },
 		"未知标志":  func() error { return runChannelList([]string{"--nope"}) },
 	}

@@ -24,7 +24,7 @@ func createOnboardChannel(t *testing.T) int64 {
 
 	withStdin(t, testSecret)
 	out, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("onboard-channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", uniqueName("seed-model"),
 			"--credential-stdin",

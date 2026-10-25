@@ -497,7 +497,7 @@ func TestPriceExplainPicksWinner(t *testing.T) {
 
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", model, "--credential-stdin",
 		}); err != nil {

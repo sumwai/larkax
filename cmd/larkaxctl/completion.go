@@ -456,7 +456,8 @@ func completionEnumValues() map[string][]string {
 
 	if registry, err := upstream.Registry(); err == nil {
 		// --protocols 收逗号分隔的协议集合，Tab 一次补一个名字，多选的写法照旧手敲。
-		for _, path := range []string{"channel create", "channel update"} {
+		// add 与 create 是同一条实现，两处都要接线：用旧名的脚本照样补得出协议名。
+		for _, path := range []string{"channel add", "channel create", "channel update"} {
 			put(path, "type", registry.Types())
 			put(path, "protocols", registry.Types())
 		}

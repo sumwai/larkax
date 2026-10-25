@@ -45,21 +45,22 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and not __fish_see
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and not __fish_seen_subcommand_from create get list update' -a 'get'
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and not __fish_seen_subcommand_from create get list update' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from calendar; and not __fish_seen_subcommand_from import' -a 'import'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'create'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'list'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'get'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'health'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'update'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'enable'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'disable'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'delete'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'restore'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'sync-models'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'upstream-models'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'adapters'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'probe'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'map'
-complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'unmap'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'create'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'get'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'health'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'update'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'enable'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'disable'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'delete'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'restore'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'sync-models'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'upstream-models'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'adapters'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'probe'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'map'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and not __fish_seen_subcommand_from adapters add create delete disable enable get health list map probe restore sync-models unmap update upstream-models' -a 'unmap'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from map; and not __fish_seen_subcommand_from add list remove' -a 'add'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from map; and not __fish_seen_subcommand_from add list remove' -a 'list'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from map; and not __fish_seen_subcommand_from add list remove' -a 'remove'
@@ -237,6 +238,17 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l rpm -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l status
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l base-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l credential-env -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l credential-stdin
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l models -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l priority -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l protocols
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l setting -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l type
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l user -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l weight -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l base-url -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l credential-stdin
@@ -671,6 +683,8 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from refund' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from create' -l status -x -a 'active disabled revoked'
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l status -x -a 'active disabled revoked'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l protocols -x -a 'anthropic openai openai-responses systemone'
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l type -x -a 'anthropic openai openai-responses systemone'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l protocols -x -a 'anthropic openai openai-responses systemone'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l type -x -a 'anthropic openai openai-responses systemone'
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l protocols -x -a 'anthropic openai openai-responses systemone'

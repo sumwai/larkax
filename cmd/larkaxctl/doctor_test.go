@@ -2067,7 +2067,7 @@ func createDoctorChannel(t *testing.T, models ...string) (int64, string) {
 
 	name := uniqueName("doctor-channel")
 	stdout, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", name, "--type", testChanType, "--base-url", testBaseURL,
 			"--models", strings.Join(models, ","), "--credential-stdin",
 		}); err != nil {

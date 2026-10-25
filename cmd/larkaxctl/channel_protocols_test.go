@@ -82,7 +82,9 @@ func TestChannelCreateProtocolsRejectsMissing(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"两个都没给", base, "缺少 --type 或 --protocols"},
+		// 没给凭证才要求点名协议：给了凭证时协议由探测得出，那时缺 --type
+		// 不是参数错（见 probeProtocolsForAdd）。
+		{"两个都没给", without(base, "--credential-stdin"), "缺少 --type 或 --protocols"},
 		{"--protocols 是空的", append(append([]string{}, base...), "--protocols", "  "),
 			"--protocols 里没有协议名"},
 	}
@@ -258,7 +260,7 @@ func TestChannelCreateRejectsUnknownProtocol(t *testing.T) {
 	withStdin(t, testSecret)
 
 	err := runCaptured(t, func() error {
-		return runChannelCreate([]string{
+		return runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--protocols", "openai,no-such-protocol",
 			"--base-url", testBaseURL, "--models", "m1", "--credential-stdin",
 		})
