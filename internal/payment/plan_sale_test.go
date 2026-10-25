@@ -1069,6 +1069,169 @@ func TestPlanPurchaseRejectsOrderNoReusedForAnotherPlan(t *testing.T) {
 	assertNothingGranted(t, ctx, h.db, daysOrderNo)
 }
 
+// 同一张售卖单、同一个包、同样由包给出的天数，再下一次：**不算冲突**——
+// applied=false、库里仍一行、没有新分录。
+//
+// 它杀的是 sameValidityDays 里「两边都有值且相等」这一格的两个变异体：
+// store.go:446:7（`a == nil` → `!=`）与 446:19（`b == nil` → `!=`）。这两个在
+// 两边都有值时都会提前返回 false，于是「相等」被判成「不等」，同一件商品重下
+// 变成冲突——通道与 CLI 的重试从此全报错。
+//
+// 充值单两边都是 nil，走的是同一个函数里另一个早返回，覆盖不到这一格：
+// service_test.go 的 TestCreateReplaysOrConflictsOnTheSameOrderNo 只在「两边
+// 都没有」这一格上有鉴别力。
+func TestPlanPurchaseCreateReplayOnSameParamsIsNotConflict(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	plan := seedSalePlanRow(t, ctx, h.db, "sale-create-replay", "66", 30)
+	userID := seedUserWithoutWallet(t, ctx, h.db)
+	const orderNo = "ORD-PLAN-CREATE-REPLAY"
+	first := h.createPlanOrder(t, ctx, userID, orderNo, plan.Key)
+
+	again, err := h.service.Create(ctx, stubName, CreateOrderRequest{
+		OrderNo: orderNo,
+		UserID:  userID,
+		PlanKey: plan.Key,
+	})
+	if err != nil {
+		t.Fatalf("同内容重跑下单失败（天数相等被判成了不等）: %v", err)
+	}
+	if again.Applied {
+		t.Error("同内容重跑不该新写一行")
+	}
+	if again.Order.OrderNo != first.OrderNo {
+		t.Errorf("回执单号 = %q，期望仍是 %q", again.Order.OrderNo, first.OrderNo)
+	}
+	// 回执必须是库里那一行：created_at 由数据库补，入参里是零值。
+	if again.Order.CreatedAt.IsZero() {
+		t.Error("读回的那一行带着零值 created_at，说明回的不是库里那一行")
+	}
+
+	var orders int
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM payment_orders WHERE order_no = $1`, orderNo).Scan(&orders); err != nil {
+		t.Fatalf("数支付单失败: %v", err)
+	}
+	if orders != 1 {
+		t.Errorf("支付单 %d 行，期望 1 行", orders)
+	}
+	var days *int
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT validity_days FROM payment_orders WHERE order_no = $1`, orderNo).Scan(&days); err != nil {
+		t.Fatalf("读单子上的天数失败: %v", err)
+	}
+	if days == nil || *days != 30 {
+		t.Errorf("单子上记的天数 = %v，期望仍是 30", days)
+	}
+	if got := planSaleStateOf(t, ctx, h.db, orderNo, PlanTxnIDForOrder(orderNo)); got.orders != 0 {
+		t.Errorf("重下之后多了 %d 条分录，期望 0 条", got.orders)
+	}
+}
+
+// 库里那张售卖单没有记天数（validity_days 为 NULL），这次要写的单有 30 天：
+// 算冲突，报错是「内容与这次要写的不一样」。
+//
+// 这一格不是硬造：payment_orders 的 plan_key 与 validity_days 是 00070 同一条
+// 迁移加的两列、都可空，中间没有约束把它们绑在一起，而 purchasePlan 里那条 nil
+// 天数的守卫把「有 plan_key、没有天数」当成要处理的形态。来路要写准：00070 之前
+// 的行连 plan_key 都没有，所以这不会是迁移留下的；能造出它的是手工修数、从列不全
+// 的备份恢复、或者以后的写入漏了天数。所以下面那条 UPDATE 造的是真正可能出现的
+// 行；谁把它当成脏数据「清理」掉，这一格的判据也会一起没。
+//
+// 它杀的是「一边 nil、一边有值」这一格：store.go:447:19（`a == nil && b == nil`
+// 的 `&&` → `||`）会把这种混比判成相等，于是不报冲突，红在下面那条
+// errors.Is 上。同一句 446:14（`a == nil || b == nil` 的 `||` → `&&`）在这里
+// 会掉到 `return *a == *b` 解引用 nil——那是 panic，不证明判据有鉴别力，只是
+// 「这一格今天完全没被走过」的旁证，不进红证。
+func TestPlanPurchaseCreateConflictsWhenStoredDaysAreNull(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	plan := seedSalePlanRow(t, ctx, h.db, "sale-create-null-days", "55", 30)
+	userID := seedUserWithoutWallet(t, ctx, h.db)
+	const orderNo = "ORD-PLAN-CREATE-NULL-DAYS"
+	h.createPlanOrder(t, ctx, userID, orderNo, plan.Key)
+
+	// 把这一行改成「有 plan_key、没有天数」——正常写路径造不出来的那种行：
+	// 包还在，天数被清空了。
+	if _, err := h.db.ExecContext(ctx,
+		`UPDATE payment_orders SET validity_days = NULL WHERE order_no = $1`, orderNo); err != nil {
+		t.Fatalf("清空单子上的天数失败: %v", err)
+	}
+
+	_, err := h.service.Create(ctx, stubName, CreateOrderRequest{
+		OrderNo: orderNo,
+		UserID:  userID,
+		PlanKey: plan.Key,
+	})
+	if !errors.Is(err, ErrOrderConflict) {
+		t.Fatalf("库里没有天数、这次有 30 天，重下应当报冲突（错误 = %v）", err)
+	}
+	if !strings.Contains(err.Error(), "内容与这次要写的不一样") {
+		t.Errorf("报错不是「内容与这次要写的不一样」那一句：%v", err)
+	}
+
+	// 拒了之后什么都没变：仍一行、天数仍是 NULL、没有分录。
+	var orders int
+	var days *int
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT count(*), min(validity_days) FROM payment_orders WHERE order_no = $1`,
+		orderNo).Scan(&orders, &days); err != nil {
+		t.Fatalf("读支付单失败: %v", err)
+	}
+	if orders != 1 {
+		t.Errorf("支付单 %d 行，期望 1 行", orders)
+	}
+	if days != nil {
+		t.Errorf("单子上的天数 = %d，期望仍是 NULL", *days)
+	}
+	if got := planSaleStateOf(t, ctx, h.db, orderNo, PlanTxnIDForOrder(orderNo)); got.orders != 0 {
+		t.Errorf("冲突之后多了 %d 条分录，期望 0 条", got.orders)
+	}
+}
+
+// 下单时 PlanKey 首尾带空白：拒绝，报「首尾有空白」——不拿 trim 后的 key 接着
+// 查包，更不落单。
+//
+// 它杀的是 service.go:165:15：`if key == "" || key != req.PlanKey` 的 `||` 翻成
+// `&&` 之后，带空白的 key 不再被这一条挡住。用例里的包是存在的，于是变异体上
+// 不仅没报错，还会把 req.PlanKey 改写成 trim 后的值、把单子直接落库：调用方
+// 以为下了一张「key 带空格」的单，拿到的却是另一个 key 的单。
+//
+// 断言里带上「不是 ErrNoPlan」：若守卫被短路，报错来自查包那一层，红的地方就
+// 不对了。
+func TestPlanPurchaseRejectsPlanKeyWithSurroundingSpace(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	plan := seedSalePlanRow(t, ctx, h.db, "sale-key-space", "44", 30)
+	userID := seedUserWithoutWallet(t, ctx, h.db)
+	const orderNo = "ORD-PLAN-KEY-SPACE"
+
+	_, err := h.service.Create(ctx, stubName, CreateOrderRequest{
+		OrderNo: orderNo,
+		UserID:  userID,
+		PlanKey: " " + plan.Key + " ",
+	})
+	if err == nil {
+		t.Fatal("PlanKey 首尾带空白应当被拒，而不是静默 trim 之后按包下单")
+	}
+	if !strings.Contains(err.Error(), "首尾有空白") {
+		t.Errorf("报错不是「首尾有空白」那一句：%v", err)
+	}
+	if errors.Is(err, plans.ErrNoPlan) {
+		t.Errorf("报错来自查包那一层（ErrNoPlan），说明空格守卫被短路了：%v", err)
+	}
+
+	// 被拒的单子一行都不该落，也不该有分录。
+	var orders int
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM payment_orders WHERE order_no = $1`, orderNo).Scan(&orders); err != nil {
+		t.Fatalf("数支付单失败: %v", err)
+	}
+	if orders != 0 {
+		t.Errorf("拒了之后 payment_orders 有 %d 行，期望 0 行", orders)
+	}
+}
+
 // 下单之后、首次发放之前改 validity_days：两个方向各一条子用例。
 //
 // 为什么要分两个方向：改长是平台亏（用户按 30 天付钱拿到 365 天），改短是
@@ -1196,13 +1359,14 @@ func TestPlanPurchaseFirstGrantAfterPlanChangedIsRejected(t *testing.T) {
 	assertNothingGranted(t, ctx, h.db, orderNo)
 }
 
-// 售卖单上没记天数（写于 00070 之前的单）：拒绝入账，并且报错要说得清来路。
+// 售卖单上没记天数（带 plan_key 却没有 validity_days，正常写路径造不出来）：
+// 拒绝入账，并且报错要说得清来路。
 //
 // 这一格**不是**在钉「不能静默回落」——那件事由 plans.GrantTx 兜着（拿到 nil
 // 就拒绝，不解引用、也不读现在的包），删掉 payment 这一层的判断照样不会回落，
 // 只是会报成 GrantTx 那句「额度包的售卖没有给出天数」：那句话点名的是**包**，
-// 运维会去查包，而真正要查的是这张迁移之前写的单。所以这里钉的是**说法**——
-// 单号 + 「迁移之前写的」+「先核对再手工处理」。
+// 运维会去查包，而真正要查的是这一行为什么没有天数。所以这里钉的是**说法**——
+// 单号 + 「这种行不该存在」+「先核来路」。
 //
 // 两层都留着是有意的：一层保不变量，一层保可读性。
 func TestPlanPurchaseRejectsOrderWithoutValidityDays(t *testing.T) {
@@ -1213,7 +1377,7 @@ func TestPlanPurchaseRejectsOrderWithoutValidityDays(t *testing.T) {
 	const orderNo = "ORD-PLAN-NO-DAYS"
 	order := h.createPlanOrder(t, ctx, userID, orderNo, plan.Key)
 
-	// 模拟迁移之前的单：把那一列清成 NULL。
+	// 模拟被测的形态：带 plan_key 的行没有天数（正常写路径造不出来）。
 	if _, err := h.db.ExecContext(ctx,
 		`UPDATE payment_orders SET validity_days = NULL WHERE order_no = $1`, orderNo); err != nil {
 		t.Fatalf("清空单子上的天数失败: %v", err)
@@ -1224,7 +1388,7 @@ func TestPlanPurchaseRejectsOrderWithoutValidityDays(t *testing.T) {
 	if err == nil {
 		t.Fatal("单子上没有天数时应当拒绝入账，而不是回落到包上的值")
 	}
-	for _, want := range []string{"没有记下售卖有效期", "00070"} {
+	for _, want := range []string{"没有记下售卖有效期", "不会长成这样"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("报错里没有 %q：%v", want, err)
 		}
