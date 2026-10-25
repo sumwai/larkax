@@ -681,7 +681,7 @@ func TestCreateWithoutModelsStaysUnselectable(t *testing.T) {
 	// 与候选集查询同一条理由（见 candidateRow.modelsJSON）。
 	// 期望值是字面量 "[]"：落成 NULL 时这里是 "null"，那正是这一条要抓的。
 	var stored string
-	if err := db.QueryRowContext(context.Background(),
+	if err = db.QueryRowContext(context.Background(),
 		`SELECT array_to_json(models)::text FROM channels WHERE id = $1`, id).Scan(&stored); err != nil {
 		t.Fatalf("读模型白名单失败: %v", err)
 	}
