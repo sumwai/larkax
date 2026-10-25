@@ -388,7 +388,7 @@ func TestSetAccountWeightRejectsUnattachedAccount(t *testing.T) {
 
 	attachedChannel := insertChannelWithoutAccounts(t.Context(), t, db, model)
 	otherChannel := insertChannelWithoutAccounts(t.Context(), t, db, model)
-	_, name := attachPoolAccount(t.Context(), t, db, sealer, attachedChannel, "key", 1)
+	accountID, name := attachPoolAccount(t.Context(), t, db, sealer, attachedChannel, "key", 1)
 	attachedName := secondChannelName(t, db, attachedChannel)
 
 	_, err := NewAdmin(db, nil, nil).SetAccountWeight(context.Background(), name, otherChannel, 2)
@@ -411,7 +411,7 @@ func TestSetAccountWeightRejectsUnattachedAccount(t *testing.T) {
 	var rows int
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM channel_accounts WHERE channel_id = $1 AND account_id = $2`,
-		otherChannel, notOn.Channels[0].ID).Scan(&rows); err != nil {
+		otherChannel, accountID).Scan(&rows); err != nil {
 		t.Fatalf("数关联行失败: %v", err)
 	}
 	if rows != 0 {
