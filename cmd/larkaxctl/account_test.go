@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -511,6 +512,145 @@ func TestAccountListRejectsUnknownChannel(t *testing.T) {
 	}
 	if !errors.Is(err, channels.ErrChannelNotFound) {
 		t.Fatalf("期望 ErrChannelNotFound，得到 %v", err)
+	}
+}
+
+// TestAccountListShowsChannelWeights 钉住「人读表看得出每条渠道上的权重」。
+//
+// 权重挂在「渠道×账号」的关联上，一个账号可以有多条、各有各的数；暂停一个
+// 账号（`--weight 0`）之后默认输出里要能确认它停了，而不是切到 `--format json`
+// 才看得到。断言落在 printAccountList 打出来的那一行上——库里的值写没写对是
+// 另一条用例（accountWeightOn）的事，证明不了人读表里看得见。
+func TestAccountListShowsChannelWeights(t *testing.T) {
+	render := func(infos []channels.AccountInfo) string {
+		t.Helper()
+		var buf bytes.Buffer
+		printAccountList(&buf, infos)
+		return buf.String()
+	}
+	rowOf := func(t *testing.T, out, name string) string {
+		t.Helper()
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, name+" ") {
+				return line
+			}
+		}
+		t.Fatalf("清单里没有 %s 那一行：\n%s", name, out)
+		return ""
+	}
+
+	t.Run("权重 0 与非默认权重各自可见", func(t *testing.T) {
+		out := render([]channels.AccountInfo{
+			{Name: "paused", Channels: []channels.AccountChannel{
+				{ID: 1, Name: "ch-a", Weight: 0},
+			}},
+			{Name: "active", Channels: []channels.AccountChannel{
+				{ID: 2, Name: "ch-b", Weight: 2},
+			}},
+		})
+		if row := rowOf(t, out, "paused"); !strings.Contains(row, "ch-a（权重 0）") {
+			t.Errorf("暂停的账号那一行没标出权重 0：%q", row)
+		}
+		if row := rowOf(t, out, "active"); !strings.Contains(row, "ch-b（权重 2）") {
+			t.Errorf("非默认权重的那一行没标出权重：%q", row)
+		}
+	})
+
+	t.Run("两条渠道各自的权重都在同一行", func(t *testing.T) {
+		out := render([]channels.AccountInfo{{
+			Name: "multi",
+			Channels: []channels.AccountChannel{
+				{ID: 1, Name: "ch-one", Weight: 0},
+				{ID: 2, Name: "ch-two", Weight: 3},
+			},
+		}})
+		row := rowOf(t, out, "multi")
+		for _, want := range []string{"ch-one（权重 0）", "ch-two（权重 3）"} {
+			if !strings.Contains(row, want) {
+				t.Errorf("这一行里没有 %q：%q", want, row)
+			}
+		}
+	})
+
+	t.Run("零关联不渲染成权重 0", func(t *testing.T) {
+		orphan := channels.AccountInfo{Name: "orphan"}
+		if got := accountChannelsLabel(orphan); got != "-" {
+			t.Errorf("没有关联时渠道一栏 = %q，期望 %q", got, "-")
+		}
+		if row := rowOf(t, render([]channels.AccountInfo{orphan}), "orphan"); strings.Contains(row, "权重") {
+			t.Errorf("没有关联的账号不该出现权重：%q", row)
+		}
+	})
+
+	t.Run("默认权重也打出来", func(t *testing.T) {
+		got := accountChannelsLabel(channels.AccountInfo{
+			Name:     "plain",
+			Channels: []channels.AccountChannel{{ID: 1, Name: "ch-default", Weight: 1}},
+		})
+		if want := "ch-default（权重 1）"; got != want {
+			t.Errorf("渠道一栏 = %q，期望 %q（每条关联都带权重，包括默认值 1）", got, want)
+		}
+	})
+
+	t.Run("普通名字下权重是独立的数字", func(t *testing.T) {
+		got := accountChannelsLabel(channels.AccountInfo{
+			Name: "normal",
+			Channels: []channels.AccountChannel{
+				{ID: 1, Name: "deepseek-official", Weight: 2},
+			},
+		})
+		if want := "deepseek-official（权重 2）"; got != want {
+			t.Errorf("渠道一栏 = %q，期望 %q", got, want)
+		}
+	})
+}
+
+// TestAccountChannelsLabelKeepsCommaSegments 钉住「名字里带逗号时分段数不变」。
+//
+// 渠道名只禁控制字符，逗号是合法字符，而这一栏用逗号分隔关联——这层歧义今天
+// 就有，本条不要求顺手治它，只要求补权重之后别让它更糟：一段关联不许被切成
+// 两段。段数在改动前后相同，权重必须落在原有的段里。
+func TestAccountChannelsLabelKeepsCommaSegments(t *testing.T) {
+	cases := []struct {
+		name         string
+		channels     []channels.AccountChannel
+		wantSegments int
+		wantParts    []string
+	}{
+		{
+			name:         "一条、名字带逗号",
+			channels:     []channels.AccountChannel{{ID: 1, Name: "a,b", Weight: 0}},
+			wantSegments: 2,
+			wantParts:    []string{"a", "b（权重 0）"},
+		},
+		{
+			name: "两条、其中一条名字带逗号",
+			channels: []channels.AccountChannel{
+				{ID: 1, Name: "a,b", Weight: 2},
+				{ID: 2, Name: "c", Weight: 3},
+			},
+			wantSegments: 3,
+			wantParts:    []string{"a", "b（权重 2）", "c（权重 3）"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := accountChannelsLabel(channels.AccountInfo{Name: "x", Channels: tc.channels})
+			parts := strings.Split(got, ",")
+			if len(parts) != tc.wantSegments {
+				t.Errorf("按逗号切出 %d 段，期望 %d 段（与改动前相同）：%q",
+					len(parts), tc.wantSegments, got)
+			}
+			for i, want := range tc.wantParts {
+				if i >= len(parts) {
+					break
+				}
+				if gotPart := strings.TrimSpace(parts[i]); gotPart != want {
+					t.Errorf("第 %d 段 = %q，期望 %q：%q", i+1, gotPart, want, got)
+				}
+			}
+		})
 	}
 }
 
