@@ -112,6 +112,13 @@ type Channel struct {
 	// 一种」处理，与加这张表之前的行为逐字相同（见 Declares）。
 	Protocols []Protocol
 	BaseURL   string
+	// ProtocolBaseURLs 是每个协议自己的上游地址（见迁移 00069 的
+	// channel_protocols.base_url）。
+	//
+	// 没有条目的协议沿用 BaseURL；整张表为空时与加这一列之前逐字相同。
+	// 只有一处的程序读它：BaseURLFor（见那里的注释）。适配器仍然只读
+	// BaseURL——调用方在把渠道交给适配器之前用 ForProtocol 定一次地址。
+	ProtocolBaseURLs map[Protocol]string
 	// Credential 是**已解密**的凭证。适配器不得记录、不得回传、不得写进错误信息。
 	Credential string
 	// Models 是该渠道支持的规范模型名。
@@ -165,6 +172,37 @@ func (c Channel) Declares(p Protocol) bool {
 		return p == Protocol(c.Type)
 	}
 	return slices.Contains(c.Protocols, p)
+}
+
+// ProtocolBaseURL 返回一个协议实际要打的上游地址。
+//
+// 先看这个协议自己的地址，没有（或者给的是空串）就退回渠道的地址。
+//
+// # 这是取地址的唯一一处判据
+//
+// 执行器、额度探测、模型同步与模型探测都经它定地址，适配器只读
+// Channel.BaseURL。各读各的症状是「探测走新地址、真实请求走老地址」——
+// 两条路各自看起来都对，只有配了分址的上游才会现形，而且是从上游那边
+// 回来的错。
+func ProtocolBaseURL(p Protocol, overrides map[Protocol]string, fallback string) string {
+	if u, ok := overrides[p]; ok && u != "" {
+		return u
+	}
+	return fallback
+}
+
+// BaseURLFor 是这个渠道上某个协议的实际地址（见 ProtocolBaseURL）。
+func (c Channel) BaseURLFor(p Protocol) string {
+	return ProtocolBaseURL(p, c.ProtocolBaseURLs, c.BaseURL)
+}
+
+// ForProtocol 返回一份 BaseURL 已定成该协议实际地址的副本。
+//
+// 交给适配器之前用它定一次地址：适配器仍然只读 Channel.BaseURL，于是
+// 「哪个协议打哪条地址」只在调用的这一侧判一次（见 ProtocolBaseURL）。
+func (c Channel) ForProtocol(p Protocol) Channel {
+	c.BaseURL = c.BaseURLFor(p)
+	return c
 }
 
 // DispatchProtocol 返回这次上游调用该用哪套协议。

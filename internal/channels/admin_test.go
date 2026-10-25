@@ -862,8 +862,8 @@ func TestListReturnsNoCiphertext(t *testing.T) {
 
 	// 字段集合：改这里之前先问「这个新字段该不该出现在管理面的返回值里」。
 	want := []string{
-		"ID", "OwnerUserID", "Name", "Type", "Protocols", "BaseURL", "Status", "Models",
-		"Weight", "Priority", "Setting", "CreatedAt", "UpdatedAt",
+		"ID", "OwnerUserID", "Name", "Type", "Protocols", "ProtocolBaseURLs", "BaseURL",
+		"Status", "Models", "Weight", "Priority", "Setting", "CreatedAt", "UpdatedAt",
 		"Accounts", "CredentialKeys", "Hint", "CredentialErr", "DeletedAt",
 	}
 	typ := reflect.TypeOf(ChannelInfo{})

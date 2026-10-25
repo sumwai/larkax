@@ -119,14 +119,17 @@ func (m *ModelSync) Sync(ctx context.Context, channelID int64) (ModelSyncResult,
 	}
 
 	var (
-		name      string
-		chanType  string
-		baseURL   string
-		envelope  []byte
-		deletedAt sql.NullTime
+		name          string
+		chanType      string
+		baseURL       string
+		protocolsJSON string
+		envelope      []byte
+		deletedAt     sql.NullTime
 	)
 	err := m.db.QueryRowContext(ctx, `
-		SELECT c.name, c.type, c.base_url, a.credential_enc, c.deleted_at
+		SELECT c.name, c.type, c.base_url,
+		       `+protocolsColumnSQL+`,
+		       a.credential_enc, c.deleted_at
 		FROM channels c
 		LEFT JOIN LATERAL (
 		      SELECT ac.credential_enc
@@ -137,7 +140,7 @@ func (m *ModelSync) Sync(ctx context.Context, channelID int64) (ModelSyncResult,
 		       LIMIT 1
 		     ) a ON true
 		WHERE c.id = $1`, channelID).
-		Scan(&name, &chanType, &baseURL, &envelope, &deletedAt)
+		Scan(&name, &chanType, &baseURL, &protocolsJSON, &envelope, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ModelSyncResult{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, channelID)
 	}
@@ -161,11 +164,17 @@ func (m *ModelSync) Sync(ctx context.Context, channelID int64) (ModelSyncResult,
 		return ModelSyncResult{}, fmt.Errorf("渠道 %d: %w", channelID, err)
 	}
 
+	// 同步走这条渠道**主协议**的地址：type 指向哪个适配器，就打哪个协议的
+	// 地址。判据与执行器、探测共用 channel.ProtocolBaseURL。
+	_, protocolBaseURLs, decodeErr := decodeProtocols(channelID, protocolsJSON)
+	if decodeErr != nil {
+		return ModelSyncResult{}, decodeErr
+	}
 	models, err := adapter.ListModels(ctx, channel.Channel{
 		ID:         channelID,
 		Name:       name,
 		Type:       chanType,
-		BaseURL:    baseURL,
+		BaseURL:    channel.ProtocolBaseURL(channel.Protocol(chanType), protocolBaseURLs, baseURL),
 		Credential: plaintext,
 	})
 	if errors.Is(err, channel.ErrUnsupported) {

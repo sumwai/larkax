@@ -242,25 +242,33 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l rpm -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l status
 complete -c larkaxctl -n '__fish_seen_subcommand_from apikey; and __fish_seen_subcommand_from update' -l ttl -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l anthropic -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l base-url -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l credential-stdin
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l models -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l openai -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l priority -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l protocols
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l responses -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l setting -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l systemone -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l type
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from add' -l weight -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l anthropic -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l base-url -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l credential-stdin
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l models -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l openai -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l priority -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l protocols
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l responses -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l setting -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l systemone -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l type
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from create' -l weight -r
@@ -280,15 +288,19 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_s
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from probe' -l type -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from restore' -l id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from sync-models' -l id -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l anthropic -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l base-url -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l credential-stdin
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l id -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l models -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l name -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l openai -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l priority -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l protocols
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l responses -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l setting -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l systemone -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l type
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from update' -l weight -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from channel; and __fish_seen_subcommand_from upstream-models' -l id -r

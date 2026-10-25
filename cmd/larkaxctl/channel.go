@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
 用法：
   larkaxctl channel add <名称> <base-url> [--models <模型名,...>]
                          [--type <类型> | --protocols <协议名,...>]
+                         [--openai|--anthropic|--responses|--systemone <URL>]
                          [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
@@ -36,8 +38,7 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel enable|disable|delete|restore --id <渠道 ID>
   larkaxctl channel sync-models|upstream-models --id <渠道 ID>
   larkaxctl channel adapters
-  larkaxctl channel probe --type <类型> --base-url <URL>
-                          [--credential-stdin | --credential-env <变量名>]
+  larkaxctl channel probe --type <类型> --base-url <URL> [凭证来源同 add]
   larkaxctl channel map|unmap（出站映射，见 larkaxctl channel map help）
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
 给凭证且没给 --type/--protocols 时逐协议探测，全都没探测成功就不建；确知协议就显式给。
@@ -50,6 +51,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
 用法：
   larkaxctl channel add <名称> <base-url> [--models <模型名,...>]
                          [--type <类型> | --protocols <协议名,...>]
+                         [--openai|--anthropic|--responses|--systemone <URL>]
                          [--credential-stdin | --credential-env <变量名>]
                          [--user <用户 ID 或用户名>] [--weight <权重>]
                          [--priority <优先级>] [--setting <JSON 对象>]
@@ -60,6 +62,7 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel update --id <渠道 ID>
                            [--name <名称>] [--type <类型>]
                            [--protocols <协议名,...>] [--base-url <URL>]
+                           [--openai|--anthropic|--responses|--systemone <URL>]
                            [--models <模型名,...>] [--weight <权重>]
                            [--priority <优先级>] [--setting <JSON 对象>]
                            [--credential-stdin | --credential-env <变量名>]
@@ -211,16 +214,30 @@ probe 在落库之前向上游问一次模型清单：给 --type 与 --base-url�
 渠道类型必须是已注册的适配器类型；类型写错时错误信息会列出已知的类型。
 --protocols 是这条渠道声明支持的协议集合，至少一个，取值同样是已注册的适配器
 类型；写错一个名字时错误信息会列出已知的协议。一条渠道一套凭证：声明两套协议
-表示同一个上游地址、同一把凭证上两种端点都能用，请求按它走的那条入口分派到
-对应协议。
+表示同一把凭证上两种端点都能用，请求按它走的那条入口分派到对应协议。两端在
+同一个上游地址下，还是各在自己的路径下，由下面的分址旗标决定。
 
 --type 等价于只写一个元素的 --protocols，两者都还是单协议的写法。同时给时
 --type 必须在 --protocols 里（它就是主协议，落在渠道的类型上）；不在里面会报错。
 只给 --protocols 时主协议取第一个。update 给 --type 会把协议集合改成只含它
 一个——要扩成多协议请给 --protocols。
 
-**单协议渠道的行为与加 --protocols 之前逐字相同**：请求照旧按类型分派，
-channel get 也不多一栏（协议集合暂时不出现在 get / list 的输出里）。
+**每个协议可以有自己的上游地址**：--openai / --anthropic / --responses /
+--systemone 收一条地址，写给对应协议；没配的协议沿用 --base-url。地址与
+--base-url 走同一条校验。给了地址就等于把该协议绑上：只给 --anthropic 也算
+声明了 anthropic，于是那轮探测整个跳过（地址都给了，不必再问哪套协议通）。
+与 --protocols 同时给时，每个分址旗标点的协议都必须在那个列表里；不在就是参数
+错，不静默取一个。
+
+update 里这几个旗标给空串表示**清掉**这个协议自己的地址、改回沿用渠道地址。
+把地址写成与渠道地址相同的值也行，但那样同一个地址就存了两份，之后换渠道地址
+时它会留在原地。换 --base-url 时：没配专属地址的协议跟着变，配了的那个不变。
+
+多协议或者有协议配了自己的地址时，channel get 多一栏「协议地址」，逐个列出每个
+协议实际打哪条地址；probe 也会在 stderr 上打出这次探测的协议与地址。
+
+**单协议且没配专属地址时，行为与加 --protocols 之前逐字相同**：请求照旧按类型
+分派，channel get 也不多一栏（协议集合本身仍不出现在 get / list 的输出里）。
 
 --models 可以不给：读取路径把 models 当白名单用（models @> ARRAY[规范名]），
 空数组匹配不到任何模型名，于是这条渠道永远选不中——「还没上架任何模型」就是
@@ -476,6 +493,77 @@ func takeLeadingPositionals(args []string, max int) ([]string, []string) {
 //
 // 参数形状在这里判完，探测与连库都在调用方：一个写错的命令不该先连上库、
 // 更不该先打一次上游。
+// protocolBaseURLFlag 是「给单个协议配地址」的旗标与它对应的协议。
+//
+// 每个注册的协议一个旗标，而不是一个 `--url 协议=地址` 的通用形式：新协议
+// 届时加一个新旗标，与 --type / --protocols 那一对写法同一口径。名字取协议名
+// 的简称，唯一不逐字相同的是 openai-responses——它写作 --responses。
+type protocolBaseURLFlag struct {
+	name     string
+	protocol channel.Protocol
+}
+
+var protocolBaseURLFlags = []protocolBaseURLFlag{
+	{"openai", channel.ProtocolOpenAI},
+	{"anthropic", channel.ProtocolAnthropic},
+	{"responses", channel.ProtocolOpenAIResponses},
+	{"systemone", channel.ProtocolSystemOne},
+}
+
+// registerProtocolBaseURLFlags 给一个 add / update 的 flag 集合注册分址旗标。
+//
+// 收本包的 flagSet 而不是 flag.FlagSet：补全的选项名靠那一层记下来，
+// 绕过去的名字不会出现在补全里（见 flagset.go）。
+func registerProtocolBaseURLFlags(fs *flagSet) map[channel.Protocol]*string {
+	out := make(map[channel.Protocol]*string, len(protocolBaseURLFlags))
+	for _, f := range protocolBaseURLFlags {
+		out[f.protocol] = fs.String(f.name, "", "")
+	}
+	return out
+}
+
+// collectProtocolBaseURLs 收出这次给了分址旗标的那些协议与地址。
+//
+// 第二个返回值表示「这次动了分址」：为 false 时第一个返回值没有意义（nil）。
+// 空串照样收进来——在 update 里它表示「清掉这个协议自己的地址」，与「没给
+// 这一项」是两件事（与 --priority 0 同一个道理）。
+func collectProtocolBaseURLs(given map[string]bool, values map[channel.Protocol]*string) (map[string]string, bool) {
+	var out map[string]string
+	touched := false
+	for _, f := range protocolBaseURLFlags {
+		if !given[f.name] {
+			continue
+		}
+		touched = true
+		if out == nil {
+			out = make(map[string]string, len(protocolBaseURLFlags))
+		}
+		out[string(f.protocol)] = strings.TrimSpace(*values[f.protocol])
+	}
+	return out, touched
+}
+
+// checkProtocolURLSet 判分址旗标点的协议与显式给的协议集合是否相容。
+//
+// 两样同时给时，每个分址旗标点的协议都必须在那个集合里；不在就是参数错——
+// 静默取一个的表现是「我配了地址，它却没生效」，而命令报成功。没给集合时
+// 不判：那时集合按库里的并上这些协议（update）或就取这些协议（add）。
+func checkProtocolURLSet(protocols []string, urls map[string]string) error {
+	if len(protocols) == 0 || len(urls) == 0 {
+		return nil
+	}
+	for _, f := range protocolBaseURLFlags {
+		if _, ok := urls[string(f.protocol)]; !ok {
+			continue
+		}
+		if !slices.Contains(protocols, string(f.protocol)) {
+			return fmt.Errorf("--%s 的地址对应的协议 %q 不在这次的协议集合里（%s）：两种写法要指同一批协议",
+				f.name, f.protocol, strings.Join(protocols, "、"))
+		}
+	}
+	return nil
+}
+
 func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	// 渠道名与上游地址可以写成前两个位置参数（见 takeLeadingPositionals）。
 	positionals, rest := takeLeadingPositionals(args, 2)
@@ -486,6 +574,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	channelType := fs.String("type", "", "")
 	protocols := fs.String("protocols", "", "")
 	baseURL := fs.String("base-url", "", "")
+	protocolURLValues := registerProtocolBaseURLFlags(fs)
 	models := fs.String("models", "", "")
 	owner := legacyStringFlag(fs, "user", "owner", "")
 	stringAlias(fs, owner, "u")
@@ -548,6 +637,27 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	if err != nil {
 		return channels.CreateRequest{}, "", err
 	}
+	// 每个协议自己的地址：与 --base-url 同一个判据、同一个报错时机（连库
+	// 之前）。创建时没有「清掉」可言，给了空值就是写错了——要沿用渠道地址
+	// 就别给这一项。
+	protocolBaseURLs, urlsTouched := collectProtocolBaseURLs(given, protocolURLValues)
+	if urlsTouched {
+		for _, f := range protocolBaseURLFlags {
+			v, ok := protocolBaseURLs[string(f.protocol)]
+			if !ok {
+				continue
+			}
+			if v == "" {
+				return channels.CreateRequest{}, "", fmt.Errorf(
+					"--%s 的地址是空的：不给这一项表示这个协议沿用渠道地址", f.name)
+			}
+			normalized, normErr := channels.NormalizeBaseURL(v)
+			if normErr != nil {
+				return channels.CreateRequest{}, "", fmt.Errorf("--%s 的地址不合法：%w", f.name, normErr)
+			}
+			protocolBaseURLs[string(f.protocol)] = normalized
+		}
+	}
 	// 模型白名单可以不给（空白名单是合法中间态，见 channels.CreateRequest.Models），
 	// 但给了就不能是空的：「没给」与「给了个空的」不是一回事。
 	var modelList []string
@@ -588,6 +698,26 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 		}
 		protocolList = splitList(*protocols)
 	}
+	// 分址旗标点的协议也是「指名了协议」：给了地址就等于把该协议绑上
+	// （与 --1204 的「显式指定协议跳过探测」同一口径——地址都给了，不该再探
+	// 一遍）。没给 --protocols 时主协议仍是 --type，其余按旗标声明顺序排在后面。
+	if err = checkProtocolURLSet(protocolList, protocolBaseURLs); err != nil {
+		return channels.CreateRequest{}, "", err
+	}
+	if len(protocolBaseURLs) > 0 && !given["protocols"] {
+		if t := strings.TrimSpace(*channelType); t != "" {
+			protocolList = append(protocolList, t)
+		}
+		for _, f := range protocolBaseURLFlags {
+			p := string(f.protocol)
+			if _, ok := protocolBaseURLs[p]; !ok {
+				continue
+			}
+			if !slices.Contains(protocolList, p) {
+				protocolList = append(protocolList, p)
+			}
+		}
+	}
 	if strings.TrimSpace(*channelType) == "" && len(protocolList) == 0 && credentialValue == "" {
 		return channels.CreateRequest{}, "", errors.New(
 			"缺少 --type 或 --protocols（至少给一个）：没给凭证时无从探测协议")
@@ -598,15 +728,16 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	}
 
 	return channels.CreateRequest{
-		Name:       nameValue,
-		Type:       *channelType,
-		Protocols:  protocolList,
-		BaseURL:    normalizedBaseURL,
-		Credential: credentialValue,
-		Models:     modelList,
-		Weight:     *weight,
-		Priority:   *priority,
-		Setting:    parsedSetting,
+		Name:             nameValue,
+		Type:             *channelType,
+		Protocols:        protocolList,
+		ProtocolBaseURLs: protocolBaseURLs,
+		BaseURL:          normalizedBaseURL,
+		Credential:       credentialValue,
+		Models:           modelList,
+		Weight:           *weight,
+		Priority:         *priority,
+		Setting:          parsedSetting,
 	}, *owner, nil
 }
 
@@ -726,6 +857,7 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	channelType := fs.String("type", "", "")
 	protocols := fs.String("protocols", "", "")
 	baseURL := fs.String("base-url", "", "")
+	protocolURLValues := registerProtocolBaseURLFlags(fs)
 	models := fs.String("models", "", "")
 	weight := fs.Int("weight", 0, "")
 	priority := fs.Int("priority", 0, "")
@@ -781,6 +913,36 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 		req.BaseURL = &normalized
 		changes++
 	}
+	// 每个协议自己的地址。空值表示**清掉**这个协议自己的地址、改回沿用渠道
+	// 地址——这是「配了一个与渠道地址相同的专属地址」之外唯一能退回去的写法，
+	// 而那种写法会让地址存两份（见迁移 00069 的注释）。
+	protocolBaseURLs, urlsTouched := collectProtocolBaseURLs(given, protocolURLValues)
+	if urlsTouched {
+		for _, f := range protocolBaseURLFlags {
+			v, ok := protocolBaseURLs[string(f.protocol)]
+			if !ok || v == "" {
+				continue
+			}
+			normalized, err := channels.NormalizeBaseURL(v)
+			if err != nil {
+				return channels.UpdateRequest{}, fmt.Errorf("--%s 的地址不合法：%w", f.name, err)
+			}
+			protocolBaseURLs[string(f.protocol)] = normalized
+		}
+		// 同时给了集合时，分址旗标点的协议必须在里面（与 create 同一判据）。
+		var set []string
+		switch {
+		case given["protocols"]:
+			set = *req.Protocols
+		case given["type"]:
+			set = []string{*channelType}
+		}
+		if err := checkProtocolURLSet(set, protocolBaseURLs); err != nil {
+			return channels.UpdateRequest{}, err
+		}
+		req.ProtocolBaseURLs = &protocolBaseURLs
+		changes++
+	}
 	if given["models"] {
 		list := splitList(*models)
 		for i, model := range list {
@@ -822,7 +984,8 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	if changes == 0 {
 		return channels.UpdateRequest{}, errors.New(
 			"update 至少要改一项：给出 --name / --type / --protocols / --base-url / " +
-				"--models / --weight / --priority / --setting / --credential-* 之一")
+				"--models / --weight / --priority / --setting / --credential-* / " +
+				"--openai / --anthropic / --responses / --systemone 之一")
 	}
 
 	return req, nil
@@ -1478,7 +1641,7 @@ func channelListDoc(infos []channels.ChannelInfo, withDeleted bool) map[string]a
 // **这一份里没有、也不会有凭证密文**：ChannelInfo 根本没有那一栏（见它的
 // 注释），这里能给的只有「挂在哪些主密钥下」与末四位提示。
 func channelEntry(info channels.ChannelInfo) map[string]any {
-	return map[string]any{
+	entry := map[string]any{
 		"id":       info.ID,
 		"status":   info.Status,
 		"type":     info.Type,
@@ -1501,6 +1664,30 @@ func channelEntry(info channels.ChannelInfo) map[string]any {
 		"setting":          jsonObject(info.Setting),
 		"deleted_at":       jsonTimeOrNull(info.DeletedAt),
 	}
+	// 每个协议实际生效的地址。只在有多条协议、或者有协议配了自己的地址时
+	// 出现：单协议且没配专属地址时它就是 base_url 那一栏，多一个键只是把
+	// 既有输出改长（见 channels.ChannelInfo.HasProtocolAddresses）。
+	if info.HasProtocolAddresses() {
+		addrs := make(map[string]string, len(info.Protocols))
+		for _, a := range info.ProtocolAddresses() {
+			addrs[string(a.Protocol)] = a.BaseURL
+		}
+		entry["protocol_addresses"] = addrs
+	}
+	return entry
+}
+
+// protocolAddressLabel 把「每个协议实际生效的地址」打成一串 协议=地址。
+//
+// 按协议名升序，逗号分隔——与「模型」那一栏同一个形状。地址本身不含空格，
+// 所以详情那一栏的「标签 + 对齐空格 + 取值」不会被拆开。
+func protocolAddressLabel(info channels.ChannelInfo) string {
+	addrs := info.ProtocolAddresses()
+	parts := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		parts = append(parts, string(a.Protocol)+"="+a.BaseURL)
+	}
+	return strings.Join(parts, ",")
 }
 
 // accountRefsJSON 打一条渠道挂着的账号。
@@ -1537,6 +1724,11 @@ func printChannelDetail(w io.Writer, info channels.ChannelInfo) {
 	row("状态", info.Status)
 	row("类型", info.Type)
 	row("上游地址", info.BaseURL)
+	// 每个协议实际生效的地址：只在「上游地址」那一栏已经不等于每一侧的
+	// 时候多打一行（见 channels.ChannelInfo.HasProtocolAddresses）。
+	if info.HasProtocolAddresses() {
+		row("协议地址", protocolAddressLabel(info))
+	}
 	row("模型", strings.Join(info.Models, ","))
 	row("归属", ownerLabel(info.OwnerUserID))
 	row("权重", strconv.Itoa(info.Weight))
@@ -2234,6 +2426,9 @@ func runChannelProbe(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
+	// 打出这次打的是哪个协议、哪条地址：地址来自参数，不点出来就没法与
+	// 渠道配置里那个协议实际生效的地址核对（见 channel get 的「协议地址」）。
+	_, _ = fmt.Fprintf(humanStderr(), "探测 %s 协议，地址 %s。\n", parsed.channelType, parsed.baseURL)
 	result, err := channels.NewModelProbe(nil, nil, registry).Probe(ctx, channels.ProbeRequest{
 		Type:       parsed.channelType,
 		BaseURL:    parsed.baseURL,
