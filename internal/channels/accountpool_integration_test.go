@@ -674,6 +674,46 @@ func TestUpdateAccountClearsHealth(t *testing.T) {
 	}
 }
 
+// TestChannelUpdateCredentialClearsAccountHealth 钉住同一条判据在渠道级入口也成立。
+//
+// `channel update --credential-*` 改的是那条渠道主账号（账号 id 最小的那一个）
+// 的那一行，与 `account update` 走的是同一个池子、同一份健康记录。旧 key 攒下的
+// drained 不该留在新 key 头上：不清掉的话，换凭证之后这条渠道仍被自己的健康记录
+// 挡在候选之外，要白等一个冷却期才恢复。
+func TestChannelUpdateCredentialClearsAccountHealth(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	accountID, _ := attachPoolAccount(t.Context(), t, db, sealer, channelID, "old-key", 1)
+
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO account_state (account_id, health, consecutive_failures, last_failure_at)
+		VALUES ($1, 'drained', 3, now())`, accountID); err != nil {
+		t.Fatalf("写入账号状态失败: %v", err)
+	}
+
+	newKey := "rotated-key"
+	if err := NewAdmin(db, sealer, nil).Update(context.Background(), UpdateRequest{
+		ID:         channelID,
+		Credential: &newKey,
+	}); err != nil {
+		t.Fatalf("channel update 换凭证出错: %v", err)
+	}
+	if _, found := readAccountState(t, db, accountID); found {
+		t.Error("渠道级换凭证之后旧的状态行还在")
+	}
+
+	src := New(db, sealer)
+	cands, err := src.Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Channel.Credential != newKey {
+		t.Fatalf("渠道级换凭证之后应当立刻回到池子并解出新 key，候选 = %+v", cands)
+	}
+}
+
 // ── channel health 的账号栏 ─────────────────────────────────────────────
 
 // TestHealthReportsAccountPool 钉住健康读数里的凭证池。

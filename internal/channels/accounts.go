@@ -491,31 +491,43 @@ func (a *Admin) ChannelIDByRef(ctx context.Context, ref string) (int64, error) {
 //
 // 零账号的渠道没有主账号可换，这里按 `channel create --credential-env` 的
 // 兼容捷径补一个匿名账号并挂上（权重 1，与表上的默认值一致）。
+//
+// 换掉的那一行连同它的健康状态一起重置：这条判据与 `account update` 共用，
+// 见下面 DELETE 处的注释。
 func replaceChannelCredential(ctx context.Context, tx *sql.Tx, channelID int64,
 	envelope []byte, hint string) error {
-	res, err := tx.ExecContext(ctx, `
+	var accountID int64
+	err := tx.QueryRowContext(ctx, `
 		UPDATE accounts
 		   SET credential_enc = $2, credential_hint = $3, updated_at = now()
 		 WHERE id = (SELECT ca.account_id
 		               FROM channel_accounts ca
 		              WHERE ca.channel_id = $1
 		              ORDER BY ca.account_id
-		              LIMIT 1)`, channelID, envelope, hint)
+		              LIMIT 1)
+		 RETURNING id`, channelID, envelope, hint).Scan(&accountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		newID, _, _, _, insertErr := insertAccount(ctx, tx, "", hint, envelope, true)
+		if insertErr != nil {
+			return insertErr
+		}
+		return attachAccountInTx(ctx, tx, channelID, newID, 1)
+	}
 	if err != nil {
 		return fmt.Errorf("更新渠道 %d 的主账号失败: %w", channelID, err)
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("确认主账号更新结果失败: %w", err)
+
+	// 与 UpdateAccount 同一条判据：换 key 之后旧 key 攒下的失败记录不再说明
+	// 任何问题，删掉状态行就等于回到「从没用过」。留着它的表现是换好的 key
+	// 仍被 drained 挡在候选之外，要白等一个冷却期。
+	//
+	// 与那次 UPDATE 在同一个事务里：两半要么都落，要么都不落。分开写的话，
+	// 凭证换成了新的、状态却没清，正是上面那种要被避免的中间态。
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM account_state WHERE account_id = $1`, accountID); err != nil {
+		return fmt.Errorf("重置账号健康状态失败: %w", err)
 	}
-	if affected > 0 {
-		return nil
-	}
-	accountID, _, _, _, err := insertAccount(ctx, tx, "", hint, envelope, true)
-	if err != nil {
-		return err
-	}
-	return attachAccountInTx(ctx, tx, channelID, accountID, 1)
+	return nil
 }
 
 // insertAccount 插入一行账号，必要时为生成的名字重试。
