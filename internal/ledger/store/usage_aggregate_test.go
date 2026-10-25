@@ -525,7 +525,9 @@ func TestUsageBreakdownGroupsAndFoldsTheRest(t *testing.T) {
 	//     `groups[limit:]`，那是空切片，sumGroups 返回零值组，与不折时
 	//     out.Other 的零值逐字段相同。
 	//   - `sort.Slice` 里 `c > 0` 改成 `c >= 0`：这一句在 `c != 0` 之后就
-	//     进来了，相等那一格永远到不了。
+	//     进来了，相等那一格永远到不了。同额组逆序的输入也分不开这两版
+	//     （TestSortGroupsByCostBreaksTiesByKey 喂的就是那一格，跑在变异体上
+	//     仍然绿）——这一条只能靠「守卫先挡掉了」说明，用例证明不了。
 	all, err := s.UsageBreakdown(ctx, window, "model", 10)
 	if err != nil {
 		t.Fatalf("按模型分组失败: %v", err)
@@ -572,5 +574,38 @@ func TestUsageBreakdownGroupsAndFoldsTheRest(t *testing.T) {
 
 	if _, err := s.UsageBreakdown(ctx, window, "user", 10); !errors.Is(err, ErrInvalidQuery) {
 		t.Errorf("未知分组方式应当报 ErrInvalidQuery，得到 %v", err)
+	}
+}
+
+// TestSortGroupsByCostBreaksTiesByKey 钉住同额组之间的次序。
+//
+// 第一键是金额降序，第二键是展示键升序（见 sortGroupsByCost 的注释：没有它，
+// 同一份数据两次查询给出的「前 N」会跳）。分组那条 SQL 没有 ORDER BY，库里
+// 回来的行序由 PostgreSQL 定，所以第二键只能在 Go 侧直接测：喂一个键**逆序**
+// 的同额输入，排完必须回到 a、b、c。
+//
+// 三个金额都相同，好让每一步比较都落在第二键上——第一键一次也不出手。它真正
+// 钉住的是 `return keyOf(groups[i]) < keyOf(groups[j])` 那一句（改成 `>` 或
+// 把这一句删掉，红在下面那句断言上）；同一段里 `return c > 0` 上的
+// `>` → `>=` 是等价变异，这份输入**分不开**两版——理由见上面
+// TestUsageBreakdownGroupsAndFoldsTheRest 里的注释（`c != 0` 的守卫先挡住了
+// 相等那一格）。
+func TestSortGroupsByCostBreaksTiesByKey(t *testing.T) {
+	groups := []UsageGroup{
+		{Model: "c", UsageTotals: UsageTotals{Cost: money.MustParse("5")}},
+		{Model: "b", UsageTotals: UsageTotals{Cost: money.MustParse("5")}},
+		{Model: "a", UsageTotals: UsageTotals{Cost: money.MustParse("5")}},
+	}
+	sortGroupsByCost(groups)
+
+	want := []string{"a", "b", "c"}
+	if len(groups) != len(want) {
+		t.Fatalf("排完剩 %d 组，期望 %d 组", len(groups), len(want))
+	}
+	for i, key := range want {
+		if groups[i].Model != key {
+			t.Fatalf("第 %d 组 = %q，期望 %q（金额相同，按展示键升序）",
+				i, groups[i].Model, key)
+		}
 	}
 }
