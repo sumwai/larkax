@@ -67,3 +67,5 @@
 | [49](lessons/49-mutant-count-needs-column-scope-mutators.md) | 报变异体数量不带列名、口径与变异器集合，同一个量会被当成另一个量 | 报或读变异分数之前 | 活 |
 | [50](lessons/50-help-text-not-man-page-gated.md) | `--help` 不进手页：帮助文案与 `docs/cli-reference.md` 是两份文本，没有一道门比对内容 | 改任何 `usage` 常量 / 帮助文案，或评审这类改动时 | 活 |
 | [51](lessons/51-apply-conflict-surface-is-patch-base.md) | 重放补丁时，「哪些文件会撞」要比补丁基点与新基点的差异，不是两版 main 之间改了什么 | 给叠层分支换基点、`git apply` 前后估冲突面时 | 活 |
+| [52](lessons/52-string-literal-concat-phantom-mutant.md) | 字符串字面量之间的 `+` 会生出一条编不过却被记成 KILLED 的变异体，并把分母改掉 | 读两轮变异数字、写跨行的报错文案时 | 活 |
+| [53](lessons/53-substring-assertion-satisfied-by-other-branch.md) | 用子串钉报错时，后面那条分支的报错也能满足它 | 读到「有用例却存活」的变异体、写错误文案断言时 | 活 |
