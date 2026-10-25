@@ -66,3 +66,4 @@
 | [48](lessons/48-failing-test-uses-incidental-id.md) | 失败路径的用例用了「碰巧存在」的 id，被同包别的用例命中：整包绿、单跑红，且没有 SKIP | 写失败路径的用例、复核别人的「整包 ok」时 | 活 |
 | [49](lessons/49-mutant-count-needs-column-scope-mutators.md) | 报变异体数量不带列名、口径与变异器集合，同一个量会被当成另一个量 | 报或读变异分数之前 | 活 |
 | [50](lessons/50-help-text-not-man-page-gated.md) | `--help` 不进手页：帮助文案与 `docs/cli-reference.md` 是两份文本，没有一道门比对内容 | 改任何 `usage` 常量 / 帮助文案，或评审这类改动时 | 活 |
+| [51](lessons/51-apply-conflict-surface-is-patch-base.md) | 重放补丁时，「哪些文件会撞」要比补丁基点与新基点的差异，不是两版 main 之间改了什么 | 给叠层分支换基点、`git apply` 前后估冲突面时 | 活 |
