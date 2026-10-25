@@ -53,8 +53,10 @@ func TestSettleRecordsFirstTokenMS(t *testing.T) {
 	// 结算失败不用 Fatalf 挡在这里：本用例钉的是**读回来的毫秒数**，而变异体
 	// 恰好先在写这一格溢出（纳秒 × 10^6 装不进 integer）。让它继续往下走，
 	// 红才落在下面那句断言上，而不是落在一个「结算没成功」的过场里。
-	if err := s.Save(ctx, req, charge); err != nil {
-		t.Errorf("结算失败: %v", err)
+	// 这里的 err 单独起名：外层那个 err 是预留那一步的，复用会让 govet 的
+	// shadow 检查报「遮蔽」，而把结算的错记到预留的变量上读起来也不对。
+	if saveErr := s.Save(ctx, req, charge); saveErr != nil {
+		t.Errorf("结算失败: %v", saveErr)
 	}
 
 	now := time.Now()
