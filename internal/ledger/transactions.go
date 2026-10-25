@@ -379,6 +379,72 @@ func PlanGrant(p PlanGrantParams) (Transaction, error) {
 	return newTxn(EntryPlanGrant, p.TxnID, p.At, entries...)
 }
 
+// PlanPurchaseParams 是一次额度包售卖的输入。
+type PlanPurchaseParams struct {
+	TxnID TxnID
+	// SubscriptionID 是这次售卖建出来的那条订阅（user_plans.id），也是 prepaid
+	// 科目的后缀。
+	SubscriptionID int64
+	// Amount 是这个订阅的面值，来自额度包的 face_value，不是调用方随手填的金额。
+	Amount money.Amount
+	Asset  Asset
+	// Gateway 是收款的支付通道标识，进 payment_gateway 科目。
+	Gateway string
+	// GatewayFee 是通道手续费，与 Topup 同一条口径：它是平台的成本，不从
+	// 用户拿到的面值里扣。
+	GatewayFee money.Amount
+	// OrderNo 是支付单号，进备注供人工对账。
+	OrderNo string
+	At      time.Time
+}
+
+// PlanPurchase 构造一次额度包售卖：用户自己付钱买下一个包。
+//
+// 分录（面值 A，通道手续费 F）：
+//
+//	借 prepaid:<订阅 id>     A    平台欠用户的预存额度增加
+//	贷 payment_gateway:<gw>  A    通道收到的钱增加
+//
+//	若 F > 0：
+//	借 upstream_cost        F    通道费记在成本科目
+//	贷 platform_revenue     F    这笔成本由平台自己承担
+//
+// 它与 PlanGrant 的差别只有对方科目：发放是平台让出一份收入（贷
+// platform_revenue），售卖是钱真的从通道进来（贷 payment_gateway）。这一档
+// **不确认收入**——收入在消费时才记（见 Consume）；买下额度只是把一笔钱换成
+// 一笔等值的欠付。
+func PlanPurchase(p PlanPurchaseParams) (Transaction, error) {
+	if err := validateCommon(EntryPlanPurchase, p.TxnID, p.Asset, p.Amount); err != nil {
+		return Transaction{}, err
+	}
+	if p.SubscriptionID <= 0 {
+		return Transaction{}, fmt.Errorf("订阅 id 非法: %d", p.SubscriptionID)
+	}
+	if p.Gateway == "" {
+		return Transaction{}, errors.New("缺少支付通道标识")
+	}
+	if p.GatewayFee.IsNegative() {
+		return Transaction{}, fmt.Errorf("通道手续费为负: %s", p.GatewayFee)
+	}
+	if p.GatewayFee.Cmp(p.Amount) > 0 {
+		return Transaction{}, fmt.Errorf("通道手续费 %s 大于额度包面值 %s", p.GatewayFee, p.Amount)
+	}
+
+	entries := []Entry{
+		debit(p.TxnID, PrepaidAccount(p.SubscriptionID), p.Asset, p.Amount, EntryPlanPurchase).
+			withMemo(sanitizeMemo(memoWithOrder("额度包购买", p.OrderNo))),
+		credit(p.TxnID, PaymentGatewayAccount(p.Gateway), p.Asset, p.Amount, EntryPlanPurchase),
+	}
+	if p.GatewayFee.IsPositive() {
+		entries = append(entries,
+			debit(p.TxnID, UpstreamCostAccount(), p.Asset, p.GatewayFee, EntryPlanPurchase).
+				withMemo("支付通道手续费"),
+			credit(p.TxnID, PlatformRevenueAccount(), p.Asset, p.GatewayFee, EntryPlanPurchase),
+		)
+	}
+	return newTxn(EntryPlanPurchase, p.TxnID, p.At, entries...)
+}
+
 // PlanVoidParams 是一次额度包作废的输入。
 type PlanVoidParams struct {
 	TxnID TxnID

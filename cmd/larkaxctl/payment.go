@@ -13,8 +13,10 @@ import (
 
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger/store"
+	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/payment"
 	"github.com/sumwai/larkax/internal/payment/fakechannel"
+	"github.com/sumwai/larkax/internal/plans"
 	"github.com/sumwai/larkax/internal/settings"
 )
 
@@ -25,7 +27,8 @@ var walletPaymentHelp = helpText{short: walletPaymentShortUsage, long: walletPay
 const walletPaymentShortUsage = `larkaxctl wallet payment 走支付通道建单，并查一张单子的现状。
 
 用法：
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref
+  larkaxctl wallet payment create --user <ID 或用户名> --ref <订单号> | --auto-ref
+                                  (--amount <金额> | --plan <额度包>)
                                   [--asset <资产>] [--notify-url <回调地址>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
@@ -42,7 +45,8 @@ status 同时打本地的状态与通道侧报的状态。create 的 --dry-run �
 const walletPaymentUsage = `larkaxctl wallet payment 走支付通道建单，并查一张单子的现状。
 
 用法：
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref
+  larkaxctl wallet payment create --user <ID 或用户名> --ref <订单号> | --auto-ref
+                                  (--amount <金额> | --plan <额度包>)
                                   [--asset <资产>] [--notify-url <回调地址>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
@@ -57,12 +61,23 @@ create 在通道侧建单，并往 payment_orders 写一行（状态 created）�
 --auto-ref 是 --ref 的替代：命令现生成一个 MANUAL_<UTC 日期>_<随机段> 的单号并打进
 输出，重跑不会幂等。两个都给、或两个都不给都是参数错（退出 2）。
 
---amount 必填且为正，--user 收 ID 或用户名。--asset 默认取
-settings.billing.default_asset。--notify-url 是通道把结果发回来的地址，本命令
-原样交给通道，不解释它。
+--amount 与 --plan 至少给一个：前者是充值，后者是买一个额度包。买了额度包的钱不进
+用户钱包——通知到达后发放一条订阅，面值记进 prepaid:<订阅 ID>，账上那一档是
+plan_purchase（借 prepaid、贷 payment_gateway）。--plan 可以与 --amount 一起给，
+但金额必须与包的面值相等；金额与币种最终由包决定，命令不采信这两个旗标。
+额度包必须在 plan add 时给了 --validity-days。商户包今天不售卖，两处都拒：下单时
+直接拒；下单之后包被改成商户包的，**首次发放**的通知会被拒，单子留在 created 等人工
+核对（面值、币种、售卖有效期、启停、归属被改也一样——通知会核对包还是不是下单时那个商品）。
+售卖有效期是按下单时记在单子上的天数算的：改长是平台亏、改短是用户亏，所以它单独
+挡一格。已经发放过的单子不受这条约束：重放照常返回「这次没新写」，不核对包，到期
+时刻也仍按下单时的天数算。
 
-create 要求用户已经有这个资产的钱包：缺那一行时与 wallet credit 同一档拒绝（退出 4）。
-回调入账也要求它存在——账本要同时更新钱包快照。
+--user 收 ID 或用户名。充值时 --asset 不给就取 settings.billing.default_asset；买额度包
+时**不读那个默认值**，币种由包决定，给了 --asset 只用于核对、与包不符就拒。--notify-url
+是通道把结果发回来的地址，本命令原样交给通道，不解释它。
+
+create 走充值时要用户已经有这个资产的钱包：缺那一行时与 wallet credit 同一档拒绝
+（退出 4）。买额度包不动钱包，所以那条路不要求开户。
 
 status 按单号读本地那一行，再问通道这张单子现在是什么状态。假通道没有自己的账本，
 它答的就是本地那一行，所以两栏今天恒等；接上真实通道之后才可能出现差异——通知丢了
@@ -147,6 +162,7 @@ func runPaymentCreate(args []string) error {
 	user := fs.String("user", "", "")
 	stringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
+	plan := fs.String("plan", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
 	autoRef := autoRefFlag(fs)
@@ -170,9 +186,17 @@ func runPaymentCreate(args []string) error {
 	if keyErr := checkOrderKey("--ref", orderNo); keyErr != nil {
 		return keyErr
 	}
-	amountValue, amountErr := parseCreditAmount(*amount)
-	if amountErr != nil {
-		return amountErr
+	planKey := strings.TrimSpace(*plan)
+	// --amount 与 --plan 至少给一个：买额度包时金额由包决定，可以不给；充值必须给。
+	// 两个都给时交给服务端核对——它才看得到包的面值，而这里不连库。
+	var amountValue money.Amount
+	if strings.TrimSpace(*amount) != "" {
+		var amountErr error
+		if amountValue, amountErr = parseCreditAmount(*amount); amountErr != nil {
+			return amountErr
+		}
+	} else if planKey == "" {
+		return usageErr(errors.New("缺少 --amount：不买额度包时必须给金额"))
 	}
 	explicitAsset, assetErr := parseAssetFlag(fs, *asset)
 	if assetErr != nil {
@@ -192,24 +216,40 @@ func runPaymentCreate(args []string) error {
 		if err != nil {
 			return fmt.Errorf("解析 --user 失败: %w", err)
 		}
-		assetValue, assetResolveErr := resolveWalletAsset(ctx, db, explicitAsset)
-		if assetResolveErr != nil {
-			return assetResolveErr
+		// 买额度包又不给 --asset 时把币种留给包：这里读默认资产会把一个
+		// 默认值塞进本该由商品决定的字段。AssetGiven 只反映「命令行上给了
+		// --asset」，与这里填没填默认值无关——买包时它必须是 false，服务层
+		// 才不会被一个默认值当成「调用方给的币种」拿去核对。
+		assetValue := explicitAsset
+		if assetValue == "" && planKey == "" {
+			resolved, assetResolveErr := resolveWalletAsset(ctx, db, explicitAsset)
+			if assetResolveErr != nil {
+				return assetResolveErr
+			}
+			assetValue = resolved
 		}
 
 		orders := payment.NewStore(db)
 		channel := fakechannel.New(fakechannel.WithLookup(paymentLookup(orders)))
-		service := payment.NewService(orders, store.New(db), map[string]payment.Channel{
+		service := payment.NewService(orders, store.New(db), plans.New(db), map[string]payment.Channel{
 			fakechannel.Name: channel,
 		})
 
+		subject := fmt.Sprintf("充值 %s %s", amountValue, assetValue)
+		if planKey != "" {
+			// 金额与币种要到服务端读过包才定下来，标题里只写商品。
+			subject = "购买额度包 " + planKey
+		}
 		req := payment.CreateOrderRequest{
-			OrderNo:   orderNo,
-			UserID:    owner.ID,
-			Asset:     assetValue,
-			Amount:    amountValue,
-			Subject:   fmt.Sprintf("充值 %s %s", amountValue, assetValue),
-			NotifyURL: strings.TrimSpace(*notifyURL),
+			OrderNo:     orderNo,
+			UserID:      owner.ID,
+			Asset:       assetValue,
+			Amount:      amountValue,
+			AmountGiven: strings.TrimSpace(*amount) != "",
+			AssetGiven:  explicitAsset != "",
+			Subject:     subject,
+			NotifyURL:   strings.TrimSpace(*notifyURL),
+			PlanKey:     planKey,
 		}
 		// 干跑不问通道（那会在通道侧建出一张真单子），只在正确的事务里把
 		// 本地那一行写一遍再回滚；两条路共用同一组前置校验与同一条落库 SQL。
@@ -345,6 +385,14 @@ func printPayment(w io.Writer, r paymentReceipt, dryRun bool) {
 	row("通道", r.Order.Gateway)
 	row("资产", string(r.Order.Asset))
 	row("金额", r.Order.Amount.String())
+	if r.Order.PlanKey != "" {
+		row("额度包", r.Order.PlanKey)
+		// 天数打**单子上记的**那个，不是包里现在的：包可能在下单之后被改过，
+		// 而用户买的是下单那一刻的商品。它也是这张单最终发多少天的依据。
+		if r.Order.ValidityDays != nil {
+			row("有效期", fmt.Sprintf("%d 天", *r.Order.ValidityDays))
+		}
+	}
 	row("状态", fmt.Sprintf("%s（%s）", r.Order.Status, r.Order.Status.Label()))
 	if r.ChannelStatus != nil {
 		row("通道状态", fmt.Sprintf("%s（%s）", *r.ChannelStatus, r.ChannelStatus.Label()))

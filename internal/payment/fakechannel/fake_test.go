@@ -273,7 +273,7 @@ func TestCallbackEndToEnd(t *testing.T) {
 
 	orders := payment.NewStore(db)
 	channel := New(WithLookup(orders.ChannelOrder))
-	service := payment.NewService(orders, ledgerstore.New(db), map[string]payment.Channel{Name: channel})
+	service := payment.NewService(orders, ledgerstore.New(db), nil, map[string]payment.Channel{Name: channel})
 	handler := payment.NewHandler(service, Name, "test-version")
 
 	if _, err := service.Create(ctx, Name, payment.CreateOrderRequest{
@@ -355,7 +355,7 @@ func TestCallbackRejectsTamperedNotification(t *testing.T) {
 
 	orders := payment.NewStore(db)
 	channel := New(WithLookup(orders.ChannelOrder))
-	service := payment.NewService(orders, ledgerstore.New(db), map[string]payment.Channel{Name: channel})
+	service := payment.NewService(orders, ledgerstore.New(db), nil, map[string]payment.Channel{Name: channel})
 	handler := payment.NewHandler(service, Name, "")
 
 	body := validBody()
@@ -389,7 +389,7 @@ func TestCallbackRejectsInvalidNotification(t *testing.T) {
 
 	orders := payment.NewStore(db)
 	channel := New(WithLookup(orders.ChannelOrder))
-	service := payment.NewService(orders, ledgerstore.New(db), map[string]payment.Channel{Name: channel})
+	service := payment.NewService(orders, ledgerstore.New(db), nil, map[string]payment.Channel{Name: channel})
 	handler := payment.NewHandler(service, Name, "")
 
 	body := validBody()

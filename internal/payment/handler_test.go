@@ -85,14 +85,22 @@ func TestCallbackErrorMapping(t *testing.T) {
 		name string
 		err  error
 		want int
+		// wantBody 非空时逐字钉住响应体里的那句文案；留空只要求有 "error" 字段。
+		wantBody string
 	}{
-		{"签名不对", ErrBadSignature, http.StatusUnauthorized},
-		{"通知不合法", fmt.Errorf("%w：缺少 sign", ErrInvalidNotification), http.StatusBadRequest},
-		{"没有这张支付单", fmt.Errorf("%w: ORD-X", ErrOrderNotFound), http.StatusNotFound},
-		{"单号内容不同", fmt.Errorf("%w: ORD-X", ErrOrderConflict), http.StatusConflict},
+		{"签名不对", ErrBadSignature, http.StatusUnauthorized, ""},
+		{"通知不合法", fmt.Errorf("%w：缺少 sign", ErrInvalidNotification), http.StatusBadRequest, ""},
+		{"没有这张支付单", fmt.Errorf("%w: ORD-X", ErrOrderNotFound), http.StatusNotFound, ""},
+		{"单号内容不同", fmt.Errorf("%w: ORD-X", ErrOrderConflict), http.StatusConflict, ""},
 		{"流水号已被另一张单占用", &GatewayTxnConflictError{
 			OrderNo: "ORD-B", Gateway: stubName, GatewayTxnID: "TRADE-X", OtherOrderNo: "ORD-A",
-		}, http.StatusConflict},
+		}, http.StatusConflict, ""},
+		// 没归类的那一类：包被改过、通知送晚都落在这里。它们要人工处理，所以是
+		// 500——4xx 会让通道当成已处理而停止重试。正文是给通道看的固定文案，
+		// 不带单号（单号只在服务端日志里），所以这里逐字钉住，不钉 err 的内容。
+		{"没归类的（包被改过、通知送晚）",
+			errors.New("支付单 ORD-X: 售卖有效期在售出之后改过"),
+			http.StatusInternalServerError, "failed to process payment notification"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,7 +112,10 @@ func TestCallbackErrorMapping(t *testing.T) {
 				t.Fatalf("状态码 = %d，期望 %d（响应体 %s）", rec.Code, tc.want, rec.Body.String())
 			}
 			if !strings.Contains(rec.Body.String(), `"error"`) {
-				t.Errorf("响应体不是错误体: %s", rec.Body.String())
+				t.Fatalf("响应体不是错误体: %s", rec.Body.String())
+			}
+			if tc.wantBody != "" && !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("响应体里没有那句通用文案 %q：%s", tc.wantBody, rec.Body.String())
 			}
 		})
 	}
@@ -136,7 +147,7 @@ func TestCallbackGatewayTxnConflictBody(t *testing.T) {
 
 // TestCallbackRejectsOversizedBody 验 64 KiB 的上限在解析之前生效。
 func TestCallbackRejectsOversizedBody(t *testing.T) {
-	service := NewService(NewStore(nil), nil, map[string]Channel{stubName: &stubChannel{}})
+	service := NewService(NewStore(nil), nil, nil, map[string]Channel{stubName: &stubChannel{}})
 	h := NewHandler(service, stubName, "")
 
 	body := strings.Repeat("a", maxCallbackBodyBytes+1)

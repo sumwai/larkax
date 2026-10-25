@@ -40,7 +40,7 @@ const walletShortUsage = `larkaxctl wallet 管理用户钱包。
   larkaxctl wallet payout settle --user <ID 或用户名> --amount <金额> --ref <结算单号> | --auto-ref --destination <JSON> --by <操作人> [--note <说明>] [--dry-run]
   larkaxctl wallet payout approve|reject --id <提现单 ID> --by <操作人> [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道> [--gateway-ref <凭据号>]
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref [--asset <资产>] [--dry-run]
+  larkaxctl wallet payment create --user <ID 或用户名> (--amount <金额> | --plan <额度包>) --ref <订单号> | --auto-ref [--asset <资产>] [--dry-run]
   larkaxctl wallet payment status --order <订单号>
 
 钱包的入账、调账、退款与单用户查询在 larkaxctl user wallet（credit / adjust / refund / show）；
@@ -68,7 +68,8 @@ const walletUsage = `larkaxctl wallet 管理用户钱包。
                                          [--note <说明>]
   larkaxctl wallet payout paid --id <提现单 ID> --gateway <通道>
                                [--gateway-ref <凭据号>]
-  larkaxctl wallet payment create --user <ID 或用户名> --amount <金额> --ref <订单号> | --auto-ref
+  larkaxctl wallet payment create --user <ID 或用户名> --ref <订单号> | --auto-ref
+                                  (--amount <金额> | --plan <额度包>)
                                   [--asset <资产>] [--notify-url <回调地址>]
                                   [--dry-run]
   larkaxctl wallet payment status --order <订单号>
@@ -258,15 +259,17 @@ paid 是唯一一个把钱付出去的入口，**它只放行已批准的单子*
 payment 是「钱从支付通道进来」的那条路：create 在通道侧建单并落一行 payment_orders
 （状态 created），**不入账**；通道把「已支付」的通知发到回调入口，校验签名、按单号幂等
 判断之后才写一组 topup 分录，分录与单据状态在同一个事务里落库。--ref 是商户单号，
-必填且是幂等键；--amount 必填且为正。
+必填且是幂等键。--amount 是充值金额，必填且为正；换成 --plan <额度包> 则表示买一个
+额度包：钱不进用户钱包，通知到达后发放一条订阅并写一组 plan_purchase 分录，金额与
+币种由包决定。
 status 读本地那一行，再问通道它现在是什么状态；假通道没有自己的账本，它答的就是本地
 这一行，所以今天两栏恒等，接上真实通道之后才可能出现差异（通知丢了时本地还停在
 created）。这条通道**默认关闭**：settings.payment.fake_enabled 为 false 时 create 与
 status 都拒绝，回调入口也不挂（那条路径回 501）。细节与那条配置的说明见
 wallet payment help。
 
-钱包必须已经存在：先 wallet create，再 credit / adjust / refund / payment create。
-用户或钱包不存在都退出 4。
+充值要求钱包必须已经存在：先 wallet create，再 credit / adjust / refund / payment create
+（买额度包不动钱包，那条路不要求开户）。用户或钱包不存在都退出 4。
 
 资产默认取 settings 的 billing.default_asset（迁移里的默认值是 CNY）。
 --asset 可以显式指定，但当前只有 CNY 一种受支持的资产，写别的会被拒绝。

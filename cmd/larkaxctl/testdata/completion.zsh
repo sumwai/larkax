@@ -892,6 +892,12 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"plan add|--validity-days")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"plan disable|--key")
 			case "$cur" in
 			-*) ;;
@@ -2134,6 +2140,12 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"wallet payment create|--plan")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"wallet payment create|--ref")
 			case "$cur" in
 			-*) ;;
@@ -2364,7 +2376,7 @@ _larkaxctl() {
 			"model update") compadd -- --audio --batch --cache --context-limit --display --endpoints --env-file --family --format --input-limit --input-modalities --knowledge-cutoff --model --output-limit --output-modalities --quiet --reasoning --release-date --tools --vendor --verbose --vision ;;
 			"partition check") compadd -- --env-file --format --months --quiet --verbose ;;
 			"partition ensure") compadd -- --env-file --format --months --quiet --verbose ;;
-			"plan add") compadd -- --asset --description --env-file --face-value --format --key --models --name --quiet --quota --unit --verbose ;;
+			"plan add") compadd -- --asset --description --env-file --face-value --format --key --models --name --quiet --quota --unit --validity-days --verbose ;;
 			"plan disable") compadd -- --env-file --format --key --quiet --verbose ;;
 			"plan enable") compadd -- --env-file --format --key --quiet --verbose ;;
 			"plan get") compadd -- --env-file --format --key --quiet --verbose ;;
@@ -2430,7 +2442,7 @@ _larkaxctl() {
 			"wallet create") compadd -- --asset --env-file --format --quiet --user --verbose ;;
 			"wallet credit") compadd -- --amount --asset --auto-ref --dry-run --env-file --format --gateway --quiet --ref --user --verbose ;;
 			"wallet list") compadd -- --env-file --format --quiet --user --verbose ;;
-			"wallet payment create") compadd -- --amount --asset --auto-ref --dry-run --env-file --format --notify-url --quiet --ref --user --verbose ;;
+			"wallet payment create") compadd -- --amount --asset --auto-ref --dry-run --env-file --format --notify-url --plan --quiet --ref --user --verbose ;;
 			"wallet payment status") compadd -- --env-file --format --order --quiet --verbose ;;
 			"wallet payout approve") compadd -- --by --env-file --format --id --note --quiet --verbose ;;
 			"wallet payout paid") compadd -- --env-file --format --gateway --gateway-ref --id --quiet --verbose ;;

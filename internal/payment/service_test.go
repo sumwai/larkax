@@ -16,6 +16,7 @@ import (
 	"github.com/sumwai/larkax/internal/ledger"
 	ledgerstore "github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/plans"
 	"github.com/sumwai/larkax/internal/testdb"
 )
 
@@ -72,7 +73,7 @@ func newHarnessWithChannel(t *testing.T, channel Channel) *harness {
 	orders := NewStore(db)
 	return &harness{
 		db:      db,
-		service: NewService(orders, ledgerstore.New(db), map[string]Channel{stubName: channel}),
+		service: NewService(orders, ledgerstore.New(db), plans.New(db), map[string]Channel{stubName: channel}),
 		store:   orders,
 	}
 }
