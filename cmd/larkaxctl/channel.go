@@ -34,7 +34,7 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
-  larkaxctl channel update --id <渠道 ID> [字段与 add 相同，另可换凭证]
+  larkaxctl channel update --id <渠道 ID> [字段同 add，另可换凭证；归属只 add 时定，没有修改入口]
   larkaxctl channel enable|disable|delete|restore --id <渠道 ID>
   larkaxctl channel sync-models|upstream-models --id <渠道 ID>
   larkaxctl channel adapters
@@ -182,6 +182,12 @@ update 的 --credential-* 改的是这条渠道**池里 id 最小的主账号**�
 兼容捷径，与选路无关（选路按权重在池子里轮询，见 larkaxctl help account）。
 账号是凭证的单位，同一账号若还挂在别的渠道上，改一次那些渠道一起生效
 （见 larkaxctl help account）。零账号的渠道走这条路会补一个匿名账号。
+
+**归属在 add 时用 --user 写入，之后没有修改入口**：update 不收 --user。今天要改
+只有两条路：delete 之后用 add --user 重建（新渠道是新 id，凭证挂载、逐协议地址、
+健康汇总与 channel 作用域的计价规则都留在旧行；restore 救得回旧行，救不回归属），
+或者手工改库（商家能看见哪些渠道与模型、商家作用域规则的命中、分账对象都会静默
+变化）。完整代价见 docs/cli-reference.md 的 channel 一节。
 
 restore 是 delete 的逆操作：清掉 deleted_at、把状态置回 enabled，并把这条渠道的
 健康结论置回 unknown——它上一次的结论是**软删之前**的，不能直接沿用，恢复之后
