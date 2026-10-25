@@ -172,13 +172,16 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 	}
 
 	var (
-		chanType    string
-		storedURL   string
-		envelope    []byte
-		ownerUserID sql.NullInt64
+		chanType      string
+		storedURL     string
+		protocolsJSON string
+		envelope      []byte
+		ownerUserID   sql.NullInt64
 	)
 	err := p.db.QueryRowContext(ctx, `
-		SELECT c.type, c.base_url, a.credential_enc, c.owner_user_id
+		SELECT c.type, c.base_url,
+		       `+protocolsColumnSQL+`,
+		       a.credential_enc, c.owner_user_id
 		FROM channels c
 		LEFT JOIN LATERAL (
 		      SELECT ac.credential_enc
@@ -189,7 +192,7 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 		       LIMIT 1
 		     ) a ON true
 		WHERE c.id = $1 AND c.`+channelAlive, req.ChannelID).
-		Scan(&chanType, &storedURL, &envelope, &ownerUserID)
+		Scan(&chanType, &storedURL, &protocolsJSON, &envelope, &ownerUserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return probeTarget{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, req.ChannelID)
 	}
@@ -204,7 +207,17 @@ func (p *ModelProbe) target(ctx context.Context, req ProbeRequest) (probeTarget,
 		return probeTarget{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, req.ChannelID)
 	}
 
-	out := probeTarget{channelType: chanType, baseURL: storedURL}
+	// 探测打的是这条渠道**主协议**的地址：渠道 id 这条路今天不问「探哪个
+	// 协议」（见 ProbeRequest 的注释），所以取 type 指向的那一个。判据与
+	// 执行器、额度探测共用 channel.ProtocolBaseURL。
+	_, protocolBaseURLs, err := decodeProtocols(req.ChannelID, protocolsJSON)
+	if err != nil {
+		return probeTarget{}, err
+	}
+	out := probeTarget{
+		channelType: chanType,
+		baseURL:     channel.ProtocolBaseURL(channel.Protocol(chanType), protocolBaseURLs, storedURL),
+	}
 	if req.BaseURL != "" {
 		baseURL, err := NormalizeBaseURL(req.BaseURL)
 		if err != nil {

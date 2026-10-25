@@ -237,8 +237,8 @@ func TestChannelProbeUnsupportedUpstreamIsNotAnError(t *testing.T) {
 	if stdout != want {
 		t.Errorf("stdout = %q，期望只有那一句 %q（不许打空清单）", stdout, want)
 	}
-	if stderr != "" {
-		t.Errorf("stderr 上有输出：%q", stderr)
+	if stderr != "探测 systemone 协议，地址 https://api.example.com/v1。\n" {
+		t.Errorf("stderr = %q，期望只有这次探测的协议与地址", stderr)
 	}
 }
 
