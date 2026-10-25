@@ -2303,7 +2303,7 @@ _larkaxctl() {
 		"alias") compadd -- create list update delete resolve ;;
 		"apikey") compadd -- create update get list ;;
 		"calendar") compadd -- import ;;
-		"channel") compadd -- create list get health update enable disable delete restore sync-models upstream-models adapters probe map ;;
+		"channel") compadd -- create list get health update enable disable delete restore sync-models upstream-models adapters probe map unmap ;;
 		"channel map") compadd -- add list remove ;;
 		"consent") compadd -- grant list revoke ;;
 		"idempotency") compadd -- cleanup ;;

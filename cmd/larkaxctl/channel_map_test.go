@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -316,28 +317,57 @@ func rowExists(t *testing.T, db *sql.DB, id int64) bool {
 func TestChannelMapRejectsBadFlags(t *testing.T) {
 	cases := []struct {
 		name string
+		// run 为空时走 channel map；unmap 是 channel 上的另一条动词，单独给。
+		run  func([]string) error
 		args []string
 		want string
 	}{
-		{"add 没有参数", []string{"add"}, "缺少 <渠道>"},
-		{"add 少一个位置参数", []string{"add", "3", "m1"}, "缺少 <上游模型名>"},
-		{"add 的 --all-channels 多给了一个渠道", []string{"add", "--all-channels", "3", "m1", "u1"},
-			"带 --all-channels 时只给两个位置参数"},
-		{"add 的渠道不是正整数", []string{"add", "0", "m1", "u1"}, "<渠道> 必须是正整数"},
-		{"add 的 --all-channels 带了取值", []string{"add", "--all-channels=false", "m1", "u1"},
+		{"map 没有参数", nil, nil, "需要渠道"},
+		{"动词写法缺规范名", nil, []string{"3"}, "缺少 <规范名>"},
+		{"动词写法渠道不是正整数", nil, []string{"0", "m1", "u1"}, "无效：渠道 ID 从 1 开始"},
+		{"动词写法多出参数", nil, []string{"3", "m1", "u1", "extra"}, "map 不接受多余的参数"},
+		// 保留词只判第一个位置参数：这里的 list 是规范名，走的是动词那条路。
+		{"第二个位置参数的 list 不是子命令", nil, []string{"3", "list", "u1", "extra"},
+			"map 不接受多余的参数"},
+		// 平台级的自映射不改变任何翻译结果，所以这一档要上游名，不做直通缺省。
+		{"动词写法 --all 缺上游名", nil, []string{"--all", "m1"}, "要写 <上游模型名>"},
+		{"add 没有参数", nil, []string{"add"}, "缺少 <渠道>"},
+		{"add 缺规范名", nil, []string{"add", "3"}, "缺少 <规范名>"},
+		{"add 的 --all 多给了一个渠道", nil, []string{"add", "--all", "3", "m1", "u1"},
+			"只给两个位置参数"},
+		{"add 的 --all-channels 多给了一个渠道", nil, []string{"add", "--all-channels", "3", "m1", "u1"},
+			"只给两个位置参数"},
+		// 兼容别名与动词同一条解析，所以这一档同样要上游名。
+		{"add 的 --all 缺上游名", nil, []string{"add", "--all", "m1"}, "要写 <上游模型名>"},
+		{"add 的渠道不是正整数", nil, []string{"add", "0", "m1", "u1"}, "无效：渠道 ID 从 1 开始"},
+		{"add 的 --all 带了取值", nil, []string{"add", "--all=false", "m1", "u1"}, "不带取值"},
+		{"add 的 --all-channels 带了取值", nil, []string{"add", "--all-channels=false", "m1", "u1"},
 			"不带取值"},
-		{"list 同时给了渠道与 --all-channels", []string{"list", "3", "--all-channels"}, "只能给一个"},
-		{"list 同时给了 --model 与渠道", []string{"list", "3", "--model", "m1"}, "只能给一个"},
-		{"list 同时给了 --model 与 --all-channels", []string{"list", "--model", "m1", "--all-channels"},
-			"只能给一个"},
-		{"remove 少一个位置参数", []string{"remove", "3"}, "缺少 <规范名>"},
-		{"remove 的 --all-channels 少规范名", []string{"remove", "--all-channels"}, "缺少 <规范名>"},
-		{"remove 多出参数", []string{"remove", "3", "m1", "extra"}, "不接受多余的参数"},
+		{"list 同时给了渠道与 --all", nil, []string{"list", "3", "--all"}, "只能给一个"},
+		{"list 同时给了渠道与 --all-channels", nil, []string{"list", "3", "--all-channels"}, "只能给一个"},
+		{"list 同时给了 --model 与渠道", nil, []string{"list", "3", "--model", "m1"}, "只能给一个"},
+		{"list 同时给了 --model 与 --all", nil, []string{"list", "--model", "m1", "--all"}, "只能给一个"},
+		{"remove 缺规范名", nil, []string{"remove", "3"}, "缺少 <规范名>"},
+		{"remove 的 --all 缺规范名", nil, []string{"remove", "--all"}, "缺少 <规范名>"},
+		{"remove 多出参数", nil, []string{"remove", "3", "m1", "extra"}, "不接受多余的参数"},
+		{"unmap 缺渠道", runChannelUnmap, nil, "缺少 <渠道>"},
+		{"unmap 缺规范名", runChannelUnmap, []string{"3"}, "缺少 <规范名>"},
+		{"unmap 多出参数", runChannelUnmap, []string{"3", "m1", "extra"}, "unmap 不接受多余的参数"},
+		// 同理：unmap 第二个位置参数上的 list 是规范名。
+		{"unmap 第二个位置参数的 list 不是子命令", runChannelUnmap, []string{"3", "list", "extra"},
+			"unmap 不接受多余的参数"},
+		{"unmap 与 --all 同时给了渠道", runChannelUnmap, []string{"--all", "m1", "c1"},
+			"unmap 不接受多余的参数"},
+		{"unmap 的渠道不是正整数", runChannelUnmap, []string{"0", "m1"}, "无效：渠道 ID 从 1 开始"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runCaptured(t, func() error { return runChannelMap(tc.args) })
+			run := tc.run
+			if run == nil {
+				run = runChannelMap
+			}
+			err := runCaptured(t, func() error { return run(tc.args) })
 			if err == nil {
 				t.Fatalf("期望报错，却通过了")
 			}
@@ -405,7 +435,7 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 
 	// resolve 留在原处。配置去向那句只在 -v 下打：它在每次成功运行里都会出现，
 	// 按 streams_test.go 的判据不属于默认输出（那种话属于 -v 或 --help）。
-	const wantPointer = "出站映射的配置命令在 larkaxctl channel map（add / list / remove）。"
+	const wantPointer = "出站映射的配置命令在 larkaxctl channel map（map / unmap / list）。"
 
 	resolve := func(t *testing.T) (string, string) {
 		t.Helper()
@@ -488,7 +518,7 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 			t.Fatalf("alias delete 失败: %v", err)
 		}
 	})
-	if !strings.Contains(deleteErr, "larkaxctl channel map") {
+	if !strings.Contains(deleteErr, "larkaxctl channel unmap") {
 		t.Errorf("alias delete 的 stderr 没有点名新命令：%q", deleteErr)
 	}
 
@@ -506,7 +536,7 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 		t.Errorf("删除不存在的别名的退出码应当是 %d，得到 %d（%v）",
 			exitConflict, got, missingDeleteErr)
 	}
-	if !strings.Contains(missingStderr, "larkaxctl channel map") {
+	if !strings.Contains(missingStderr, "larkaxctl channel unmap") {
 		t.Errorf("失败路径没有点名新命令：%q", missingStderr)
 	}
 
@@ -554,5 +584,331 @@ func TestChannelMapAddRejectsControlChars(t *testing.T) {
 	}
 	if got := exitCode(err); got != exitUsage {
 		t.Errorf("退出码应当是 %d，得到 %d（%v）", exitUsage, got, err)
+	}
+}
+
+// ── 映射即上架：渠道级 map 与渠道白名单落在同一个事务里 ──────────────────
+
+// createMapChannel 建一条映射用例用的渠道，返回它的 ID。
+//
+// 名字由调用方给：按名字解析的用例要能自己拼一个已知的名字。models 是建渠道时
+// 的白名单——用例要分清「本来就有的」与「map 加进去的」，起点就不能是空的。
+func createMapChannel(t *testing.T, name string, models ...string) int64 {
+	t.Helper()
+
+	withStdin(t, testSecret)
+	out, _ := captureStreams(t, func() {
+		if err := runChannelCreate([]string{
+			"--name", name, "--type", testChanType,
+			"--base-url", testBaseURL, "--models", strings.Join(models, ","),
+			"--credential-stdin",
+		}); err != nil {
+			t.Fatalf("channel create 失败: %v", err)
+		}
+	})
+	return idFromStdout(t, "渠道", out)
+}
+
+// createMapModel 把规范名建进模型目录。
+//
+// model_aliases.canonical_name 有指向 model_catalog 的外键：规范名不在目录里时
+// 建映射会被「先把模型建进 model_catalog」拒掉。渠道白名单那一步也要读目录。
+func createMapModel(t *testing.T, canonical string) {
+	t.Helper()
+
+	if err := runCaptured(t, func() error {
+		return runModelCreate([]string{"--model", canonical, "--display", "展示名"})
+	}); err != nil {
+		t.Fatalf("model create %q 失败: %v", canonical, err)
+	}
+}
+
+// mapByVerb 走动词写法写一条渠道级映射，返回新映射的 ID。
+func mapByVerb(t *testing.T, channelID int64, canonical string, upstream ...string) int64 {
+	t.Helper()
+
+	args := append([]string{strconv.FormatInt(channelID, 10), canonical}, upstream...)
+	var stdout string
+	var err error
+	stdout, _ = captureStreams(t, func() { err = runChannelMap(args) })
+	if err != nil {
+		t.Fatalf("channel map %v 失败: %v", args, err)
+	}
+	return idFromStdout(t, "新映射", stdout)
+}
+
+// TestChannelMapOnboardsIntoWhitelist 钉住「映射即上架」：渠道白名单里原本没有
+// 这个规范名，map 之后它在里面，且映射行也落了库。
+func TestChannelMapOnboardsIntoWhitelist(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	seed := uniqueName("seed-model")
+	channelID := createMapChannel(t, uniqueName("map-channel"), seed)
+	canonical := uniqueName("map-canonical")
+	createMapModel(t, canonical)
+	upstream := uniqueName("upstream")
+
+	id := mapByVerb(t, channelID, canonical, upstream)
+
+	// 逐字断言整个白名单：种子在前、map 加进去的在后，不多不少。
+	wantModels := []string{seed, canonical}
+	if got := channelModels(t, db, channelID); !slices.Equal(got, wantModels) {
+		t.Fatalf("map 之后渠道 %d 的 models = %v，期望 %v", channelID, got, wantModels)
+	}
+	row := readAliasConfigRow(t, db, id)
+	if !row.ChannelID.Valid || row.ChannelID.Int64 != channelID {
+		t.Fatalf("映射 %d 的渠道 = %v，期望 %d", id, row.ChannelID, channelID)
+	}
+	if row.CanonicalName != canonical || row.UpstreamModel != upstream {
+		t.Fatalf("映射 %d = %+v，期望 %s ← %s", id, row, canonical, upstream)
+	}
+}
+
+// TestChannelMapWhitelistIsIdempotent 钉住幂等的那一半：白名单里已经有这个规范名
+// 时不重复写，命令照样成功，映射照常建立。
+func TestChannelMapWhitelistIsIdempotent(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	canonical := uniqueName("map-canonical")
+	createMapModel(t, canonical)
+	channelID := createMapChannel(t, uniqueName("map-channel"), canonical)
+
+	id := mapByVerb(t, channelID, canonical, uniqueName("upstream"))
+
+	if got := channelModels(t, db, channelID); !slices.Equal(got, []string{canonical}) {
+		t.Fatalf("重复的规范名被写进了白名单：%v", got)
+	}
+	if !rowExists(t, db, id) {
+		t.Fatalf("白名单已有这个名字时映射 %d 没落库", id)
+	}
+}
+
+// TestChannelUnmapKeepsWhitelist 钉住「unmap 只删映射，不删白名单条目」。
+func TestChannelUnmapKeepsWhitelist(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	seed := uniqueName("seed-model")
+	channelID := createMapChannel(t, uniqueName("map-channel"), seed)
+	canonical := uniqueName("map-canonical")
+	createMapModel(t, canonical)
+	id := mapByVerb(t, channelID, canonical, uniqueName("upstream"))
+
+	if err := runCaptured(t, func() error {
+		return runChannelUnmap([]string{strconv.FormatInt(channelID, 10), canonical})
+	}); err != nil {
+		t.Fatalf("channel unmap 失败: %v", err)
+	}
+
+	if rowExists(t, db, id) {
+		t.Fatalf("unmap 之后映射 %d 还在库里", id)
+	}
+	wantModels := []string{seed, canonical}
+	if got := channelModels(t, db, channelID); !slices.Equal(got, wantModels) {
+		t.Fatalf("unmap 改动了白名单：%v，期望 %v", got, wantModels)
+	}
+}
+
+// TestChannelMapDefaultsUpstreamToCanonical 钉住「上游名缺省 = 规范名」，并断言
+// 直通形态与显式写一个同名上游名落库的行逐字相同。
+func TestChannelMapDefaultsUpstreamToCanonical(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	channelID := createMapChannel(t, uniqueName("map-channel"), uniqueName("seed-model"))
+	canonical := uniqueName("map-canonical")
+	createMapModel(t, canonical)
+
+	implicitID := mapByVerb(t, channelID, canonical)
+	implicit := readAliasConfigRow(t, db, implicitID)
+	if implicit.UpstreamModel != canonical {
+		t.Fatalf("省略上游名时落库的上游名是 %q，期望规范名 %q", implicit.UpstreamModel, canonical)
+	}
+
+	// 删掉再显式写同一个名字，两行除自增 id 与写入时刻之外的每一列都要相同。
+	if err := runCaptured(t, func() error {
+		return runChannelUnmap([]string{strconv.FormatInt(channelID, 10), canonical})
+	}); err != nil {
+		t.Fatalf("channel unmap 失败: %v", err)
+	}
+	explicit := readAliasConfigRow(t, db, mapByVerb(t, channelID, canonical, canonical))
+
+	if implicit != explicit {
+		t.Fatalf("直通形态与显式同名的行不同：\n直通 %+v\n显式 %+v", implicit, explicit)
+	}
+}
+
+// TestChannelMapAllLeavesWhitelist 钉住「全局映射只做翻译，不进任何渠道白名单」。
+func TestChannelMapAllLeavesWhitelist(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	seed := uniqueName("seed-model")
+	channelID := createMapChannel(t, uniqueName("map-channel"), seed)
+	canonical := uniqueName("map-canonical")
+	createMapModel(t, canonical)
+	upstream := uniqueName("upstream")
+
+	var stdout string
+	var err error
+	stdout, _ = captureStreams(t, func() {
+		err = runChannelMap([]string{"--all", canonical, upstream})
+	})
+	if err != nil {
+		t.Fatalf("channel map --all 失败: %v", err)
+	}
+	id := idFromStdout(t, "平台级映射", stdout)
+
+	if got := channelModels(t, db, channelID); !slices.Equal(got, []string{seed}) {
+		t.Fatalf("全局映射改动了渠道白名单：%v", got)
+	}
+	row := readAliasConfigRow(t, db, id)
+	if row.ChannelID.Valid {
+		t.Fatalf("全局映射的 channel_id = %v，期望 NULL", row.ChannelID)
+	}
+	if row.CanonicalName != canonical || row.UpstreamModel != upstream {
+		t.Fatalf("全局映射 %d = %+v，期望 %s ← %s", id, row, canonical, upstream)
+	}
+}
+
+// TestChannelMapRollsBackWhenWhitelistRejected 让白名单写入被端点评据拒掉，断言
+// 映射表里也没有这一行——两条写入在同一个事务里，失败是整笔回滚。
+//
+// 判据落在库上而不是退出码上：把事务拆成两笔独立写入时，命令照样失败（白名单
+// 那一步照样报错），只有查表才看得见映射已经先落了库。
+func TestChannelMapRollsBackWhenWhitelistRejected(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	// 目录里声明只支持 /v1/responses，而这条渠道是 openai（打 /v1/chat/completions）。
+	canonical := uniqueName("map-wrong-endpoint")
+	if err := runCaptured(t, func() error {
+		return runModelCreate([]string{
+			"--model", canonical, "--display", "展示名", "--endpoints", "/v1/responses",
+		})
+	}); err != nil {
+		t.Fatalf("model create 失败: %v", err)
+	}
+
+	seed := uniqueName("seed-model")
+	channelID := createMapChannel(t, uniqueName("map-channel"), seed)
+
+	var mapErr error
+	_, _ = captureStreams(t, func() {
+		mapErr = runChannelMap([]string{strconv.FormatInt(channelID, 10), canonical, uniqueName("upstream")})
+	})
+	if mapErr == nil {
+		t.Fatal("端点对不上的模型被写进了白名单，命令却成功了")
+	}
+	// 先确认失败发生在端点评据上：换个原因失败，这条用例证明的就不是回滚。
+	if !strings.Contains(mapErr.Error(), "在目录里声明的端点是") {
+		t.Fatalf("失败原因不是端点评据拒绝的：%v", mapErr)
+	}
+
+	aliases, aliasErr := catalog.New(db).Aliases(context.Background(), channelID)
+	if aliasErr != nil {
+		t.Fatalf("读映射失败: %v", aliasErr)
+	}
+	if len(aliases) != 0 {
+		t.Fatalf("白名单写入失败后映射还在库里：%+v", aliases)
+	}
+	if got := channelModels(t, db, channelID); !slices.Equal(got, []string{seed}) {
+		t.Fatalf("失败的 map 改动了白名单：%v", got)
+	}
+}
+
+// TestChannelMapResolvesChannelByName 钉住渠道操作数认名字，以及三种落空：
+// 没有这条、只有已软删的一条、同名多条（报错里带可执行候选）。
+func TestChannelMapResolvesChannelByName(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+
+	name := uniqueName("map-named")
+	channelID := createMapChannel(t, name, uniqueName("seed-model"))
+	canonical := uniqueName("map-canonical")
+	createMapModel(t, canonical)
+	upstream := uniqueName("upstream")
+
+	// 正面：按名字写，映射挂到那条渠道上，白名单也跟着写进去。
+	var stdout string
+	var err error
+	stdout, _ = captureStreams(t, func() {
+		err = runChannelMap([]string{name, canonical, upstream})
+	})
+	if err != nil {
+		t.Fatalf("按名字 map 失败: %v", err)
+	}
+	id := idFromStdout(t, "新映射", stdout)
+	row := readAliasConfigRow(t, db, id)
+	if !row.ChannelID.Valid || row.ChannelID.Int64 != channelID {
+		t.Fatalf("按名字 map 落到了渠道 %v，期望 %d", row.ChannelID, channelID)
+	}
+	if got := channelModels(t, db, channelID); !slices.Contains(got, canonical) {
+		t.Fatalf("按名字 map 没有把规范名写进白名单：%v", got)
+	}
+
+	// list 认名字：同一份解析，列出来的就是这条渠道的映射。
+	listOut, _ := captureStreams(t, func() {
+		err = runChannelMap([]string{"list", name})
+	})
+	if err != nil {
+		t.Fatalf("按名字 list 失败: %v", err)
+	}
+	if !strings.Contains(listOut, upstream) {
+		t.Fatalf("按名字 list 的清单里没有 %q：\n%s", upstream, listOut)
+	}
+
+	// 落空一：没有这个名字。
+	missing := uniqueName("no-such-channel")
+	missingErr := runCaptured(t, func() error {
+		return runChannelMap([]string{missing, canonical, upstream})
+	})
+	if missingErr == nil {
+		t.Fatal("不存在的渠道名应当被拒")
+	}
+	if !strings.Contains(missingErr.Error(), "没有叫") ||
+		!strings.Contains(missingErr.Error(), "未删除渠道") {
+		t.Fatalf("找不到渠道时的报错里没有点名：%v", missingErr)
+	}
+
+	// 落空二：只命中一条已软删的渠道——说「没有未删除的这条」，不说「有多条」。
+	deletedName := uniqueName("map-deleted")
+	deletedID := createMapChannel(t, deletedName, uniqueName("seed-model"))
+	if err := runCaptured(t, func() error {
+		return runChannelDelete([]string{"--id", strconv.FormatInt(deletedID, 10)})
+	}); err != nil {
+		t.Fatalf("软删渠道失败: %v", err)
+	}
+	deletedErr := runCaptured(t, func() error {
+		return runChannelMap([]string{deletedName, canonical, upstream})
+	})
+	if deletedErr == nil {
+		t.Fatal("已软删渠道的名字应当被拒")
+	}
+	if !strings.Contains(deletedErr.Error(), "没有叫") ||
+		strings.Contains(deletedErr.Error(), "条渠道叫") {
+		t.Fatalf("只命中已删渠道时该说「没有未删除的这条」，得到：%v", deletedErr)
+	}
+
+	// 落空三：同名两条。判据是报错里两个候选都带 id，人能直接抄回去用。
+	dupName := uniqueName("map-dup")
+	firstID := createMapChannel(t, dupName, uniqueName("seed-model"))
+	secondID := createMapChannel(t, dupName, uniqueName("seed-model"))
+	dupErr := runCaptured(t, func() error {
+		return runChannelMap([]string{dupName, canonical, upstream})
+	})
+	if dupErr == nil {
+		t.Fatal("同名渠道应当要求改用 ID")
+	}
+	for _, want := range []string{
+		"有 2 条渠道叫",
+		"id=" + strconv.FormatInt(firstID, 10),
+		"id=" + strconv.FormatInt(secondID, 10),
+	} {
+		if !strings.Contains(dupErr.Error(), want) {
+			t.Fatalf("同名报错里没有 %q：%v", want, dupErr)
+		}
 	}
 }

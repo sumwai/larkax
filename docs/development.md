@@ -676,7 +676,7 @@ goose 先按版本顺序补应用这些编号更小的迁移，再应用所有�
 设置任何环境变量。手工填值时把整段用单引号括起来。
 
 **先问你的上游它有哪些模型 id。** 渠道的 `--models` 与
-`channel map add` 的上游模型名填的是
+`channel map` 的上游模型名填的是
 **上游自己的 id**，不是它宣传页上的名字——这两者经常不一样：
 
 ```sh
@@ -833,13 +833,14 @@ stdout 只有新渠道的 ID，其余信息走 stderr。
 **三、配出站映射：这家上游对同一个模型叫什么名字。**
 
 ```sh
-go run ./cmd/larkaxctl channel map add --all-channels claude-x \
+go run ./cmd/larkaxctl channel map --all claude-x \
   claude-3-5-sonnet-latest
 ```
 
-`--all-channels` 表示平台级映射，对所有渠道生效；换成渠道 ID
-（`channel map add <渠道> claude-x claude-3-5-sonnet-latest`）则只对那个渠道生效，
-并盖过平台级那条。同一个范围里一个规范名只能有一个上游名。旧写法
+`--all`（全写 `--all-channels`）表示平台级映射，对所有渠道生效；换成渠道 ID
+（`channel map <渠道> claude-x claude-3-5-sonnet-latest`）则只对那个渠道生效，
+并盖过平台级那条；它还会把这个规范名写进那条渠道的 `models` 白名单（映射即上架），
+平台级映射不碰白名单。同一个范围里一个规范名只能有一个上游名。旧写法
 `alias create --model … --upstream …` 仍可用，会在 stderr 上指向这里，
 保留一个发布周期。
 
@@ -866,7 +867,7 @@ go run ./cmd/larkaxctl channel map add --all-channels claude-x \
 上游的那份请求**，用来给不传某些参数的调用方一个默认值，或者把某个上限钉住：
 
 ```sh
-go run ./cmd/larkaxctl channel map add --all-channels claude-x \
+go run ./cmd/larkaxctl channel map --all claude-x \
   claude-3-5-sonnet-latest \
   --overrides '{"temperature": 0.2, "max_tokens": 4096}'
 ```
@@ -1352,7 +1353,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 
 | 子命令 | 做什么 |
 |---|---|
-| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（`add` / `list` / `remove`） |
+| `channel` | 上游渠道：`create` / `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（渠道级同时写渠道白名单）/ `unmap` / `map list`（`add` / `remove` 是前两个的兼容别名） |
 | `account` | 上游凭证账号（一条渠道可挂零个或多个，凭证存在账号上）：`add`（新建；`--channel` 一步挂到那条渠道的池子里）/ `list`（含它挂在哪些渠道上）/ `update`（换 key，同池渠道一起生效） |
 | `model` | 模型目录：`add` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |

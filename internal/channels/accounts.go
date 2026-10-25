@@ -268,6 +268,14 @@ func (a *Admin) UpdateAccount(ctx context.Context, name, plaintext string) (Acco
 // 只认数字与**未软删渠道的名字**：软删的渠道不能再当写入目标，把它解析
 // 出来只会让后面的外键或选路给出更难懂的错误。同名渠道多于一条时报错并
 // 要求改用 id——挑一条最老的会把请求悄悄挂到一个调用方没说的地方。
+//
+// 名字这一档的候选除了 id 还带上类型与地址：同一次按名字查出来的候选，名字
+// 必然全都一样，只列名字等于没列；类型与地址才是能让人认出手里那条渠道的两个
+// 属性。软删的渠道不进候选，也不进「有多条」那一档——只命中已删渠道时说的是
+// 「没有未删除的这条」，而不是「有多条」。
+//
+// 返回的 id 可能指向一行不存在的渠道（数字那一档不查库）：调用方紧接着的读取
+// 或写入会撞外键/找不到，那才是它自己的判据。
 func (a *Admin) ChannelIDByRef(ctx context.Context, ref string) (int64, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -281,30 +289,35 @@ func (a *Admin) ChannelIDByRef(ctx context.Context, ref string) (int64, error) {
 	}
 
 	rows, err := a.handle().QueryContext(ctx,
-		`SELECT id FROM channels WHERE name = $1 AND `+channelAlive+` ORDER BY id`, ref)
+		`SELECT id, type, base_url FROM channels WHERE name = $1 AND `+channelAlive+` ORDER BY id`, ref)
 	if err != nil {
 		return 0, fmt.Errorf("按名字查渠道失败: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var ids []int64
+	ids := make([]int64, 0, 1)
+	lines := make([]string, 0, 1)
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var channelType, baseURL string
+		if err := rows.Scan(&id, &channelType, &baseURL); err != nil {
 			return 0, fmt.Errorf("读取渠道 id 失败: %w", err)
 		}
 		ids = append(ids, id)
+		lines = append(lines, fmt.Sprintf("  id=%d 类型=%s 地址=%s", id, channelType, baseURL))
 	}
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("遍历同名渠道失败: %w", err)
 	}
 	switch len(ids) {
 	case 0:
-		return 0, fmt.Errorf("%w：%s", ErrChannelNotFound, ref)
+		return 0, fmt.Errorf("%w：没有叫 %q 的未删除渠道（用 channel list 看现有的名字）",
+			ErrChannelNotFound, ref)
 	case 1:
 		return ids[0], nil
 	default:
-		return 0, fmt.Errorf("有 %d 条渠道叫 %q，请改用渠道 ID（%v）", len(ids), ref, ids)
+		return 0, fmt.Errorf("有 %d 条渠道叫 %q，改用渠道 ID 指定：\n%s",
+			len(ids), ref, strings.Join(lines, "\n"))
 	}
 }
 

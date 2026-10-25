@@ -455,26 +455,53 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 渠道上的出站映射：**这个渠道把请求发给上游时，用哪个模型名**。键是规范名（调用方
 请求里那个名字），值是这家上游对同一个模型的叫法。
 
-- `larkaxctl channel map add <渠道> <规范名> <上游模型名> [--overrides <JSON 对象>]`
-- `larkaxctl channel map add --all-channels <规范名> <上游模型名> [--overrides <JSON 对象>]`
-- `larkaxctl channel map list [<渠道>] [--all-channels] [--model <规范名>]`
-- `larkaxctl channel map remove <渠道> <规范名>`
-- `larkaxctl channel map remove --all-channels <规范名>`
+- `larkaxctl channel map <渠道> <规范名> [<上游模型名>] [--overrides <JSON 对象>]`
+- `larkaxctl channel map --all <规范名> <上游模型名> [--overrides <JSON 对象>]`
+- `larkaxctl channel unmap <渠道> <规范名>`
+- `larkaxctl channel unmap --all <规范名>`
+- `larkaxctl channel map list [<渠道>] [--all] [--model <规范名>]`
 
-**`--all-channels` 表示平台级映射**：它对所有渠道生效，此时位置参数里不再给渠道。
-不带它时第一个位置参数是渠道 ID，这条映射只对那个渠道生效。两种范围不能同时给：
-一条映射只属于一个范围。选路时渠道级映射盖过平台级那条；两者都没有时，规范名原样
-发给上游。
+**映射即上架**：渠道级 `map` 在**同一个事务**里建这条映射，并把规范名写进那个渠道
+的 `models` 白名单——渠道服务哪些模型就是它有哪些映射，白名单不再手工同步。任何一步
+失败都整笔回滚，所以不会留下「映射建了、渠道却服务不了这个模型」的半截配置：白名单
+写入要过端点校验，模型在目录里声明的端点服务不了这条渠道时会被拒。白名单里已经有
+这个规范名时不重复写，命令照样成功，所以重复跑同一条 `map` 是幂等的。反过来，同一个
+范围里同一个规范名已有映射时**报错**，不会悄悄改掉它的上游名——要改上游名用
+`alias update`。
 
-`list` 不带参数时列平台级映射；给 `<渠道>` 列那个渠道的渠道级映射，`--all-channels`
-是平台级的显式写法。`--model <规范名>` 列出这个名字在**所有范围**下的映射，不能与
-`<渠道>` / `--all-channels` 同时给。平台级与渠道级分在两处列：混在一条清单里会让人
-以为渠道级那条对所有渠道生效。
+它**不建模型目录条目**：规范名要先用 `model add` 建进目录（要一次配齐目录、白名单、
+映射与两条价格规则时用 `model onboard`）。
 
-`add` 的 stdout 只有新映射的 ID，其余信息走 stderr；`remove` 的 stdout 是空的。
+**`unmap` 只删映射，不删白名单条目**：它的反义是「不再翻译」，不是「渠道不再服务
+这个模型」。那个名字继续留在渠道的 `models` 里，由 `channel update --models` 管。
 
-`remove` 按「范围 + 规范名」定位。一个范围里一个规范名最多一条映射，所以这两个值
-就够确定要删哪一条，不必先 `list` 一遍拿 ID。
+**渠道级**的 `<上游模型名>` 可以省略，省了就用规范名本身（直通形态）。落库结果与显式
+写一个同名的上游名逐字相同。`--all` 的那条不能省：平台级映射是通用翻译，「规范名 →
+同名」不改变任何翻译结果，所以它按参数错误拒掉。
+
+**`--all` 表示平台级映射**（`--all-channels` 是它的全写）：它对所有渠道生效，此时
+位置参数里不再给渠道，并且**只写映射表、不碰任何渠道的白名单**——它是一层通用翻译，
+不是把名字上架到每条渠道。不带它时第一个位置参数是渠道，这条映射只对那个渠道生效。
+两种范围不能同时给：一条映射只属于一个范围。选路时渠道级映射盖过平台级那条；两者
+都没有时，规范名原样发给上游。
+
+**`<渠道>` 收渠道 ID，也收未删除渠道的名字**。`channels.name` 在库里不唯一：命中一条
+就用它；一条都没命中时报「没有叫 X 的未删除渠道」；命中多条时报错并列出候选的 `id`、
+类型与地址，改用 ID 指定。
+
+**保留词优先，且只判第一个位置参数**：第一个位置参数是 `add` / `list` / `remove` /
+`help` / `-h` / `--help` 时按子命令解释，其余一律按动词解释。第二个及之后的位置参数
+原样当名字——`channel map 42 list` 里的 `list` 是规范名。代价是**名字恰好是这四个词的
+渠道只能用 ID 指代**。
+
+`map` 的 stdout 只有新映射的 ID，其余信息走 stderr；`unmap` 的 stdout 是空的。
+`unmap` 按「范围 + 规范名」定位：一个范围里一个规范名最多一条映射，所以这两个值就够
+确定要删哪一条，不必先 `list` 一遍拿 ID。
+
+`list` 不带参数时列平台级映射；给 `<渠道>` 列那个渠道的渠道级映射，`--all` 是平台级
+的显式写法。`--model <规范名>` 列出这个名字在**所有范围**下的映射，不能与 `<渠道>` /
+`--all` 同时给。平台级与渠道级分在两处列：混在一条清单里会让人以为渠道级那条对所有
+渠道生效。
 
 `--overrides` 是一组**上游请求参数**的覆盖，只允许三个键：`temperature`、`top_p`、
 `max_tokens`。别的键在写入时就被拒绝——它们要么改的是请求的形状（`model`、
@@ -485,8 +512,9 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 改一条已有映射的属性（上游名或覆盖）用 `alias update`；问「某个渠道实际会发什么
 名字」用 `alias resolve`，它走的是请求热路径上同一条查询。
 
-**旧写法仍可用**：`alias create` / `alias add`、`alias list`、`alias delete` 保留一个
-发布周期，行为与这里逐字相同，命中时在 stderr 上提示这里的新路径。
+**兼容别名与旧写法**：`channel map add` 等于 `channel map`，`channel map remove` 等于
+`channel unmap`，保留一个发布周期，行为与动词写法逐字相同。`alias create` / `alias add`、
+`alias list`、`alias delete` 同样保留一个发布周期，命中时在 stderr 上提示这里的新路径。
 
 #### `account`
 
@@ -612,7 +640,7 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 写进数据库。」，退出码 `0`。
 
 它**不是唯一的上架方式**：`model add`、`channel update --models`、
-`channel map add`、`price add`、`upstream-cost create` 五条独立命令仍然可用，
+`channel map`、`price add`、`upstream-cost create` 五条独立命令仍然可用，
 向导只是把常见顺序与事务接好。一次只上架一个模型，不做交互问答（参数一次给全，
 供脚本调用），也不做批量。
 
@@ -620,7 +648,7 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
 
 出站上游名映射的旧入口。**配置命令已搬到 `channel map`**：`alias create` /
 `alias add`、`alias list`、`alias delete` 保留一个发布周期，行为与 `channel map`
-的 `add` / `list` / `remove` 逐字相同，命中时在 stderr 上提示新路径。
+的 `map` / `list` / `unmap` 逐字相同，命中时在 stderr 上提示新路径。
 
 这里仍保留两条：
 
@@ -633,7 +661,7 @@ shell 名只认 `bash`、`zsh`、`fish` 三个，写错是参数错（退出码 
   各列一遍，不回答谁赢）。加 `-v` 时它的 stderr 会点名配置命令在 `channel map`；
   默认档只给解析结果。
 
-`alias create` 的 `--overrides` 口径与 `channel map add` 相同。
+`alias create` 的 `--overrides` 口径与 `channel map` 相同。
 
 #### `price`
 

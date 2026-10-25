@@ -32,7 +32,7 @@ const aliasShortUsage = `larkaxctl alias 管理模型别名：一个上游模型
 不带 --channel 的别名是平台级、带的是渠道级，渠道级盖过平台级。同一个规范名
 在每个范围里最多只能有一个上游名；update 不能改渠道范围与规范名。
 
-出站映射的配置命令已搬到 larkaxctl channel map（add / list / remove）；
+出站映射的配置命令已搬到 larkaxctl channel map（map / unmap / list）；
 本组的 create / add / list / delete 旧写法保留一个发布周期。
 
 更细的边界：larkaxctl help alias。
@@ -41,8 +41,9 @@ const aliasShortUsage = `larkaxctl alias 管理模型别名：一个上游模型
 // aliasUsage 是 alias 的长版：`larkaxctl help alias` 与 `alias help`。
 const aliasUsage = `larkaxctl alias 是出站上游名映射的旧入口。
 
-**配置命令已搬到 larkaxctl channel map**（add / list / remove）：那里用三个位置
-参数写一条映射，平台级用 --all-channels 表示。这里保留 update 与 resolve——
+**配置命令已搬到 larkaxctl channel map**（map / unmap / list）：那里用位置参数
+写一条映射，渠道级会同时把它写进渠道白名单，平台级用 --all 表示。这里保留
+update 与 resolve——
 update 改一条已有映射的上游名与覆盖，resolve 回答某个渠道实际会发什么名字。
 create / add / list / delete 保留一个发布周期，行为与原来逐字相同，并在 stderr
 上提示新路径。
@@ -114,7 +115,7 @@ func runAlias(args []string) error {
 
 	switch action {
 	case "create", "add":
-		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map add <渠道> <规范名> <上游模型名>",
+		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map <渠道> <规范名> <上游模型名>",
 			func() error { return runAliasCreate(rest) })
 	case "list":
 		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map list",
@@ -122,7 +123,7 @@ func runAlias(args []string) error {
 	case "update":
 		return runAliasUpdate(rest)
 	case "delete":
-		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel map remove <渠道> <规范名>",
+		return runLegacyUserPath("出站映射的配置命令已搬到 larkaxctl channel unmap <渠道> <规范名>",
 			func() error { return runAliasDelete(rest) })
 	case "resolve":
 		return runAliasResolve(rest)
@@ -435,7 +436,7 @@ func runAliasResolve(args []string) error {
 	// 所以只在 -v 下打。
 	if verboseOutput {
 		_, _ = fmt.Fprintf(humanStderr(),
-			"出站映射的配置命令在 larkaxctl channel map（add / list / remove）。\n")
+			"出站映射的配置命令在 larkaxctl channel map（map / unmap / list）。\n")
 	}
 	return nil
 }
