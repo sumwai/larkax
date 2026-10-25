@@ -325,18 +325,23 @@ type AccountNotOnChannelError struct {
 	Channels []AccountChannel
 }
 
+// Error 只描述这一次的事实，不带哨兵那句原话。
+//
+// 哨兵是给程序看的：`main` 打出来时会先加一行 `larkaxctl: `，再把这句话接上，
+// 而 `errors.Is` 靠 Unwrap 判——把「账号没有挂在这条渠道上」抄进正文，人读到的
+// 是同一件事说两遍。
 func (e *AccountNotOnChannelError) Error() string {
 	if len(e.Channels) == 0 {
-		return fmt.Sprintf("%s：账号 %s 没有挂在渠道 %d（%s）上，它现在没有挂任何渠道。"+
+		return fmt.Sprintf("账号 %s 没有挂在渠道 %d（%s）上，它现在没有挂任何渠道。"+
 			"权重挂在渠道与账号的关联上，没有关联就没有地方放它。",
-			ErrAccountNotOnChannel, e.Name, e.ChannelID, e.ChannelName)
+			e.Name, e.ChannelID, e.ChannelName)
 	}
 	parts := make([]string, 0, len(e.Channels))
 	for _, ch := range e.Channels {
 		parts = append(parts, fmt.Sprintf("%d（%s）", ch.ID, ch.Name))
 	}
-	return fmt.Sprintf("%s：账号 %s 没有挂在渠道 %d（%s）上。它挂在：%s。",
-		ErrAccountNotOnChannel, e.Name, e.ChannelID, e.ChannelName, strings.Join(parts, "、"))
+	return fmt.Sprintf("账号 %s 没有挂在渠道 %d（%s）上，它挂在：%s。",
+		e.Name, e.ChannelID, e.ChannelName, strings.Join(parts, "、"))
 }
 
 // Unwrap 让 errors.Is(err, ErrAccountNotOnChannel) 成立。
@@ -399,26 +404,41 @@ func (a *Admin) SetAccountWeight(ctx context.Context, name string, channelID int
 		return AccountChannel{}, fmt.Errorf("%w：id %d", ErrChannelDeleted, channelID)
 	}
 	if !current.Valid {
-		attached, listErr := accountChannels(ctx, a.handle(), accountID)
-		if listErr != nil {
-			return AccountChannel{}, listErr
-		}
-		return AccountChannel{}, &AccountNotOnChannelError{
-			Name:        name,
-			ChannelID:   channelID,
-			ChannelName: channelName,
-			Channels:    attached,
-		}
+		return AccountChannel{}, a.notOnChannel(ctx, name, accountID, channelID, channelName)
 	}
 
-	if _, err := a.handle().ExecContext(ctx, `
+	res, err := a.handle().ExecContext(ctx, `
 		UPDATE channel_accounts SET weight = $3
 		 WHERE channel_id = $1 AND account_id = $2`,
-		channelID, accountID, weight); err != nil {
+		channelID, accountID, weight)
+	if err != nil {
 		return AccountChannel{}, dberr.ConstraintFailure(
 			fmt.Errorf("改账号 %s 在渠道 %d 上的权重失败: %w", name, channelID, err))
 	}
+	// 读与写之间那一对关联被删掉了（`account remove` 正并发跑）：这一行没改到，
+	// 报成功会让调用方以为权重已经生效。按「没挂在那条渠道上」回，与上面同一句话。
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return AccountChannel{}, fmt.Errorf("确认权重结果失败: %w", err)
+	}
+	if affected == 0 {
+		return AccountChannel{}, a.notOnChannel(ctx, name, accountID, channelID, channelName)
+	}
 	return AccountChannel{ID: channelID, Name: channelName, Weight: weight}, nil
+}
+
+// notOnChannel 组装「这个账号没挂在那条渠道上」的那条错误，带着它实际挂着的渠道。
+func (a *Admin) notOnChannel(ctx context.Context, name string, accountID, channelID int64, channelName string) error {
+	attached, err := accountChannels(ctx, a.handle(), accountID)
+	if err != nil {
+		return err
+	}
+	return &AccountNotOnChannelError{
+		Name:        name,
+		ChannelID:   channelID,
+		ChannelName: channelName,
+		Channels:    attached,
+	}
 }
 
 // ErrAccountInUse 表示这个账号还挂在多于一条渠道上，不能不加确认地删。

@@ -466,6 +466,43 @@ func TestSetAccountWeightOnDeletedOrMissingChannel(t *testing.T) {
 	}
 }
 
+// TestSetAccountWeightDetectsVanishedLink 钉住「读与写之间那一对关联没了」。
+//
+// 判据是写完之后有没有真的改到行：`UPDATE` 影响 0 行时照报成功，调用方会以为
+// 权重已经生效，而选路那边什么都没变。这里用一个 BEFORE UPDATE 触发器把每一次
+// 更新都跳过去（返回 NULL 即跳过该行），模拟「账号刚被 remove 掉」这个窗口。
+func TestSetAccountWeightDetectsVanishedLink(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	accountID, name := attachPoolAccount(t.Context(), t, db, sealer, channelID, "key", 1)
+
+	// 用触发器而不是并发删行：那条路径争的是时序，而这里要钉的是「0 行怎么算」。
+	if _, err := db.ExecContext(context.Background(), `
+		CREATE OR REPLACE FUNCTION weight_skip_update() RETURNS trigger
+		LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+		CREATE TRIGGER weight_skip_update BEFORE UPDATE ON channel_accounts
+		FOR EACH ROW EXECUTE FUNCTION weight_skip_update();`); err != nil {
+		t.Fatalf("装触发器失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DROP TRIGGER IF EXISTS weight_skip_update ON channel_accounts;
+			 DROP FUNCTION IF EXISTS weight_skip_update()`); err != nil {
+			t.Errorf("拆触发器失败（后面的用例会被它挡住）: %v", err)
+		}
+	})
+
+	_, err := NewAdmin(db, nil, nil).SetAccountWeight(context.Background(), name, channelID, 2)
+	if !errors.Is(err, ErrAccountNotOnChannel) {
+		t.Fatalf("一行都没改到时应报 ErrAccountNotOnChannel，得到 %v", err)
+	}
+	if w := poolWeight(t, db, channelID, accountID); w != 1 {
+		t.Errorf("权重 = %d，期望仍是 1（这一行没被改到）", w)
+	}
+}
+
 // poolWeight 读一对关联上的权重，供「被拒之后没动过」这类断言用。
 func poolWeight(t *testing.T, db *sql.DB, channelID, accountID int64) int {
 	t.Helper()
