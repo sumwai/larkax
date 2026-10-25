@@ -165,7 +165,12 @@ type CreateRequest struct {
 	// `account add --channel` 或 `channel update --credential-*` 接上。
 	Credential string
 
-	// Models 是该渠道支持的规范模型名，至少要有一个。
+	// Models 是该渠道支持的**规范模型名**白名单，一个都没有也是合法的。
+	//
+	// 空白名单表示这条渠道还没上架任何模型：读取路径把它当白名单用
+	// （`models @> ARRAY[规范名]`），空数组匹配不到任何模型名，于是选路不会
+	// 选中它；名字由 `channel map` 写进来（映射即上架）。它不是「支持全部
+	// 模型」——读取路径里没有这个语义。
 	Models []string
 
 	// Weight 为 0 表示用默认值 1。
@@ -1564,15 +1569,16 @@ func NormalizeBaseURL(raw string) (string, error) {
 
 // normalizeModels 校验模型名列表。
 //
-// # 空数组不是「支持全部模型」
+// # 空数组不是「支持全部模型」，但它是一个合法的中间态
 //
 // 读取路径把 models 当白名单用：`models @> ARRAY[规范名]`。空数组匹配不到任何
-// 模型名，于是这条渠道永远选不中。读取路径里**没有**「空即全部」这个语义，
-// 所以这里不能替它发明一个——放进去的行会是一条安静的废配置。
+// 模型名，于是这条渠道永远选不中——这正是「还没上架任何模型」的写法，之后由
+// `channel map` 把规范名写进来（映射即上架）。读取路径里**没有**「空即全部」
+// 这个语义，所以这里也不替它发明一个。
+//
+// 返回的切片即使为空也不是 nil：这一列是 `NOT NULL DEFAULT '{}'`，nil 交给
+// 驱动会落成 NULL。
 func normalizeModels(models []string) ([]string, error) {
-	if len(models) == 0 {
-		return nil, errors.New("models 至少要有一个模型名：空数组匹配不到任何模型，这条渠道永远选不中")
-	}
 	out := make([]string, 0, len(models))
 	for i, m := range models {
 		m = strings.TrimSpace(m)

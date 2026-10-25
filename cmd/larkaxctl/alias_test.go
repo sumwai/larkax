@@ -130,7 +130,7 @@ func TestAliasCreateThenList(t *testing.T) {
 	// 渠道级别名要挂在一个已经存在的渠道上。
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", canonical, "--credential-stdin",
 		}); err != nil {
@@ -406,7 +406,7 @@ func TestAliasResolvePrefersChannelScope(t *testing.T) {
 	})
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", canonical, "--credential-stdin",
 		}); err != nil {
@@ -506,7 +506,7 @@ func TestAliasResolveMissingForThisChannel(t *testing.T) {
 	})
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", canonical, "--credential-stdin",
 		}); err != nil {

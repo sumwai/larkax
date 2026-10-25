@@ -54,7 +54,7 @@ func TestWriteCommandsRejectControlCharsInDisplayText(t *testing.T) {
 		},
 		{
 			name: "channel create --name",
-			run:  runChannelCreate,
+			run:  runChannelAdd,
 			args: func(bad string) []string {
 				return []string{"--name", bad}
 			},
@@ -62,7 +62,7 @@ func TestWriteCommandsRejectControlCharsInDisplayText(t *testing.T) {
 		},
 		{
 			name: "channel create --models",
-			run:  runChannelCreate,
+			run:  runChannelAdd,
 			args: func(bad string) []string {
 				return []string{
 					"--name", "渠道", "--type", "openai",

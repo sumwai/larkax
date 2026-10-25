@@ -82,7 +82,7 @@ func createModelSyncChannel(t *testing.T, baseURL, chanType string) (int64, stri
 	canonical := uniqueName("canonical")
 	withStdin(t, testSecret)
 	out, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", chanType,
 			"--base-url", baseURL, "--models", canonical, "--credential-stdin",
 		}); err != nil {

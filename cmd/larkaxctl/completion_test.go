@@ -228,15 +228,15 @@ func caseWords(t *testing.T, script, path string) []string {
 // 几个只存在于注册代码里的选项要在，而旧名与短选项不在。
 func TestCompletionOptionsComeFromFlagSets(t *testing.T) {
 	data := buildCompletionData()
-	options := completionOptionNames(data, "channel create")
+	options := completionOptionNames(data, "channel add")
 	for _, want := range []string{"--credential-stdin", "--credential-env", "--base-url"} {
 		if !slices.Contains(options, want) {
-			t.Errorf("channel create 的补全里没有 %s：%v", want, options)
+			t.Errorf("channel add 的补全里没有 %s：%v", want, options)
 		}
 	}
 	for _, unwanted := range []string{"--owner", "--stdin", "--env"} {
 		if slices.Contains(options, unwanted) {
-			t.Errorf("channel create 的补全里出现了旧名 %s：旧名不占 Tab 的位置", unwanted)
+			t.Errorf("channel add 的补全里出现了旧名 %s：旧名不占 Tab 的位置", unwanted)
 		}
 	}
 }

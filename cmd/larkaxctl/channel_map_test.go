@@ -64,7 +64,7 @@ func TestChannelMapAddWritesSameRowAsAliasCreate(t *testing.T) {
 
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", channelModel, "--credential-stdin",
 		}); err != nil {
@@ -172,7 +172,7 @@ func TestChannelMapListScopes(t *testing.T) {
 
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", canonical, "--credential-stdin",
 		}); err != nil {
@@ -246,7 +246,7 @@ func TestChannelMapRemoveBothScopes(t *testing.T) {
 
 	withStdin(t, testSecret)
 	channelOut, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", canonical, "--credential-stdin",
 		}); err != nil {
@@ -598,7 +598,7 @@ func createMapChannel(t *testing.T, name string, models ...string) int64 {
 
 	withStdin(t, testSecret)
 	out, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", name, "--type", testChanType,
 			"--base-url", testBaseURL, "--models", strings.Join(models, ","),
 			"--credential-stdin",

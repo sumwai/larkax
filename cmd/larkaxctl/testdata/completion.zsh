@@ -15,6 +15,8 @@ _larkaxctl() {
 	case "$path|$prev" in
 		"apikey create|--status") compadd -- active disabled revoked; return ;;
 		"apikey update|--status") compadd -- active disabled revoked; return ;;
+		"channel add|--protocols") compadd -- anthropic openai openai-responses systemone; return ;;
+		"channel add|--type") compadd -- anthropic openai openai-responses systemone; return ;;
 		"channel create|--protocols") compadd -- anthropic openai openai-responses systemone; return ;;
 		"channel create|--type") compadd -- anthropic openai openai-responses systemone; return ;;
 		"channel update|--protocols") compadd -- anthropic openai openai-responses systemone; return ;;
@@ -225,6 +227,54 @@ _larkaxctl() {
 			esac
 			;;
 		"apikey update|--ttl")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--base-url")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--credential-env")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--models")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--name")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--priority")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--setting")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--user")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--weight")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -2184,6 +2234,7 @@ _larkaxctl() {
 			"apikey get") compadd -- --env-file --format --id --quiet --verbose ;;
 			"apikey list") compadd -- --env-file --format --quiet --user --verbose ;;
 			"apikey update") compadd -- --clear-quota --clear-rpm --env-file --expires-at --forever --format --id --name --quiet --quota --rpm --status --ttl --verbose ;;
+			"channel add") compadd -- --base-url --credential-env --credential-stdin --env-file --format --models --name --priority --protocols --quiet --setting --type --user --verbose --weight ;;
 			"channel create") compadd -- --base-url --credential-env --credential-stdin --env-file --format --models --name --priority --protocols --quiet --setting --type --user --verbose --weight ;;
 			"channel delete") compadd -- --env-file --format --id --quiet --verbose ;;
 			"channel disable") compadd -- --env-file --format --id --quiet --verbose ;;
@@ -2303,7 +2354,7 @@ _larkaxctl() {
 		"alias") compadd -- create list update delete resolve ;;
 		"apikey") compadd -- create update get list ;;
 		"calendar") compadd -- import ;;
-		"channel") compadd -- create list get health update enable disable delete restore sync-models upstream-models adapters probe map unmap ;;
+		"channel") compadd -- add create list get health update enable disable delete restore sync-models upstream-models adapters probe map unmap ;;
 		"channel map") compadd -- add list remove ;;
 		"consent") compadd -- grant list revoke ;;
 		"idempotency") compadd -- cleanup ;;

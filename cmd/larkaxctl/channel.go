@@ -26,13 +26,13 @@ var channelHelp = helpText{short: channelShortUsage, long: channelUsage}
 // channelShortUsage 是 channel 的短版：`-h` / `--help` 与参数写错时打的那一份。
 const channelShortUsage = `larkaxctl channel 管理上游渠道。
 用法：
-  larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
-                           (--type <类型> | --protocols <协议名,...>)
-                           [--credential-stdin | --credential-env <变量名>]
+  larkaxctl channel add <名称> <base-url> [--models <模型名,...>]
+                         [--type <类型> | --protocols <协议名,...>]
+                         [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
-  larkaxctl channel update --id <渠道 ID> [字段与 create 相同，另可换凭证]
+  larkaxctl channel update --id <渠道 ID> [字段与 add 相同，另可换凭证]
   larkaxctl channel enable|disable|delete|restore --id <渠道 ID>
   larkaxctl channel sync-models|upstream-models --id <渠道 ID>
   larkaxctl channel adapters
@@ -40,19 +40,20 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
                           [--credential-stdin | --credential-env <变量名>]
   larkaxctl channel map|unmap（出站映射，见 larkaxctl channel map help）
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
-create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的逆操作。
-更细的边界：larkaxctl help channel。
+给凭证且没给 --type/--protocols 时逐协议探测，全都没探测成功就不建；确知协议就显式给。
+add（旧名 create）的 stdout 只有新渠道的 ID。更细的边界：larkaxctl help channel。
 `
 
 // channelUsage 是 channel 的长版：`larkaxctl help channel` 与 `channel help`。
 const channelUsage = `larkaxctl channel 管理上游渠道。
 
 用法：
-  larkaxctl channel create --name <名称> --base-url <URL> --models <模型名,...>
-                           (--type <类型> | --protocols <协议名,...>)
-                           [--credential-stdin | --credential-env <变量名>]
-                           [--user <用户 ID 或用户名>] [--weight <权重>]
-                           [--priority <优先级>] [--setting <JSON 对象>]
+  larkaxctl channel add <名称> <base-url> [--models <模型名,...>]
+                         [--type <类型> | --protocols <协议名,...>]
+                         [--credential-stdin | --credential-env <变量名>]
+                         [--user <用户 ID 或用户名>] [--weight <权重>]
+                         [--priority <优先级>] [--setting <JSON 对象>]
+  larkaxctl channel create …（add 的旧名，参数完全相同）
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
@@ -83,22 +84,45 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   --credential-stdin        从标准输入读到文件结束（末尾的换行会被去掉）
   --credential-env <变量名> 从名为 <变量名> 的环境变量读
 
-**create 不给凭证是合法的**：渠道建出来但一个账号都不挂（零账号），
+渠道名与上游地址可以写成前两个位置参数，也可以用 --name / --base-url。
+两个位置参数与对应旗标同时给是参数错——不静默取其中一个。位置参数写在
+前面，旗标跟在后面。
+
+**add 不给凭证是合法的**：渠道建出来但一个账号都不挂（零账号），
 channel list 看得见它，选路会跳过。之后用 account add --channel <渠道>
-接上，或者 channel update --credential-* 直接补一把。给了凭证时 create 会
+接上，或者 channel update --credential-* 直接补一把。给了凭证时 add 会
 建一个匿名账号并挂上——账号是凭证的单位（见 larkaxctl help account）。
 
-例（凭证从标准输入读）：
+**给了凭证、又没给 --type / --protocols 时，add 先探测再创建**：拿这次给的
+地址与凭证，对适配器注册表里的每个类型各问一次模型清单端点。探测成功的那些成为
+这条渠道的协议集合（顺序按注册表的类型顺序，第一个是主协议）；没探测成功的
+不阻断创建，逐个打到 stderr 并说明原因。一套都没探测成功则**拒绝创建**，错误里
+列出每个协议各自的原因。
 
-  cat secret.txt | larkaxctl channel create --name c1 --type openai \
-      --base-url https://api.example.com/v1 --models <规范模型名> --credential-stdin
+探测是串行的，有总预算（每套协议一份）：预算用完时还没轮到的协议一个请求都不发，
+stderr 记成「未探测协议」而不是「未绑定协议」——前者是我们没问，后者是问过了。
+适配器自己的 HTTP 超时算「探过、超时了」，属于未绑定那一档。
 
-例（凭证从环境变量读）：
+要跳过探测就显式给 --type 或 --protocols：那是「我知道这家上游用哪套协议」，
+按给的建，一个请求都不发。上游临时不可达、或者它不提供模型清单接口时，这条
+路是唯一能把渠道建出来的写法。探测结果只用于定协议，不打印模型清单——看清单
+是 channel probe 的事。
 
-  LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> larkaxctl channel create ... \
+没给凭证时整轮探测都跳过：零账号渠道没有凭证可探，按 --type / --protocols 建
+（两个都没给仍然是参数错）。
+
+例（凭证从标准输入读，位置参数 + 探测）：
+
+  cat secret.txt | larkaxctl channel add c1 https://api.example.com/v1 \
+      --models <规范模型名> --credential-stdin
+
+例（凭证从环境变量读，显式指定协议、跳过探测）：
+
+  LARKAX_CHANNEL_CREDENTIAL=<CHANNEL_CREDENTIAL> larkaxctl channel add c1 \
+      https://api.example.com/v1 --type openai --models <规范模型名> \
       --credential-env LARKAX_CHANNEL_CREDENTIAL
 
-create 的 stdout 只有新渠道的 ID，其余信息走 stderr。
+add（旧名 create）的 stdout 只有新渠道的 ID，其余信息走 stderr。
 list **不打印凭证密文**，只打印它挂在哪些主密钥下（那不需要任何密钥材料）。
 list 默认不列已删的渠道，--all 才列，并在「已删」那一栏标出删除时刻。
 
@@ -183,9 +207,14 @@ probe 在落库之前向上游问一次模型清单：给 --type 与 --base-url�
 **单协议渠道的行为与加 --protocols 之前逐字相同**：请求照旧按类型分派，
 channel get 也不多一栏（协议集合暂时不出现在 get / list 的输出里）。
 
---models 至少要有一个：读取路径把 models 当白名单用，空数组的渠道永远选不中。
+--models 可以不给：读取路径把 models 当白名单用（models @> ARRAY[规范名]），
+空数组匹配不到任何模型名，于是这条渠道永远选不中——「还没上架任何模型」就是
+这个形状，之后 channel map 把规范名写进白名单（映射即上架）。它不是「支持全部
+模型」。--models 给了就得至少一个名字：给空串（--models ""）是参数错，「没给」
+与「给了个空的」不是一回事。
+
 每个模型还要能被这条渠道服务：模型目录里可以声明一个模型只在某几条端点上被
-服务，而渠道声明的协议决定它把请求发到哪几条。一条都对不上时 create / update
+服务，而渠道声明的协议决定它把请求发到哪几条。一条都对不上时 add / update
 会被拒绝，并说出「模型在目录里声明的端点」与「这条渠道打的端点」各是什么；
 多协议渠道只要有其中一条对得上就放行。目录里没有这个模型、或者那一项没配过时
 不拦。
@@ -249,6 +278,21 @@ channel 也可能是 config。纯长参数那一条有用例钉着。
 // 人发现为止。
 const channelTimeout = 30 * time.Second
 
+// channelProbeTimeoutPerType 是创建时那轮探测摊到每套协议上的预算。
+//
+// 它是一个变量而不是常量，只为了让用例把它压小到毫秒级（生产路径永远用
+// upstream.ProbeTimeout）——与 credentialInput / probeChannelRegistry 同一类
+// 注入点。
+var channelProbeTimeoutPerType = upstream.ProbeTimeout
+
+// probeBudget 是创建时那轮探测的总预算：候选协议数 × 每套协议的上限。
+//
+// 探测是串行的（一套接一套），所以「每套各有 10s」不等于「整轮 10s」；
+// 把总预算按候选数摊开，才能让最后一轮也有自己的时间。
+func probeBudget(candidates int) time.Duration {
+	return time.Duration(candidates) * channelProbeTimeoutPerType
+}
+
 // credentialInput 是读明文凭证的来源。
 //
 // 它是一个变量而不是直接写 os.Stdin，是为了让「凭证从标准输入读」这条路径
@@ -257,7 +301,7 @@ var credentialInput io.Reader = os.Stdin
 
 // channelActions 是 channel 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var channelActions = []string{"create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "adapters", "probe", "map", "unmap"}
+var channelActions = []string{"add", "create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "adapters", "probe", "map", "unmap"}
 
 func runChannel(args []string) error {
 	if len(args) == 0 {
@@ -267,8 +311,10 @@ func runChannel(args []string) error {
 	action, rest := args[0], args[1:]
 
 	switch action {
-	case "create":
-		return runChannelCreate(rest)
+	case "add", "create":
+		// create 是加位置参数之前的名字：两条走同一份实现，报错、探测与
+		// 落库都不会各说各的。
+		return runChannelAdd(rest)
 	case "list":
 		return runChannelList(rest)
 	case "get":
@@ -306,8 +352,10 @@ func runChannel(args []string) error {
 	}
 }
 
-func runChannelCreate(args []string) error {
-	if err := jsonUnsupported("channel create"); err != nil {
+// runChannelAdd 建一条渠道。`channel add` 与 `channel create` 是同一条实现：
+// create 是加位置参数之前的名字，保留给已经在跑的脚本。
+func runChannelAdd(args []string) error {
+	if err := jsonUnsupported("channel add"); err != nil {
 		return err
 	}
 
@@ -320,7 +368,20 @@ func runChannelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	// add 的总预算分两段：连库与写库照旧是 channelTimeout，要探测时再加一轮
+	// 探测的预算（候选数 × 每套协议的上限，见 probeBudget）。探测自己还有
+	// 一层更短的 deadline（见 probeProtocolsForAdd）——外框留够，预算耗尽
+	// 之后创建那一步才来得及。
+	timeout := channelTimeout
+	var probeRegistry *channel.Registry
+	if probeProtocolsNeeded(req) {
+		probeRegistry, err = probeChannelRegistry()
+		if err != nil {
+			return fmt.Errorf("装配渠道适配器注册表失败: %w", err)
+		}
+		timeout += probeBudget(len(probeRegistry.Types()))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	db, err := openDB(ctx, cfg)
 	if err != nil {
@@ -340,6 +401,15 @@ func runChannelCreate(args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+	// 创建即探测：给了凭证、又没点名协议时，先问上游哪几套协议真的通。
+	// 它排在连库之后（要读凭证、要注册表）与写入之前（探测失败就不该留下
+	// 一条半配置的渠道）；探测本身不发写入，也不进 channels.Admin.Create。
+	// 内层不写 `if err := …`：外层已经声明过 err，那会成为一次遮蔽
+	// （CI pin 的 golangci-lint 的 shadow 检查器报，本机版本复现不出来）。
+	err = probeProtocolsForAdd(ctx, probeRegistry, &req)
+	if err != nil {
+		return err
 	}
 	admin := channels.NewAdmin(db, sealer, registry)
 
@@ -370,12 +440,32 @@ func runChannelCreate(args []string) error {
 	return nil
 }
 
-// parseChannelCreate 解析 create 的参数。
+// takeLeadingPositionals 摘掉参数最前面的位置参数，最多 max 个。
+//
+// 为什么要自己摘：flag 包遇到第一个非旗标词就停止解析，
+// `add c1 <地址> --models x` 里的 --models 会跟着落进 NArg。摘掉开头那两个
+// 词之后旗标照常解析——与 price add 的 takeLeadingOperand 同一个形状。
+func takeLeadingPositionals(args []string, max int) ([]string, []string) {
+	var out []string
+	for len(args) > 0 && len(out) < max && !strings.HasPrefix(args[0], "-") {
+		out = append(out, args[0])
+		args = args[1:]
+	}
+	return out, args
+}
+
+// parseChannelCreate 解析 add（旧名 create）的参数。
 //
 // 它多带一个 ownerRef 返回值：--user 要连库才能解析成用户 ID，而参数解析
 // 必须在连库之前完成。所以这里只做「有没有给、给了什么」，解析留给调用方。
+//
+// 参数形状在这里判完，探测与连库都在调用方：一个写错的命令不该先连上库、
+// 更不该先打一次上游。
 func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
-	fs := newFlagSet("channel create", flag.ContinueOnError)
+	// 渠道名与上游地址可以写成前两个位置参数（见 takeLeadingPositionals）。
+	positionals, rest := takeLeadingPositionals(args, 2)
+
+	fs := newFlagSet("channel add", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
 	name := fs.String("name", "", "")
 	channelType := fs.String("type", "", "")
@@ -391,57 +481,72 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	boolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
 	stringAlias(fs, credentialEnv, "env")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
 	if fs.NArg() > 0 {
 		return channels.CreateRequest{}, "", fmt.Errorf(
-			"create 不接受位置参数，得到 %q：各字段用 --<名称> 指定", fs.Arg(0))
+			"add 不接受多余的参数，得到 %q：渠道名与地址写成前两个位置参数，其余字段用 --<名称>，"+
+				"旗标要写在位置参数后面", fs.Arg(0))
+	}
+
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	// 位置参数与同名旗标同时给是参数错：静默取其中一个的表现是「我改的是
+	// 另一个名字」，而那是建成功的一条渠道。
+	nameValue := *name
+	if len(positionals) >= 1 {
+		if given["name"] {
+			return channels.CreateRequest{}, "", fmt.Errorf(
+				"渠道名给了两遍（位置参数 %q 与 --name）：两种写法选一种", positionals[0])
+		}
+		nameValue = positionals[0]
+	}
+	baseURLValue := *baseURL
+	if len(positionals) == 2 {
+		if given["base-url"] {
+			return channels.CreateRequest{}, "", fmt.Errorf(
+				"上游地址给了两遍（位置参数 %q 与 --base-url）：两种写法选一种", positionals[1])
+		}
+		baseURLValue = positionals[1]
 	}
 
 	// 参数检查全部发生在连库之前（与 user / apikey 同一条约定）：
 	// 一个写错的命令不该先连上生产库再报错，而「连上库之后才发现参数不对」
 	// 还有一个更坏的可能——它没报错。
-	if strings.TrimSpace(*name) == "" {
-		return channels.CreateRequest{}, "", errors.New("缺少 --name")
+	if strings.TrimSpace(nameValue) == "" {
+		return channels.CreateRequest{}, "", errors.New("缺少 --name（渠道名，也可以写成第一个位置参数）")
 	}
 	// 名称与模型名单会进 channel list / health 的表格：控制字符在连库之前
 	// 就拒掉（判据在 channels 的写入路径，见 normalizeName / normalizeModels）。
-	if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(*name)); err != nil {
+	if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(nameValue)); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
-	// --type 与 --protocols 至少给一个：前者是单协议的旧写法，后者是新写法，
-	// 两者都等于「这条渠道声明了哪些协议」（见 channels.CreateRequest）。
-	given := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-
-	var protocolList []string
-	if given["protocols"] {
-		if strings.TrimSpace(*protocols) == "" {
-			return channels.CreateRequest{}, "", errors.New("--protocols 里没有协议名（至少一个）")
-		}
-		protocolList = splitList(*protocols)
-	}
-	if strings.TrimSpace(*channelType) == "" && len(protocolList) == 0 {
-		return channels.CreateRequest{}, "", errors.New("缺少 --type 或 --protocols（至少给一个）")
-	}
-	if strings.TrimSpace(*baseURL) == "" {
-		return channels.CreateRequest{}, "", errors.New("缺少 --base-url")
+	if strings.TrimSpace(baseURLValue) == "" {
+		return channels.CreateRequest{}, "", errors.New("缺少 --base-url（上游地址，也可以写成第二个位置参数）")
 	}
 	// 地址的写法在这里先过一遍（下面 update 那条路同理）：判据与写入路径共用
 	// 同一个实现，区别只在**什么时候**报——写错地址是参数错，该走退出码 2、
 	// 且不该为了知道地址写错了先连一次库。
-	normalizedBaseURL, err := channels.NormalizeBaseURL(*baseURL)
+	normalizedBaseURL, err := channels.NormalizeBaseURL(baseURLValue)
 	if err != nil {
 		return channels.CreateRequest{}, "", err
 	}
-	if strings.TrimSpace(*models) == "" {
-		return channels.CreateRequest{}, "", errors.New("缺少 --models（至少一个规范模型名）")
-	}
-	for i, model := range splitList(*models) {
-		if shapeErr := checkDisplayText(
-			fmt.Sprintf("--models 里第 %d 个模型名", i+1), strings.TrimSpace(model)); shapeErr != nil {
-			return channels.CreateRequest{}, "", shapeErr
+	// 模型白名单可以不给（空白名单是合法中间态，见 channels.CreateRequest.Models），
+	// 但给了就不能是空的：「没给」与「给了个空的」不是一回事。
+	var modelList []string
+	if given["models"] {
+		if strings.TrimSpace(*models) == "" {
+			return channels.CreateRequest{}, "", errors.New(
+				"--models 是空的：不给 --models 表示白名单暂时为空，给了就要至少一个模型名")
+		}
+		modelList = splitList(*models)
+		for i, model := range modelList {
+			if shapeErr := checkDisplayText(
+				fmt.Sprintf("--models 里第 %d 个模型名", i+1), strings.TrimSpace(model)); shapeErr != nil {
+				return channels.CreateRequest{}, "", shapeErr
+			}
 		}
 	}
 	// 凭证是可选的：不给就建一条零账号渠道（合法中间态，见
@@ -454,23 +559,145 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	if plaintext != nil {
 		credentialValue = *plaintext
 	}
+	// --type 与 --protocols 至少给一个：前者是单协议的旧写法，后者是新写法，
+	// 两者都等于「这条渠道声明了哪些协议」（见 channels.CreateRequest）。
+	// 例外是给了凭证：那时协议由探测得出（见 probeProtocolsForAdd），而
+	// 一个都没探测成功就拒绝创建——不会落到这里。
+	var protocolList []string
+	if given["type"] && strings.TrimSpace(*channelType) == "" {
+		return channels.CreateRequest{}, "", errors.New("--type 是空的")
+	}
+	if given["protocols"] {
+		if strings.TrimSpace(*protocols) == "" {
+			return channels.CreateRequest{}, "", errors.New("--protocols 里没有协议名（至少一个）")
+		}
+		protocolList = splitList(*protocols)
+	}
+	if strings.TrimSpace(*channelType) == "" && len(protocolList) == 0 && credentialValue == "" {
+		return channels.CreateRequest{}, "", errors.New(
+			"缺少 --type 或 --protocols（至少给一个）：没给凭证时无从探测协议")
+	}
 	parsedSetting, err := parseJSONObject("--setting", *setting)
 	if err != nil {
 		return channels.CreateRequest{}, "", err
 	}
 
 	return channels.CreateRequest{
-		Name:       *name,
+		Name:       nameValue,
 		Type:       *channelType,
 		Protocols:  protocolList,
 		BaseURL:    normalizedBaseURL,
 		Credential: credentialValue,
-		Models:     splitList(*models),
+		Models:     modelList,
 		Weight:     *weight,
 		Priority:   *priority,
 		Setting:    parsedSetting,
 	}, *owner, nil
 }
+
+// probeProtocolsNeeded 判这一次 add 要不要探测：给了凭证、又没点名协议。
+//
+// 显式给了协议是「我知道是哪套协议」；没给凭证则没有凭证可探（零账号渠道是
+// 合法中间态）。两种都不探测。
+func probeProtocolsNeeded(req channels.CreateRequest) bool {
+	return req.Credential != "" && req.Type == "" && len(req.Protocols) == 0
+}
+
+// probeProtocolsForAdd 把「给了凭证、又没点名协议」那一条路探测一遍，探测成功的
+// 协议写进 req.Protocols（主协议取第一个，写入侧按它落 channels.type）。
+//
+// 探测不成功的协议不阻断创建：它只说明这套协议还没被验证过。一个都没探测成功则
+// 拒绝创建——channels.protocol 是 NOT NULL，「一条协议都没有的渠道」在库里
+// 表达不出来；而随便挑一个协议落库，等白名单被映射填满之后会把流量送到一条
+// 没验证过的路上。这条拒绝留了一个明确的逃生口：显式给 --type / --protocols
+// 就跳过整轮探测（见长帮助）。
+//
+// registry 由调用方装配并传进来：同一个清单还要用来算这一轮的预算（见
+// probeBudget），装配两次会得到两份可能不一样的清单。只有 probeProtocolsNeeded
+// 为真时调用方才传非 nil，所以进来先判一次。
+func probeProtocolsForAdd(ctx context.Context, registry *channel.Registry, req *channels.CreateRequest) error {
+	if !probeProtocolsNeeded(*req) {
+		return nil
+	}
+	// 探测有自己的预算，不从命令那条 ctx 直接吃：整轮探测是串行的，最后几套
+	// 协议也要有自己的时间；外框（add 的总预算）留得比它长，是为了预算耗尽
+	// 之后创建那一步还来得及。
+	probeCtx, cancel := context.WithTimeout(ctx, probeBudget(len(registry.Types())))
+	defer cancel()
+	probe := channels.NewModelProbe(nil, nil, registry)
+
+	// 候选集合就是注册表自己的类型清单，不在这里抄第二份。
+	bound := make([]string, 0, len(registry.Types()))
+	var failures, unprobed []string
+	for _, candidateType := range registry.Types() {
+		// 预算已经耗尽：后面的协议一个请求都不发，记成「未探测」。
+		//
+		// 判据只看探测自己那条 ctx：适配器 HTTP 客户端的超时（ProbeClient 的
+		// 10s）是「探了、超时了」，属于失败那一档；而这里没发出去的请求，
+		// 上游根本没被问过——混在一起会让人去查一个没问题的上游。
+		if probeCtx.Err() != nil {
+			unprobed = append(unprobed, candidateType)
+			continue
+		}
+		result, probeErr := probe.Probe(probeCtx, channels.ProbeRequest{
+			Type:       candidateType,
+			BaseURL:    req.BaseURL,
+			Credential: req.Credential,
+		})
+		// 探测成功 = 真的拿到了模型清单。上游回「不提供模型列表」不算：那说明
+		// 这条清单端点没有验证过这套协议，与「探过了，是通的」不是一回事。
+		switch {
+		case probeErr == nil && result.Supported:
+			bound = append(bound, candidateType)
+		case probeErr != nil && probeCtx.Err() != nil:
+			// 请求发出去了，但预算在它回应之前用完：仍归「未绑定」（它确实
+			// 被探过），原因不能说成上游的问题——上游可能好好的，是我们的预算
+			// 到了。适配器自己那 10s 客户端超时走的不是这一格（那时 probeCtx
+			// 还没到期），照旧用原文。
+			failures = append(failures, fmt.Sprintf("%s：%s", candidateType, probeTimedOutReason))
+		case probeErr != nil:
+			failures = append(failures, fmt.Sprintf("%s：%s", candidateType, probeFailure(probeErr)))
+		default:
+			failures = append(failures, fmt.Sprintf("%s：%s",
+				candidateType, "上游不提供模型清单，这套协议没有验证过"))
+		}
+	}
+	if len(bound) == 0 {
+		lines := make([]string, 0, len(failures)+len(unprobed))
+		lines = append(lines, failures...)
+		for _, candidateType := range unprobed {
+			lines = append(lines, fmt.Sprintf("%s：%s", candidateType, unprobedReason))
+		}
+		// 首句要说清是哪一种「零」：全都探过、全都没通，与预算先耗尽、根本
+		// 没问完，是两件事，去查的方向也不一样。
+		lead := "没有一套协议探测成功，渠道没有创建"
+		if len(unprobed) > 0 {
+			lead = fmt.Sprintf("预算内没有探通任何协议，另有 %d 套未探测，渠道没有创建", len(unprobed))
+		}
+		return fmt.Errorf("%s：\n  %s\n"+
+			"确知协议就加 --type <协议> 或 --protocols <协议名,...> 强制绑定（跳过探测）后重试",
+			lead, strings.Join(lines, "\n  "))
+	}
+	req.Protocols = bound
+	// 绑上了哪些、哪些没通、哪些没问：各一行打到 stderr（stdout 留给新渠道的 ID）。
+	_, _ = fmt.Fprintf(humanStderr(), "已绑定协议：%s\n", strings.Join(bound, "、"))
+	for _, failure := range failures {
+		_, _ = fmt.Fprintf(humanStderr(), "未绑定协议 %s\n", failure)
+	}
+	for _, candidateType := range unprobed {
+		_, _ = fmt.Fprintf(humanStderr(), "未探测协议 %s：%s\n", candidateType, unprobedReason)
+	}
+	return nil
+}
+
+// unprobedReason 是「因预算耗尽没发请求」那一档统一的原因文案。
+const unprobedReason = "探测预算耗尽，用 --protocols 显式指定"
+
+// probeTimedOutReason 是「请求发出去了、预算在它回应之前用完」那一档的原因文案。
+//
+// 这一档仍归「未绑定」——它确实被探过；但原因不能说成上游的问题：上游可能
+// 好好的，是我们的预算到了。
+const probeTimedOutReason = "探测超时：预算内没有回应"
 
 // parseChannelUpdate 解析 update 的参数。
 //

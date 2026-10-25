@@ -42,16 +42,21 @@ func TestChannelCreateRejectsBadFlags(t *testing.T) {
 		want string
 	}{
 		{"没有 --name", without(base, "--name"), "缺少 --name"},
-		{"没有 --type", without(base, "--type"), "缺少 --type"},
+		// 没给凭证时协议必须点名：给了凭证才交给探测定（见 probeProtocolsForAdd）。
+		{"没有 --type 也没有凭证", without(without(base, "--type"), "--credential-stdin"), "缺少 --type"},
 		{"没有 --base-url", without(base, "--base-url"), "缺少 --base-url"},
-		{"没有 --models", without(base, "--models"), "缺少 --models"},
+		// --models 现在可以不给（空白名单是合法中间态），但给了就不能是空的。
+		{"--models 给空串", []string{
+			"--name", "c1", "--type", testChanType, "--base-url", testBaseURL,
+			"--models", "", "--credential-stdin",
+		}, "--models 是空的"},
 		{"两个凭证来源都给", append(base, "--credential-env", "SOME_VAR"), "只能给一个"},
-		{"多出位置参数", append(base, "extra"), "不接受位置参数"},
+		{"多出位置参数", append(base, "extra"), "不接受多余的参数"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := runCaptured(t, func() error { return runChannelCreate(tc.args) })
+			err := runCaptured(t, func() error { return runChannelAdd(tc.args) })
 			if err == nil {
 				t.Fatalf("期望报错，却通过了")
 			}
@@ -115,7 +120,7 @@ func TestChannelBaseURLQueryOrFragmentIsRejected(t *testing.T) {
 	for _, tc := range rejected {
 		t.Run("create/"+tc.name, func(t *testing.T) {
 			err := runCaptured(t, func() error {
-				return runChannelCreate([]string{
+				return runChannelAdd([]string{
 					"--name", "c1", "--type", testChanType, "--base-url", tc.raw,
 					"--models", "m1", "--credential-stdin",
 				})
@@ -223,7 +228,7 @@ func TestChannelCredentialIsNotACommandLineArgument(t *testing.T) {
 func TestChannelCredentialSourcesRejectEmpty(t *testing.T) {
 	withStdin(t, "\n")
 	err := runCaptured(t, func() error {
-		return runChannelCreate([]string{
+		return runChannelAdd([]string{
 			"--name", "c1", "--type", testChanType, "--base-url", testBaseURL,
 			"--models", "m1", "--credential-stdin",
 		})
@@ -233,7 +238,7 @@ func TestChannelCredentialSourcesRejectEmpty(t *testing.T) {
 	}
 
 	err = runCaptured(t, func() error {
-		return runChannelCreate([]string{
+		return runChannelAdd([]string{
 			"--name", "c1", "--type", testChanType, "--base-url", testBaseURL,
 			"--models", "m1", "--credential-env", "LARKAX_TEST_UNSET_CREDENTIAL",
 		})
@@ -259,7 +264,7 @@ func TestChannelCreateListUpdateRoundTrip(t *testing.T) {
 	withStdin(t, testSecret+"\n")
 
 	stdout, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", name, "--type", testChanType, "--base-url", testBaseURL,
 			"--models", model, "--credential-stdin", "--priority", "5",
 		}); err != nil {
@@ -351,7 +356,7 @@ func TestChannelCredentialFromEnv(t *testing.T) {
 
 	name := uniqueName("channel")
 	stdout, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", name, "--type", testChanType, "--base-url", testBaseURL,
 			"--models", uniqueName("model"), "--credential-env", envName,
 		}); err != nil {
@@ -382,7 +387,7 @@ func TestChannelEnableDisable(t *testing.T) {
 
 	withStdin(t, testSecret)
 	stdout, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", testChanType,
 			"--base-url", testBaseURL, "--models", uniqueName("model"),
 			"--credential-stdin",
@@ -434,7 +439,7 @@ func TestChannelCreateRejectsUnknownType(t *testing.T) {
 	withStdin(t, testSecret)
 
 	err := runCaptured(t, func() error {
-		return runChannelCreate([]string{
+		return runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", "not-a-real-adapter",
 			"--base-url", testBaseURL, "--models", "m1", "--credential-stdin",
 		})
@@ -763,7 +768,7 @@ func createChannelWithSetting(t *testing.T, typ, settingJSON string) (id int64, 
 	t.Helper()
 	withStdin(t, testSecret)
 	stdout, stderr = captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", uniqueName("channel"), "--type", typ,
 			"--base-url", testBaseURL, "--models", uniqueName("model"),
 			"--credential-stdin", "--setting", settingJSON,
@@ -828,7 +833,7 @@ func createTestChannel(t *testing.T, name, model string) int64 {
 	t.Helper()
 	withStdin(t, testSecret)
 	stdout, _ := captureStreams(t, func() {
-		if err := runChannelCreate([]string{
+		if err := runChannelAdd([]string{
 			"--name", name, "--type", testChanType, "--base-url", testBaseURL,
 			"--models", model, "--credential-stdin",
 		}); err != nil {
@@ -1176,7 +1181,7 @@ func TestChannelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 		command string
 		run     func() error
 	}{
-		{"channel create", func() error { return runChannelCreate(nil) }},
+		{"channel add", func() error { return runChannelAdd(nil) }},
 		{"channel update", func() error { return runChannelUpdate(nil) }},
 		{"channel enable", func() error {
 			return runChannelSetStatus(nil, channels.StatusEnabled)

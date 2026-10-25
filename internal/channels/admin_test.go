@@ -625,8 +625,8 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 	}{
 		{"渠道名为空", func(r *CreateRequest) { r.Name = "   " }},
 		// 凭证不在这张表里：空表示「这次不建账号」，是合法的中间态
-		// （见 CreateRequest.Credential 与迁移 00067）。
-		{"models 为空", func(r *CreateRequest) { r.Models = nil }},
+		// （见 CreateRequest.Credential 与迁移 00067）。models 也不在这张表里：
+		// 空白名单是合法中间态（见 TestCreateWithoutModelsStaysUnselectable）。
 		{"models 里有空项", func(r *CreateRequest) { r.Models = []string{"a", " "} }},
 		{"base_url 为空", func(r *CreateRequest) { r.BaseURL = "" }},
 		{"base_url 没有 scheme", func(r *CreateRequest) { r.BaseURL = "api.example.com/v1" }},
@@ -654,6 +654,49 @@ func TestCreateRejectsInvalidFields(t *testing.T) {
 				t.Errorf("被拒的请求留下了 %d 行", n)
 			}
 		})
+	}
+}
+
+// TestCreateWithoutModelsStaysUnselectable 钉住「空白名单是合法中间态」这条
+// 新语义的两端：行真的落进库（白名单是空数组，不是 NULL），而选路一条都选
+// 不中它。
+//
+// 两端缺一不可：只断言「创建成功」会漏掉落成 NULL（那一列是 NOT NULL，
+// 读回来会是另一回事），只断言「选不中」的话，一条没建出来的渠道同样选不中。
+func TestCreateWithoutModelsStaysUnselectable(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	admin := newAdmin(t, db, sealer)
+
+	req := baseRequest("ch-no-models-" + itoa(nextID()))
+	req.Models = nil // 显式给 nil，与命令行「没给 --models」同一条路径
+	model := uniqueModel()
+
+	id, err := admin.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("空白名单应当建得出来：%v", err)
+	}
+
+	// 用 array_to_json 接 text[]：database/sql 不认 text[] 这个 driver.Value，
+	// 与候选集查询同一条理由（见 candidateRow.modelsJSON）。
+	// 期望值是字面量 "[]"：落成 NULL 时这里是 "null"，那正是这一条要抓的。
+	var stored string
+	if err = db.QueryRowContext(context.Background(),
+		`SELECT array_to_json(models)::text FROM channels WHERE id = $1`, id).Scan(&stored); err != nil {
+		t.Fatalf("读模型白名单失败: %v", err)
+	}
+	if stored != "[]" {
+		t.Errorf("落库的 models = %s，期望空数组 []", stored)
+	}
+
+	got, err := New(db, sealer).Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	for _, c := range got {
+		if c.Channel.ID == id {
+			t.Fatalf("空白名单的渠道被选成了候选：%d", id)
+		}
 	}
 }
 

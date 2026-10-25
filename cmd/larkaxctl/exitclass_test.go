@@ -134,7 +134,7 @@ func parseCases() []parseCase {
 		// 规则扫全的其余几条命令：同一条判据，各文件各留一行代表。
 		{"alias create 缺 --model", func() error { return runAliasCreate(nil) }, false, aliasHint},
 		{"model create 缺 --model", func() error { return runModelCreate(nil) }, false, modelHint},
-		{"channel create 缺 --name", func() error { return runChannelCreate(nil) }, false, channelHint},
+		{"channel create 缺 --name", func() error { return runChannelAdd(nil) }, false, channelHint},
 		{"price create 缺 --scope", func() error { return runPriceCreate(nil) }, false, priceHint},
 		{"wallet create 缺 --user", func() error { return runWalletCreate(nil) }, false, walletHint},
 		{"wallet refund 缺 --user", func() error { return runWalletRefund(nil) }, false, walletHint},
