@@ -1657,7 +1657,36 @@ else
   ok
 fi
 if grep -c '^跳过 ' "$last_out" | grep -qx 1; then ok; else
-  bad "改动都在别的包 —— 两种跳过都算进 grep '^跳过' 的数，这里应为 1 条"
+  bad "改动都在别的包 —— 跳过话不论哪种都算进 grep '^跳过' 的数，这里应为 1 条"
+fi
+
+# 29f. 这一包改了东西，但改的不是 Go：括号里说中间那句。
+#
+#      清单里 internal/ledger/notes.sql、点名 internal/ledger。这种改动既不参与
+#      变异，也不是测试改动——照「只有测试文件」或「改动都落在别的包」去说都是
+#      假话。这类清单只会来自手写的 `--changed-files`（`--changed-from` 只列
+#      `.go`），但话说错了，读的人照样会当成别的两件事之一。
+printf '%s\n' internal/ledger/notes.sql >"$tmp/changed-nongo.txt"
+run_narrow "$tmp/changed-nongo.txt" internal/ledger
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "改了非 Go 文件 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+grep -qx '跳过 internal/ledger（本包没有生产文件改动）' "$last_out" \
+  || bad "改了非 Go 文件 —— 跳过那行要说「本包没有生产文件改动」"
+if grep -qx '跳过 internal/ledger（改动都落在别的包）' "$last_out"; then
+  bad "改了非 Go 文件 —— 不能说成「改动都落在别的包」：改动就在这一包名下"
+else
+  ok
+fi
+if grep -c '^跳过 ' "$last_out" | grep -qx 1; then ok; else
+  bad "改了非 Go 文件 —— 三种跳过都算进 grep '^跳过' 的数，这里应为 1 条"
+fi
+# 合计下面那句说的是**这一轮**，不是某一条跳过行：它同样不能说成「都只有测试
+# 文件改动」——这一包连测试文件都没动过。
+grep -q '选中的包都没有生产文件改动' "$last_out" \
+  || bad "改了非 Go 文件 —— 合计下面那句要说「选中的包都没有生产文件改动」"
+if grep -q '选中的包都只有测试文件改动' "$last_out"; then
+  bad "改了非 Go 文件 —— 合计下面那句不能说成「都只有测试文件改动」"
+else
+  ok
 fi
 
 # 30. 新文件算「改到」。
