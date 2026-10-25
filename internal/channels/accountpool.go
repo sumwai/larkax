@@ -108,8 +108,9 @@ func decodePoolAccounts(channelID int64, raw string) ([]poolAccount, error) {
 // 三条判据，各自的「不好」不一样：
 //
 //   - 权重 0：运维明确写了「先别用」（迁移 00067 允许 0）。它不是故障，
-//     不要靠冷却期去恢复它——权重只在关联建立时写一次，今天没有改它的
-//     命令，要改只能把账号摘掉重挂。
+//     不要靠冷却期去恢复它：这一条只在权重被改回非 0 之后才放行
+//     （`account update --channel … --weight N`，见 Admin.SetAccountWeight），
+//     等再久也不会自己变。
 //   - drained：凭证被上游拒绝，或连续失败到了阈值。带冷却期：距最后一次失败
 //     满一个 streakCooldown 之后重新参选一次。没有这条出口的话，被摘掉的账号
 //     没有流量，状态永远不会自己变回去——与渠道侧 streakCooldown 同一条理由。
