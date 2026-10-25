@@ -204,9 +204,12 @@ func (p *QuotaProbe) probe(c route.Candidate, attemptedAt time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout())
 	defer cancel()
 
-	// 额度是一条渠道级的事，按主协议问一次（见 Executor.Quota）。地址要与
-	// 真实请求走同一处判据：配了分址的渠道，主协议那一侧可能不是渠道地址。
-	state, err := p.adapters.Quota(ctx, c.Channel.ForProtocol(channel.Protocol(c.Channel.Type)))
+	// 额度是一条渠道级的事，按主协议问一次（见 Executor.Quota）。主协议取哪条
+	// 与执行器是同一条回落——入口为空时 DispatchProtocol("") 退回 Type；别在
+	// 这里直接写 Protocol(c.Channel.Type)，那会变成同一个概念的第二种写法，
+	// 回落规则一改就不跟了。地址同理要与真实请求走同一处判据：配了分址的
+	// 渠道，主协议那一侧可能不是渠道地址。
+	state, err := p.adapters.Quota(ctx, c.Channel.ForProtocol(c.Channel.DispatchProtocol("")))
 
 	// 写回另起一个会合期限：查询恰好在 deadline 上返回时，上面那个 ctx
 	// 已经结束，复用它写库会立刻失败（见 probeWriteTimeout）。WithoutCancel
