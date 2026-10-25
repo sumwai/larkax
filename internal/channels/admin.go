@@ -448,7 +448,8 @@ func sortedKeys[V any](m map[string]V) []string {
 // （见 UpdateRequest.ProtocolBaseURLs），创建时沿用渠道地址就是不写这一项。
 func normalizeProtocolBaseURLs(protocols []string, raw map[string]string) (map[string]string, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		// 空表而不是 nil：这条返回的是「没有协议有自己的地址」，不是「算不出来」。
+		return map[string]string{}, nil
 	}
 	out := make(map[string]string, len(raw))
 	for _, p := range sortedKeys(raw) {
