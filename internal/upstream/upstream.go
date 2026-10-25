@@ -130,7 +130,7 @@ func (e *Executor) Types() []string {
 // 入口协议不在渠道声明里时退回 ch.Type（见 channel.Channel.DispatchProtocol）：
 // 跨协议转换是既有能力，单协议渠道的行为因此与加多协议之前逐字相同。
 func (e *Executor) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
-	a, err := e.adapter(ch, req.Protocol)
+	a, ch, err := e.resolve(ch, req.Protocol)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (e *Executor) Chat(ctx context.Context, ch channel.Channel, req *channel.Re
 // 而它该由 internal/route 判：只有它知道客户端已经收到过多少内容，
 // 也就只有它能决定还能不能换渠道。
 func (e *Executor) ChatStream(ctx context.Context, ch channel.Channel, req *channel.Request) (<-chan channel.StreamEvent, error) {
-	a, err := e.adapter(ch, req.Protocol)
+	a, ch, err := e.resolve(ch, req.Protocol)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (e *Executor) ChatStream(ctx context.Context, ch channel.Channel, req *chan
 // 未知类型包着 channel.ErrUnknownType 返回；「这家上游没有查询接口」由适配器
 // 返回 channel.ErrUnsupported，两者分得开。
 func (e *Executor) Quota(ctx context.Context, ch channel.Channel) (quota.State, error) {
-	a, err := e.adapter(ch, "")
+	a, ch, err := e.resolve(ch, "")
 	if err != nil {
 		return quota.State{}, err
 	}
@@ -183,7 +183,7 @@ func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemon
 	// 这条表面就是决策协议：渠道声明了 systemone 就用那个适配器，否则退回
 	// 主协议上的适配器——后者今天不实现 Decider，于是报 ErrUnsupported，
 	// 与加多协议之前一步不差。
-	a, err := e.adapter(ch, channel.ProtocolSystemOne)
+	a, ch, err := e.resolve(ch, channel.ProtocolSystemOne)
 	if err != nil {
 		return nil, err
 	}
@@ -194,11 +194,20 @@ func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemon
 	return d.Decide(ctx, ch, req)
 }
 
-// adapter 按这次调用该用的协议取适配器。
+// resolve 取这次调用该用的适配器，并把渠道的上游地址定成这次真正要打的那一条。
+//
+// # 分派
 //
 // 用哪套协议由 channel.Channel.DispatchProtocol 判：入口协议在这条渠道的声明
 // 里就用它，否则退回主协议。单协议渠道因此与加多协议之前逐字相同——
 // 跨协议转换那条路保持不变，多协议只是多了一条「入口协议命中声明」的捷径。
+//
+// # 取址
+//
+// 定完协议之后紧接着定地址，调 channel.Channel.ForProtocol：一条渠道的每个
+// 协议可以有自己的地址（见迁移 00069）。这是执行器这一侧唯一一处取址，
+// 适配器仍然只读 Channel.BaseURL——各读各的症状是「额度探测走新地址、
+// 真实请求走老地址」，而它只在配了分址之后现形。
 //
 // 未知类型**包着 channel.ErrUnknownType** 返回，调用方用
 // errors.Is(err, channel.ErrUnknownType) 就能认出来。这个错误不该被当成
@@ -208,10 +217,11 @@ func (e *Executor) Decide(ctx context.Context, ch channel.Channel, req *systemon
 //
 // 包上渠道 ID 是为了让日志能直接指到那一行配置；类型与已知类型清单
 // 由 Lookup 的错误带出来。
-func (e *Executor) adapter(ch channel.Channel, protocol channel.Protocol) (channel.Adapter, error) {
-	a, err := e.registry.Lookup(string(ch.DispatchProtocol(protocol)))
+func (e *Executor) resolve(ch channel.Channel, protocol channel.Protocol) (channel.Adapter, channel.Channel, error) {
+	dispatched := ch.DispatchProtocol(protocol)
+	a, err := e.registry.Lookup(string(dispatched))
 	if err != nil {
-		return nil, fmt.Errorf("渠道 %d: %w", ch.ID, err)
+		return nil, ch, fmt.Errorf("渠道 %d: %w", ch.ID, err)
 	}
-	return a, nil
+	return a, ch.ForProtocol(dispatched), nil
 }

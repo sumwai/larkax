@@ -256,6 +256,12 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"channel add|--anthropic")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel add|--base-url")
 			case "$cur" in
 			-*) ;;
@@ -280,13 +286,31 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"channel add|--openai")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel add|--priority")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
+		"channel add|--responses")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel add|--setting")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel add|--systemone")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -299,6 +323,12 @@ _larkaxctl() {
 			esac
 			;;
 		"channel add|--weight")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel create|--anthropic")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -328,13 +358,31 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"channel create|--openai")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel create|--priority")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
+		"channel create|--responses")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel create|--setting")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel create|--systemone")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -430,6 +478,12 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"channel update|--anthropic")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel update|--base-url")
 			case "$cur" in
 			-*) ;;
@@ -460,13 +514,31 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"channel update|--openai")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel update|--priority")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
 			esac
 			;;
+		"channel update|--responses")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"channel update|--setting")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"channel update|--systemone")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -2260,8 +2332,8 @@ _larkaxctl() {
 			"apikey get") compadd -- --env-file --format --id --quiet --verbose ;;
 			"apikey list") compadd -- --env-file --format --quiet --user --verbose ;;
 			"apikey update") compadd -- --clear-quota --clear-rpm --env-file --expires-at --forever --format --id --name --quiet --quota --rpm --status --ttl --verbose ;;
-			"channel add") compadd -- --base-url --credential-env --credential-stdin --env-file --format --models --name --priority --protocols --quiet --setting --type --user --verbose --weight ;;
-			"channel create") compadd -- --base-url --credential-env --credential-stdin --env-file --format --models --name --priority --protocols --quiet --setting --type --user --verbose --weight ;;
+			"channel add") compadd -- --anthropic --base-url --credential-env --credential-stdin --env-file --format --models --name --openai --priority --protocols --quiet --responses --setting --systemone --type --user --verbose --weight ;;
+			"channel create") compadd -- --anthropic --base-url --credential-env --credential-stdin --env-file --format --models --name --openai --priority --protocols --quiet --responses --setting --systemone --type --user --verbose --weight ;;
 			"channel delete") compadd -- --env-file --format --id --quiet --verbose ;;
 			"channel disable") compadd -- --env-file --format --id --quiet --verbose ;;
 			"channel enable") compadd -- --env-file --format --id --quiet --verbose ;;
@@ -2273,7 +2345,7 @@ _larkaxctl() {
 			"channel probe") compadd -- --base-url --credential-env --credential-stdin --env-file --format --quiet --type --verbose ;;
 			"channel restore") compadd -- --env-file --format --id --quiet --verbose ;;
 			"channel sync-models") compadd -- --env-file --format --id --quiet --verbose ;;
-			"channel update") compadd -- --base-url --credential-env --credential-stdin --env-file --format --id --models --name --priority --protocols --quiet --setting --type --verbose --weight ;;
+			"channel update") compadd -- --anthropic --base-url --credential-env --credential-stdin --env-file --format --id --models --name --openai --priority --protocols --quiet --responses --setting --systemone --type --verbose --weight ;;
 			"channel upstream-models") compadd -- --env-file --format --id --quiet --verbose ;;
 			"consent grant") compadd -- --agree --env-file --expires-at --forever --format --from --quiet --request-id --scope --to --ttl --user --verbose ;;
 			"consent list") compadd -- --env-file --format --quiet --user --verbose ;;

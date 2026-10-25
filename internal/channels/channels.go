@@ -765,13 +765,9 @@ SELECT
     q.last_probe_attempt_at,
     q.last_probe_status,
     q.last_error_code,
-    -- 这条渠道声明了哪些协议（见 channel_protocols）。用 json 数组而不是
-    -- text[]：database/sql 不认后者，与 models 那一列同一个理由。
-    -- 没有行时给 '[]'：为空在 Go 侧读作「没有这份声明」，退回 type 一种协议
-    -- （见 channel.Channel.Declares），所以空数组与 NULL 在这里同义。
-    (SELECT COALESCE(json_agg(p.protocol ORDER BY p.protocol), '[]'::json)::text
-       FROM channel_protocols p
-      WHERE p.channel_id = c.id) AS protocols
+    -- 这条渠道声明了哪些协议，以及每个协议自己的地址（见 channel_protocols
+    -- 与迁移 00069）。列的形状收在 protocolsColumnSQL 里，与清单那条查询共用。
+` + protocolsColumnSQL + ` AS protocols
   FROM channels c
     -- 账号池（见迁移 00067 / 00068）。一条渠道挂几个账号只有池子自己知道，
     -- 所以这里把**整个池子**一次带回来，由 Go 侧按权重与健康挑一个
@@ -846,6 +842,24 @@ func suppliesModel(modelExpr string) string {
    AND c.` + channelAlive
 }
 
+// protocolsColumnSQL 取一条渠道的协议声明：协议名，以及每个协议自己的地址。
+//
+// 候选集与清单两条查询共用它：两处对同一列的读法不一致时，症状是「写进去的
+// 地址读出来不对」，而它只在读回那一路出现。
+//
+// 用 json 数组而不是 text[]：database/sql 不认后者，与 models 那一列同一个
+// 理由。没有行时给 '[]'：为空在 Go 侧读作「没有这份声明」，退回 type 一种
+// 协议（见 channel.Channel.Declares），所以空数组与 NULL 在这里同义。
+//
+// base_url 为 NULL 时 json_build_object 给出 JSON null：它表示「沿用渠道的
+// 地址」，不是空串（列上的 CHECK 也不接受空串）。
+const protocolsColumnSQL = `(SELECT COALESCE(json_agg(json_build_object(
+                    'protocol', p.protocol,
+                    'base_url', p.base_url
+                ) ORDER BY p.protocol), '[]'::json)::text
+       FROM channel_protocols p
+      WHERE p.channel_id = c.id)`
+
 // candidateRow 是查询结果的一行。
 //
 // 可空的列用 sql.Null* 接住：它们要么来自 LEFT JOIN 的缺失，要么来自
@@ -870,10 +884,13 @@ type candidateRow struct {
 	// 或者夹具直接插的 channels 行），那时按 type 一种协议处理。
 	protocolsJSON string
 	protocols     []channel.Protocol
-	setting       []byte
-	weight        int
-	priority      int
-	ownerUserID   int64
+	// protocolBaseURLs 是每个协议自己的地址（channel_protocols.base_url）。
+	// 没有条目的协议沿用 baseURL，判据只在 channel.ProtocolBaseURL 一处。
+	protocolBaseURLs map[channel.Protocol]string
+	setting          []byte
+	weight           int
+	priority         int
+	ownerUserID      int64
 
 	streak        int
 	lastFailureAt sql.NullTime
@@ -941,37 +958,58 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		return candidateRow{}, err
 	}
 	row.accounts = accounts
-	protocols, err := decodeProtocols(row.id, row.protocolsJSON)
+	protocols, protocolBaseURLs, err := decodeProtocols(row.id, row.protocolsJSON)
 	if err != nil {
 		return candidateRow{}, err
 	}
 	row.protocols = protocols
+	row.protocolBaseURLs = protocolBaseURLs
 	return row, nil
+}
+
+// protocolRowJSON 是 channel_protocols 一行在 JSON 里的形状（见 protocolsColumnSQL）。
+type protocolRowJSON struct {
+	Protocol string  `json:"protocol"`
+	BaseURL  *string `json:"base_url"`
 }
 
 // decodeProtocols 解开 channel_protocols 那份声明的 JSON 文本。
 //
-// 空数组原样返回 nil：调用方要知道的是「有没有这份声明」。折成一个包含
-// type 的切片会让「库里没有这一行」与「只声明了 type 一个」再也分不开，
-// 而两者的处置虽然相同（都按 type 一种协议），含义不一样——前者是这份声明
-// 还不存在（迁移之前的老行），后者是调用方真的这么写的。
+// 返回协议清单与「每个协议自己的地址」。空数组时两者都是 nil：调用方要知道的
+// 是「有没有这份声明」。折成一个包含 type 的切片会让「库里没有这一行」与
+// 「只声明了 type 一个」再也分不开，而两者的处置虽然相同（都按 type 一种
+// 协议），含义不一样——前者是这份声明还不存在（迁移之前的老行），后者是
+// 调用方真的这么写的。
+//
+// 地址为 NULL（或空串）的协议不进那张表：没有条目与「地址是空的」同义，
+// 判据只有一处（见 channel.ProtocolBaseURL）。整张表为 nil 表示这条渠道
+// 一条专属地址都没有，与加这一列之前逐字相同。
 //
 // 这里不校验取值是不是当前版本认识的协议：写入侧已经挡过，而库里出现一个
 // 更新的版本才有的名字时，读取侧应当把它带出来交给执行器报 ErrUnknownType，
 // 不是在这里整次查询失败（与候选查询对未知 type 的处置一致）。
-func decodeProtocols(channelID int64, protocolsJSON string) ([]channel.Protocol, error) {
-	var raw []string
+func decodeProtocols(channelID int64, protocolsJSON string) ([]channel.Protocol, map[channel.Protocol]string, error) {
+	var raw []protocolRowJSON
 	if err := json.Unmarshal([]byte(protocolsJSON), &raw); err != nil {
-		return nil, fmt.Errorf("渠道 %d 的 protocols 不是合法的 JSON 数组: %w", channelID, err)
+		return nil, nil, fmt.Errorf("渠道 %d 的 protocols 不是合法的 JSON 数组: %w", channelID, err)
 	}
 	if len(raw) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	out := make([]channel.Protocol, 0, len(raw))
-	for _, p := range raw {
-		out = append(out, channel.Protocol(p))
+	var urls map[channel.Protocol]string
+	for _, row := range raw {
+		p := channel.Protocol(row.Protocol)
+		out = append(out, p)
+		if row.BaseURL == nil || *row.BaseURL == "" {
+			continue
+		}
+		if urls == nil {
+			urls = make(map[channel.Protocol]string, len(raw))
+		}
+		urls[p] = *row.BaseURL
 	}
-	return out, nil
+	return out, urls, nil
 }
 
 // decodeModels 解开 models 列的 JSON 文本。
@@ -1014,11 +1052,14 @@ func (row candidateRow) candidate(account poolAccount, plaintext string, now tim
 			// 声明为空时执行器按 Type 一种协议分派（见
 			// channel.Channel.Declares）：迁移之前的老行、或者夹具直接插的
 			// channels 行都走这一格，行为与加这张表之前逐字相同。
-			Protocols:  row.protocols,
-			BaseURL:    row.baseURL,
-			Credential: plaintext,
-			Models:     row.models,
-			Setting:    setting,
+			Protocols: row.protocols,
+			BaseURL:   row.baseURL,
+			// 每个协议自己的地址。没有条目的协议沿用上面那条 BaseURL，
+			// 判据只在 channel.ProtocolBaseURL 一处（见它的注释）。
+			ProtocolBaseURLs: row.protocolBaseURLs,
+			Credential:       plaintext,
+			Models:           row.models,
+			Setting:          setting,
 		},
 		// 这次用的是池子里的哪个账号。凭证健康是按账号记的（见 account_state），
 		// 调用结局要能落回这一个账号——只记渠道的话，「这条渠道的两把 key 里

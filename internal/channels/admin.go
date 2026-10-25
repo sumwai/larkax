@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -155,7 +156,14 @@ type CreateRequest struct {
 	// 为空表示调用方没给：这时按 Type 一种协议处理。非空而 Type 也为空时，
 	// 主协议取列表的第一个；两者同时给时 Type 必须在列表里。
 	Protocols []string
-	BaseURL   string
+	// ProtocolBaseURLs 是每个协议自己的上游地址（协议名 → 地址，见迁移
+	// 00069）。出现的协议等于被绑定上：不在 Protocols 里的会并进集合
+	// （「给了地址就等于指名了这个协议」）。
+	//
+	// 值的写法与 BaseURL 同一条判据（NormalizeBaseURL）。值不能是空串：
+	// 创建时没有「清掉」可言，要沿用渠道地址就不给这一项。
+	ProtocolBaseURLs map[string]string
+	BaseURL          string
 
 	// Credential 是**明文**凭证。它只用于封装，不落日志、不进错误信息、
 	// 不进返回值。
@@ -192,6 +200,10 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 	// 协议集合排在地址与模型之前判：它只查注册表，不碰库，而写错一个协议名
 	// 是参数错——不该等到读完模型目录才报。
 	protocols, primaryType, err := a.protocolSetForCreate(req)
+	if err != nil {
+		return 0, err
+	}
+	protocolBaseURLs, err := normalizeProtocolBaseURLs(protocols, req.ProtocolBaseURLs)
 	if err != nil {
 		return 0, err
 	}
@@ -262,7 +274,7 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		// 退出码也因此落在 4 而不是 1。
 		return 0, dberr.ConstraintFailure(fmt.Errorf("创建渠道失败: %w", err))
 	}
-	if err := insertProtocols(ctx, tx, id, protocols); err != nil {
+	if err := insertProtocols(ctx, tx, id, protocols, protocolBaseURLs); err != nil {
 		return 0, err
 	}
 	// 给了凭证就顺手建一个匿名账号并挂上（`channel create --credential-env`
@@ -291,7 +303,26 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 // 返回协议列表（去重、保持调用方给的顺序）与主协议（写进 channels.type）。
 // 判据见 CreateRequest.Type / Protocols 的注释。
 func (a *Admin) protocolSetForCreate(req CreateRequest) ([]string, string, error) {
-	if len(req.Protocols) == 0 {
+	protocols := req.Protocols
+	// 没显式给集合时，分址旗标点名的协议并进来：给了地址就等于指名了这个
+	// 协议（与显式给 --type / --protocols 跳过探测同一口径），按协议名排序，
+	// 于是两次同样的调用写出同一行配置。
+	//
+	// 显式给了集合就不并：那时「集合外的协议也带了地址」是调用方写错了，
+	// 由 normalizeProtocolBaseURLs 报出来。并进来等于静默接受一个没人点过名的
+	// 协议，而 channels.type 与端点评据都按集合算。
+	if len(protocols) == 0 {
+		if extra := sortedKeys(req.ProtocolBaseURLs); len(extra) > 0 {
+			merged := make([]string, 0, len(extra)+1)
+			if req.Type != "" {
+				merged = append(merged, req.Type)
+			}
+			merged = append(merged, extra...)
+			protocols = merged
+		}
+	}
+
+	if len(protocols) == 0 {
 		// 没给 --protocols：与加多协议之前完全一样，只校验 Type 一种。
 		if err := a.validateType(req.Type); err != nil {
 			return nil, "", err
@@ -299,10 +330,11 @@ func (a *Admin) protocolSetForCreate(req CreateRequest) ([]string, string, error
 		return []string{req.Type}, req.Type, nil
 	}
 
-	protocols, err := normalizeProtocols(req.Protocols)
+	normalized, err := normalizeProtocols(protocols)
 	if err != nil {
 		return nil, "", err
 	}
+	protocols = normalized
 	primary := protocols[0]
 	if req.Type != "" {
 		// Type 走它原来那句报错（「渠道类型无效」），因为调用方写的就是
@@ -393,14 +425,61 @@ func normalizeProtocols(raw []string) ([]string, error) {
 	return out, nil
 }
 
+// sortedKeys 是 map 的键排好序之后的清单。
+//
+// 需要它是因为 Go 的 map 迭代顺序每次都不同：两处用它来定「没给顺序时按什么
+// 顺序写」，不排序的话，同一份配置在两次调用里会写出顺序不同的行。
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normalizeProtocolBaseURLs 校验并归一化「每个协议自己的地址」。
+//
+// 每个地址过 NormalizeBaseURL（与渠道地址同一条判据）；每个协议必须是这次
+// 要写进去的协议集合里的一员：给一个不在集合里的协议，等于悄悄绑上一个
+// 调用方没点名的协议，而 channels.type 与端点评据都按集合算。
+//
+// 空值在这里是错的——「清掉某个协议自己的地址」只在修改那条路上有意义
+// （见 UpdateRequest.ProtocolBaseURLs），创建时沿用渠道地址就是不写这一项。
+func normalizeProtocolBaseURLs(protocols []string, raw map[string]string) (map[string]string, error) {
+	if len(raw) == 0 {
+		// 空表而不是 nil：这条返回的是「没有协议有自己的地址」，不是「算不出来」。
+		return map[string]string{}, nil
+	}
+	out := make(map[string]string, len(raw))
+	for _, p := range sortedKeys(raw) {
+		if !slices.Contains(protocols, p) {
+			return nil, fmt.Errorf("协议 %q 不在这次要写的协议集合里（%s）",
+				p, strings.Join(protocols, "、"))
+		}
+		normalized, err := NormalizeBaseURL(raw[p])
+		if err != nil {
+			return nil, fmt.Errorf("协议 %s 的上游地址不合法：%w", p, err)
+		}
+		out[p] = normalized
+	}
+	return out, nil
+}
+
 // insertProtocols 把协议声明写进 channel_protocols。
 //
-// 调用方负责事务：渠道行与这张表要么一起出现、要么一起不出现。
-func insertProtocols(ctx context.Context, tx *sql.Tx, channelID int64, protocols []string) error {
+// urls 是每个协议自己的地址；没有条目的协议写 NULL，含义是「沿用渠道的
+// base_url」（见迁移 00069）。调用方负责事务：渠道行与这张表要么一起出现、
+// 要么一起不出现。
+func insertProtocols(ctx context.Context, tx *sql.Tx, channelID int64, protocols []string, urls map[string]string) error {
 	for _, p := range protocols {
+		var baseURL any
+		if u := urls[p]; u != "" {
+			baseURL = u
+		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO channel_protocols (channel_id, protocol) VALUES ($1, $2)`,
-			channelID, p); err != nil {
+			`INSERT INTO channel_protocols (channel_id, protocol, base_url) VALUES ($1, $2, $3)`,
+			channelID, p, baseURL); err != nil {
 			return dberr.ConstraintFailure(fmt.Errorf("写入渠道协议失败: %w", err))
 		}
 	}
@@ -426,11 +505,22 @@ type UpdateRequest struct {
 	//
 	// 主协议取 Type（同时给时，它必须在集合里），否则取集合的第一个。
 	Protocols *[]string
-	BaseURL   *string
-	Models    *[]string
-	Weight    *int
-	Priority  *int
-	Setting   *map[string]any
+	// ProtocolBaseURLs 非 nil 时改每个协议自己的地址（协议名 → 地址）。
+	//
+	//   - 值为空串：清掉这个协议自己的地址，改回沿用渠道的 BaseURL；
+	//   - 出现的协议等于被绑定上——不在集合里的会补进 channel_protocols；
+	//   - 没出现的协议保留原来的地址。
+	//
+	// 与 Protocols 同时给时，每个协议都必须在给的那份集合里（不在就是参数
+	// 错，不静默取一个）；两个都没给而只给地址时，集合按库里的并上这些协议。
+	//
+	// 它不动 channels.base_url：换渠道地址是 BaseURL 那一项的事。
+	ProtocolBaseURLs *map[string]string
+	BaseURL          *string
+	Models           *[]string
+	Weight           *int
+	Priority         *int
+	Setting          *map[string]any
 
 	// Status 非 nil 时改成 StatusEnabled / StatusDisabled。
 	//
@@ -528,6 +618,68 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		return protocolErr
 	}
 
+	// 分址也要落进 channel_protocols，所以这一批行的形状在同一个地方算出来：
+	// 协议集合（newProtocols，可能没给）与各自地址（ProtocolBaseURLs，可能
+	// 没给）任一变动都要整批重写。
+	//
+	// 重写前先读库里那几行：只换集合时要**保留**留下来的协议各自的地址，
+	// 只改地址时要把没点名的协议原样带回来。删了不重建的话，一次
+	// `--protocols` 就会把已有的分址静默抹掉——它看起来只是改了个集合。
+	rewriteProtocols := newProtocols != nil || req.ProtocolBaseURLs != nil
+	var protocolsToWrite []string
+	var protocolURLs map[string]string
+	if rewriteProtocols {
+		stored, storedURLs, err := a.storedProtocolRows(ctx, req.ID)
+		if err != nil {
+			return err
+		}
+		protocolsToWrite = newProtocols
+		if protocolsToWrite == nil {
+			protocolsToWrite = append([]string(nil), stored...)
+			// 只把**给了地址**的协议补进集合；空串是「清掉这个协议自己的
+			// 地址」，它不绑定任何东西（清一个没声明过的协议会被下面拒掉）。
+			for _, p := range sortedKeys(*req.ProtocolBaseURLs) {
+				if (*req.ProtocolBaseURLs)[p] == "" {
+					continue
+				}
+				if !slices.Contains(protocolsToWrite, p) {
+					protocolsToWrite = append(protocolsToWrite, p)
+				}
+			}
+		}
+		protocolURLs = make(map[string]string, len(protocolsToWrite))
+		for _, p := range protocolsToWrite {
+			if u := storedURLs[p]; u != "" {
+				protocolURLs[p] = u
+			}
+		}
+		if req.ProtocolBaseURLs != nil {
+			toSet := make(map[string]string, len(*req.ProtocolBaseURLs))
+			for p, u := range *req.ProtocolBaseURLs {
+				// 空值表示「清掉这个协议自己的地址」：它不参与地址校验，
+				// 但协议本身仍要在这次要写的集合里。
+				if !slices.Contains(protocolsToWrite, p) {
+					return fmt.Errorf("协议 %q 不在这次要写的协议集合里（%s）",
+						p, strings.Join(protocolsToWrite, "、"))
+				}
+				if u != "" {
+					toSet[p] = u
+				}
+			}
+			normalized, err := normalizeProtocolBaseURLs(protocolsToWrite, toSet)
+			if err != nil {
+				return err
+			}
+			for p := range *req.ProtocolBaseURLs {
+				if (*req.ProtocolBaseURLs)[p] == "" {
+					delete(protocolURLs, p)
+					continue
+				}
+				protocolURLs[p] = normalized[p]
+			}
+		}
+	}
+
 	if req.Name != nil {
 		name, err := normalizeName(*req.Name)
 		if err != nil {
@@ -623,7 +775,7 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		newHint = credential.Hint(*req.Credential)
 	}
 
-	if len(sets) == 0 && newEnvelope == nil {
+	if len(sets) == 0 && newEnvelope == nil && !rewriteProtocols {
 		return ErrNoChanges
 	}
 	// updated_at 每次都动，于是「改了几个字段」不影响这条语句的行为，
@@ -672,12 +824,12 @@ func (a *Admin) update(ctx context.Context, req UpdateRequest, ownerID int64) er
 		}
 		return a.explainNoRow(ctx, req.ID)
 	}
-	if newProtocols != nil {
+	if rewriteProtocols {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM channel_protocols WHERE channel_id = $1`, req.ID); err != nil {
 			return fmt.Errorf("修改渠道协议失败: %w", err)
 		}
-		if err := insertProtocols(ctx, tx, req.ID, newProtocols); err != nil {
+		if err := insertProtocols(ctx, tx, req.ID, protocolsToWrite, protocolURLs); err != nil {
 			return err
 		}
 	}
@@ -1007,14 +1159,20 @@ type ChannelInfo struct {
 	// 今天不再逐字相同（判据见 issue #1042）。今天它的读者是 doctor 的端点评据
 	// （见 DeclaredProtocols）。
 	Protocols []channel.Protocol
-	BaseURL   string
-	Status    string
-	Models    []string
-	Weight    int
-	Priority  int
-	Setting   map[string]any
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// ProtocolBaseURLs 是每个协议自己的上游地址（见迁移 00069）。
+	//
+	// 没有条目的协议沿用 BaseURL。给调用方看「每个协议实际打哪条地址」时
+	// 请走 ProtocolAddresses，不要自己再写一遍回退——判据只有一处
+	// （见 channel.ProtocolBaseURL）。
+	ProtocolBaseURLs map[channel.Protocol]string
+	BaseURL          string
+	Status           string
+	Models           []string
+	Weight           int
+	Priority         int
+	Setting          map[string]any
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 
 	// Accounts 是挂在这条渠道上的账号（见迁移 00067），按账号 id 升序。
 	//
@@ -1069,6 +1227,43 @@ func (i ChannelInfo) DeclaredProtocols() []string {
 		out = append(out, string(p))
 	}
 	return out
+}
+
+// ProtocolAddress 是一个协议与它实际生效的上游地址。
+type ProtocolAddress struct {
+	Protocol channel.Protocol
+	BaseURL  string
+}
+
+// ProtocolAddresses 返回这条渠道每个声明协议的实际生效地址，按协议名升序。
+//
+// 判据只有一处：channel.ProtocolBaseURL——执行器与各条探测读的是同一个。
+// 它回答的正是「我给了 --anthropic，那一侧真的走它吗」：只看配置读回值
+// 证明不了执行器用的是哪一条，而这条路径把「实际会打哪」摆在终端的同一行。
+func (i ChannelInfo) ProtocolAddresses() []ProtocolAddress {
+	protocols := i.DeclaredProtocols()
+	out := make([]ProtocolAddress, 0, len(protocols))
+	for _, p := range protocols {
+		protocol := channel.Protocol(p)
+		out = append(out, ProtocolAddress{
+			Protocol: protocol,
+			BaseURL:  channel.ProtocolBaseURL(protocol, i.ProtocolBaseURLs, i.BaseURL),
+		})
+	}
+	// 自己排一遍，不指望调用方给的顺序：DeclaredProtocols 从库里读回来时
+	// 已经是排序的（SQL 的 ORDER BY），但那不是这个方法的契约——夹具与将来的
+	// 调用方都会直接拼 Protocols，而屏幕上的顺序不该跟着来路变。
+	sort.Slice(out, func(a, b int) bool { return out[a].Protocol < out[b].Protocol })
+	return out
+}
+
+// HasProtocolAddresses 报告「每个协议的实际地址」这一行该不该打。
+//
+// 两条及以上的协议，或者有协议配了自己的地址时该打：那时「上游地址」那一栏
+// 已经不等于每一侧实际打的地址。单协议且没配专属地址时两者是同一句话，
+// 多一行只是把既有输出改长（见 TestChannelSingleProtocolTextOutputUnchanged）。
+func (i ChannelInfo) HasProtocolAddresses() bool {
+	return len(i.DeclaredProtocols()) > 1 || len(i.ProtocolBaseURLs) > 0
 }
 
 // List 列出**没有软删**的渠道，按 id 排序。
@@ -1205,11 +1400,10 @@ SELECT
     c.created_at,
     c.updated_at,
     c.deleted_at,
-    -- 与 candidateQuery 同一格：声明了哪些协议。管理面不把它打进输出，
-    -- 但 doctor 的端点评据要读它（见 DeclaredProtocols）。
-    (SELECT COALESCE(json_agg(p.protocol ORDER BY p.protocol), '[]'::json)::text
-       FROM channel_protocols p
-      WHERE p.channel_id = c.id) AS protocols,
+    -- 与 candidateQuery 同一格：声明了哪些协议，以及每个协议自己的地址。
+    -- 管理面把协议集合本身打进输出只在这一批行里（见 ChannelInfo 的
+    -- ProtocolAddresses），但 doctor 的端点评据也要读它（见 DeclaredProtocols）。
+` + protocolsColumnSQL + ` AS protocols,
     -- 挂在这条渠道上的账号（见迁移 00067）。密文以 base64 带出来，只用来
     -- 算「挂在哪些主密钥下」，不会离开本包；bytea 不能直接进 JSON，
     -- 所以显式编码，解回来在 scanInfo 里。
@@ -1256,11 +1450,12 @@ func scanInfo(rows rowScanner) (ChannelInfo, error) {
 	}
 	info.Models = models
 
-	protocols, err := decodeProtocols(info.ID, protocolsRaw)
+	protocols, protocolBaseURLs, err := decodeProtocols(info.ID, protocolsRaw)
 	if err != nil {
 		return ChannelInfo{}, err
 	}
 	info.Protocols = protocols
+	info.ProtocolBaseURLs = protocolBaseURLs
 
 	setting, err := decodeSetting(settingRaw)
 	if err != nil {
@@ -1368,7 +1563,7 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 
 	protocols := newProtocols
 	if protocols == nil {
-		stored, err := a.storedProtocols(ctx, req.ID)
+		stored, _, err := a.storedProtocolRows(ctx, req.ID)
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -1385,27 +1580,40 @@ func (a *Admin) attachmentAfter(ctx context.Context, req UpdateRequest, newModel
 	return protocols, models, true, nil
 }
 
-// storedProtocols 读一条渠道当前声明的协议（没有行时返回空切片）。
-func (a *Admin) storedProtocols(ctx context.Context, channelID int64) ([]string, error) {
+// storedProtocolRows 读一条渠道当前声明的协议与它们各自的地址。
+//
+// 地址为 NULL 的协议不进 urls：没有条目与「地址是空的」在读取侧同义，判据
+// 只在 channel.ProtocolBaseURL 一处（见它的注释）。
+func (a *Admin) storedProtocolRows(ctx context.Context, channelID int64) ([]string, map[string]string, error) {
 	rows, err := a.handle().QueryContext(ctx,
-		`SELECT protocol FROM channel_protocols WHERE channel_id = $1 ORDER BY protocol`, channelID)
+		`SELECT protocol, base_url FROM channel_protocols WHERE channel_id = $1 ORDER BY protocol`, channelID)
 	if err != nil {
-		return nil, fmt.Errorf("查渠道 %d 的协议失败: %w", channelID, err)
+		return nil, nil, fmt.Errorf("查渠道 %d 的协议失败: %w", channelID, err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var out []string
+	var urls map[string]string
 	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			return nil, fmt.Errorf("读取渠道 %d 的协议失败: %w", channelID, err)
+		var (
+			p       string
+			baseURL sql.NullString
+		)
+		if err := rows.Scan(&p, &baseURL); err != nil {
+			return nil, nil, fmt.Errorf("读取渠道 %d 的协议失败: %w", channelID, err)
 		}
 		out = append(out, p)
+		if baseURL.Valid && baseURL.String != "" {
+			if urls == nil {
+				urls = make(map[string]string)
+			}
+			urls[p] = baseURL.String
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("遍历渠道 %d 的协议失败: %w", channelID, err)
+		return nil, nil, fmt.Errorf("遍历渠道 %d 的协议失败: %w", channelID, err)
 	}
-	return out, nil
+	return out, urls, nil
 }
 
 // checkModelEndpoints 确认这批模型能在本条渠道声明的任一端点上被服务。

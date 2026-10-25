@@ -278,3 +278,192 @@ func TestChannelCreateRejectsUnknownProtocol(t *testing.T) {
 		t.Errorf("报错里出现了凭证本身：%v", err)
 	}
 }
+
+// ── 每个协议自己的地址 ──────────────────────────────────────────────────
+
+// 分址旗标点名的协议等于被绑上：给了地址就够了，不必再写 --protocols；
+// 两个都写时它们必须指同一批协议，不一致是参数错（不是静默取一个）。
+func TestChannelCreateProtocolBaseURLFlags(t *testing.T) {
+	const (
+		baseURL      = "https://api.example.com/v1"
+		anthropicURL = "https://api.example.com/anthropic"
+	)
+	cases := []struct {
+		name          string
+		args          []string
+		wantType      string
+		wantProtocols []string
+		wantURLs      map[string]string
+		wantErr       string
+	}{
+		{
+			name:          "只给分址：协议由地址带出来",
+			args:          []string{"--anthropic", anthropicURL},
+			wantProtocols: []string{"anthropic"},
+			wantURLs:      map[string]string{"anthropic": anthropicURL},
+		},
+		{
+			name:          "--type 在前、分址协议跟在后",
+			args:          []string{"--type", "openai", "--anthropic", anthropicURL},
+			wantType:      "openai",
+			wantProtocols: []string{"openai", "anthropic"},
+			wantURLs:      map[string]string{"anthropic": anthropicURL},
+		},
+		{
+			name:          "--protocols 与分址指同一批协议",
+			args:          []string{"--protocols", "openai,anthropic", "--anthropic", anthropicURL},
+			wantProtocols: []string{"openai", "anthropic"},
+			wantURLs:      map[string]string{"anthropic": anthropicURL},
+		},
+		{
+			name:    "--protocols 与分址不一致",
+			args:    []string{"--protocols", "openai", "--anthropic", anthropicURL},
+			wantErr: "不在这次的协议集合里",
+		},
+		{
+			name:    "分址给的是空串",
+			args:    []string{"--type", "openai", "--openai", "  "},
+			wantErr: "--openai 的地址是空的",
+		},
+		{
+			name:    "分址没过地址校验",
+			args:    []string{"--type", "openai", "--openai", "not-a-url"},
+			wantErr: "--openai 的地址不合法",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{
+				"--name", "c1", "--base-url", baseURL, "--models", "m1",
+			}, tc.args...)
+			req, _, err := parseChannelCreate(args)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("期望报错且含 %q，得到 %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("解析出错: %v", err)
+			}
+			if req.Type != tc.wantType {
+				t.Errorf("Type = %q，期望 %q", req.Type, tc.wantType)
+			}
+			if strings.Join(req.Protocols, ",") != strings.Join(tc.wantProtocols, ",") {
+				t.Errorf("Protocols = %v，期望 %v", req.Protocols, tc.wantProtocols)
+			}
+			if len(req.ProtocolBaseURLs) != len(tc.wantURLs) {
+				t.Fatalf("ProtocolBaseURLs = %v，期望 %v", req.ProtocolBaseURLs, tc.wantURLs)
+			}
+			for p, want := range tc.wantURLs {
+				if got := req.ProtocolBaseURLs[p]; got != want {
+					t.Errorf("ProtocolBaseURLs[%q] = %q，期望 %q", p, got, want)
+				}
+			}
+		})
+	}
+}
+
+// update 的分址：给了就写，空串是「清掉」（与「没给这一项」不是一回事）。
+func TestChannelUpdateProtocolBaseURLFlags(t *testing.T) {
+	const anthropicURL = "https://api.example.com/anthropic"
+
+	req, err := parseChannelUpdate([]string{"--id", "3", "--anthropic", anthropicURL})
+	if err != nil {
+		t.Fatalf("解析出错: %v", err)
+	}
+	if req.ProtocolBaseURLs == nil || (*req.ProtocolBaseURLs)["anthropic"] != anthropicURL {
+		t.Fatalf("ProtocolBaseURLs = %v，期望写入 anthropic 的地址", req.ProtocolBaseURLs)
+	}
+
+	clear, err := parseChannelUpdate([]string{"--id", "3", "--anthropic", ""})
+	if err != nil {
+		t.Fatalf("解析出错: %v", err)
+	}
+	if clear.ProtocolBaseURLs == nil {
+		t.Fatal("空串也是给了这一项：ProtocolBaseURLs 不该是 nil")
+	}
+	if got, ok := (*clear.ProtocolBaseURLs)["anthropic"]; !ok || got != "" {
+		t.Errorf("ProtocolBaseURLs = %v，期望 anthropic 对应空串（清掉）", *clear.ProtocolBaseURLs)
+	}
+
+	if _, err := parseChannelUpdate([]string{
+		"--id", "3", "--protocols", "openai", "--anthropic", anthropicURL,
+	}); err == nil || !strings.Contains(err.Error(), "不在这次的协议集合里") {
+		t.Fatalf("集合外的分址应当报错，得到 %v", err)
+	}
+	if _, err := parseChannelUpdate([]string{"--id", "3", "--anthropic", "not-a-url"}); err == nil ||
+		!strings.Contains(err.Error(), "--anthropic 的地址不合法") {
+		t.Fatalf("地址没过校验应当报错，得到 %v", err)
+	}
+}
+
+// splitProtocolChannel 是一条声明两套协议、anthropic 配了自己地址的渠道。
+func splitProtocolChannel() channels.ChannelInfo {
+	info := sampleSingleProtocolChannel(true)
+	info.Protocols = []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic}
+	info.ProtocolBaseURLs = map[channel.Protocol]string{
+		channel.ProtocolAnthropic: "https://api.example.com/anthropic",
+	}
+	return info
+}
+
+// protocolAddressRow 从 channel get 的文本输出里取出「协议地址」那一行的取值。
+//
+// 不按固定列宽找：那一栏的标签宽度由同一张表里最长的标签决定，写死空格数
+// 会让这个用例在别的字段改名之后莫名其妙地红。
+func protocolAddressRow(t *testing.T, rendered string) (string, bool) {
+	t.Helper()
+	lineRE := regexp.MustCompile(`^(\S+)\s{2,}(.*)$`)
+	for _, line := range strings.Split(rendered, "\n") {
+		m := lineRE.FindStringSubmatch(line)
+		if m != nil && m[1] == "协议地址" {
+			return m[2], true
+		}
+	}
+	return "", false
+}
+
+// channel get 的文本输出：多一栏「协议地址」，逐个协议列出实际生效的地址。
+func TestChannelSplitProtocolTextOutput(t *testing.T) {
+	want := "anthropic=https://api.example.com/anthropic,openai=" + testBaseURL
+	if got, ok := protocolAddressRow(t, renderChannelDetail(t, splitProtocolChannel())); !ok || got != want {
+		t.Errorf("协议地址 = %q（在不在：%v），期望 %q", got, ok, want)
+	}
+
+	// 多协议但没配专属地址：每一侧都沿用渠道地址，同样要打出来——
+	// 这时「上游地址」那一栏已经不等于每一侧实际打的地址。
+	none := sampleSingleProtocolChannel(true)
+	none.Protocols = []channel.Protocol{channel.ProtocolOpenAI, channel.ProtocolAnthropic}
+	wantNone := "anthropic=" + testBaseURL + ",openai=" + testBaseURL
+	if got, ok := protocolAddressRow(t, renderChannelDetail(t, none)); !ok || got != wantNone {
+		t.Errorf("多协议没分址时协议地址 = %q（在不在：%v），期望 %q", got, ok, wantNone)
+	}
+}
+
+// channel get -o json：多一个 protocol_addresses 对象，键是协议名。
+func TestChannelSplitProtocolJSONOutput(t *testing.T) {
+	doc := channelGetDoc(splitProtocolChannel())
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	entry := jsonObjectField(t, jsonRoundTrip(t, doc), "channel")
+	addrs, ok := entry["protocol_addresses"].(map[string]any)
+	if !ok {
+		t.Fatalf("channel 那一栏里没有 protocol_addresses 对象：%s", raw)
+	}
+	want := map[string]string{
+		"anthropic": "https://api.example.com/anthropic",
+		"openai":    testBaseURL,
+	}
+	if len(addrs) != len(want) {
+		t.Fatalf("protocol_addresses = %v，期望 %v", addrs, want)
+	}
+	for p, wantURL := range want {
+		if got, _ := addrs[p].(string); got != wantURL {
+			t.Errorf("protocol_addresses[%q] = %v，期望 %q", p, addrs[p], wantURL)
+		}
+	}
+}
