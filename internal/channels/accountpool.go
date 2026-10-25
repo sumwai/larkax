@@ -203,6 +203,15 @@ func (r *accountRotation) forget(channelID int64) {
 // 排上很多次，池子小的时候看起来像流量一阵一阵地偏。平滑版本每次只看累积值，
 // 2:1 的池子给出 A,B,A,A,B,A 这样均匀交错的顺序。
 //
+// # 权重 ≤ 0 排在最后
+//
+// 0 与负数在迁移、accountUsable 与 `account update --channel … --weight N`
+// 里的含义都是「先别用」。这里因此按 0 累积、不参与第一名（best）的挑选，
+// 但仍留在返回列表里、排在末尾——第一个账号的密文解不开时后面的会被试到，
+// 把暂停的账号从返回值里去掉会让「正权重账号全解不开」变成没有账号可用。
+// 池子里一个正权重账号都没有时退回等权，按输入顺序轮流（与这条兜底改之前
+// 一字不差），不返回空列表。
+//
 // # 等权时先挑谁
 //
 // 累积值相等时取输入顺序里靠前的那个，而输入按账号 id 升序——同一份配置每次
@@ -226,15 +235,29 @@ func (r *accountRotation) rotate(channelID int64, accounts []poolAccount) []pool
 
 	// 丢掉不在本次池子里的账号：被摘掉又回来的从 0 开始。
 	present := make(map[int64]bool, len(accounts))
+	// 权重 ≤ 0 是运维写的「先别用」（见 accountUsable）：累积时加 0，挑选时
+	// 也不参与。加 0 而不是清零——它还在池子里，只是暂不参选，权重改回来时
+	// 接着原有的累积值走；与上面「被摘掉又回来」的从 0 开始不是一回事。
+	weights := make([]int, len(accounts))
 	total := 0
-	for _, acc := range accounts {
-		present[acc.ID] = true
-		weight := acc.Weight
-		if weight <= 0 {
-			weight = 1
+	for i, acc := range accounts {
+		if acc.Weight > 0 {
+			weights[i] = acc.Weight
 		}
-		current[acc.ID] += weight
-		total += weight
+		total += weights[i]
+	}
+	if total == 0 {
+		// 池子里一个正权重账号都没有：今天的行为是按 id 升序轮流，保持不变。
+		// 不能因此返回空列表——openPoolAccount 拿到空列表时 lastErr 是 nil，
+		// 会返回零值账号 + nil 错误，调用方会把它当成挑到了账号。
+		for i := range weights {
+			weights[i] = 1
+		}
+		total = len(accounts)
+	}
+	for i, acc := range accounts {
+		present[acc.ID] = true
+		current[acc.ID] += weights[i]
 	}
 	for id := range current {
 		if !present[id] {
@@ -242,17 +265,37 @@ func (r *accountRotation) rotate(channelID int64, accounts []poolAccount) []pool
 		}
 	}
 
-	best := 0
-	for i := 1; i < len(accounts); i++ {
-		if current[accounts[i].ID] > current[accounts[best].ID] {
+	// 只在参选的账号里挑：被暂停的可能留着上一次参选时的累积值，拿它去比
+	// 会把一个明确暂停的账号排到最前面。
+	best := -1
+	for i := range accounts {
+		if weights[i] == 0 {
+			continue
+		}
+		if best < 0 || current[accounts[i].ID] > current[accounts[best].ID] {
 			best = i
 		}
 	}
 	current[accounts[best].ID] -= total
 
+	// 备选按输入顺序跟着，这里不重排：入参顺序由调用方保证——池子由候选查询
+	// 按 id 聚合成一列（internal/channels/channels.go 里 json_agg(... ORDER BY
+	// a.id)，那是聚合函数自己的参数顺序，可靠）。在这儿补一个 sort 会把所有
+	// 池子的备选顺序一起改掉。
+	//
+	// 权重 ≤ 0 的排在末尾：只有正权重账号的密文全都解不开时才会试到它们，
+	// 那时不用就一个账号都没有了。
 	ordered := make([]poolAccount, 0, len(accounts))
 	ordered = append(ordered, accounts[best])
-	ordered = append(ordered, accounts[:best]...)
-	ordered = append(ordered, accounts[best+1:]...)
+	for i, acc := range accounts {
+		if i != best && weights[i] > 0 {
+			ordered = append(ordered, acc)
+		}
+	}
+	for i, acc := range accounts {
+		if i != best && weights[i] == 0 {
+			ordered = append(ordered, acc)
+		}
+	}
 	return ordered
 }
