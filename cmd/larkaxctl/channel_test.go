@@ -1337,7 +1337,7 @@ func TestChannelGetHealthRestoreRejectBadFlags(t *testing.T) {
 // 这一件事给出两种说法时，读的人分不出它们是同一件事还是两个不同的状态。
 func TestChannelHealthEmptyListWordingIsPinned(t *testing.T) {
 	var buf bytes.Buffer
-	printChannelHealthList(&buf, nil, false)
+	printChannelHealthList(&buf, nil, false, time.Time{})
 
 	const want = "暂无渠道。可使用 larkaxctl channel create 添加。\n"
 	if buf.String() != want {
@@ -1369,6 +1369,10 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	cost := "1.50000000"
 	probe := time.Date(2026, 10, 17, 4, 25, 15, 0, time.UTC)
 	since := time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
+	// 渲染时刻显式给死：凭证池那一栏要判「哪些账号此刻可用」，而 drained 的账号
+	// 过一段冷却期会重新参选——用 time.Now() 的话这条用例会随运行时刻变结论。
+	now := time.Date(2026, 10, 17, 5, 0, 0, 0, time.UTC)
+	freshFailure := now.Add(-time.Minute)
 
 	rows := []channels.ChannelHealth{
 		{
@@ -1376,6 +1380,16 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 			Requests: 40, Successes: 39, Failures: 1,
 			CacheHitTokens: 300, CacheMissTokens: 700,
 			LatencyP50ms: &ms50, LatencyP95ms: &ms95, Cost: &cost,
+			Accounts: []channels.AccountHealth{
+				{ID: 21, Name: "main", Weight: 2, Health: "healthy", Conclusion: "成功"},
+				{
+					// 刚被上游拒绝的那个：冷却期没过，此刻不可用——但它在池子里，
+					// 所以整体是 degraded 而不是 drained。
+					ID: 22, Name: "backup", Weight: 1, Health: "drained",
+					ConsecutiveFailures: 1, LastFailureAt: &freshFailure,
+					Conclusion: "凭证被上游拒绝",
+				},
+			},
 		},
 		{
 			// 一条什么数据都没有的渠道：这一行专门盯住「缺值是 null，不是 `-`
@@ -1391,7 +1405,7 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 		LatencyP95ms: &ms95, Cost: &cost,
 	}}
 
-	got := jsonRoundTrip(t, channelHealthDoc(rows, since, true, buckets, true))
+	got := jsonRoundTrip(t, channelHealthDoc(rows, now, since, true, buckets, true))
 	assertJSONField(t, got, "status", jsonOK)
 
 	summary := jsonObjectField(t, got, "summary")
@@ -1420,6 +1434,32 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	assertJSONField(t, first, "latency_p95_ms", float64(240))
 	assertJSONField(t, first, "cost", "1.50000000")
 	assertJSONField(t, first, "deleted_at", nil)
+	// 凭证池三项：整体结论、此刻可用个数、逐账号读数。判据与选路同一个
+	// （见 channels.AccountHealth.Usable）——命令行上说可用，就是选路会挑它。
+	assertJSONField(t, first, "pool", "degraded")
+	assertJSONField(t, first, "accounts_usable", float64(1))
+	accounts := jsonEntries(t, first, "accounts")
+	if len(accounts) != 2 {
+		t.Fatalf("账号 %d 个，期望 2 个", len(accounts))
+	}
+	healthy := accounts[0].(map[string]any)
+	assertJSONField(t, healthy, "id", float64(21))
+	assertJSONField(t, healthy, "name", "main")
+	assertJSONField(t, healthy, "weight", float64(2))
+	assertJSONField(t, healthy, "health", "healthy")
+	assertJSONField(t, healthy, "consecutive_failures", float64(0))
+	assertJSONField(t, healthy, "last_failure_at", nil)
+	assertJSONField(t, healthy, "conclusion", "成功")
+	assertJSONField(t, healthy, "usable", true)
+	drained := accounts[1].(map[string]any)
+	assertJSONField(t, drained, "weight", float64(1))
+	assertJSONField(t, drained, "health", "drained")
+	assertJSONField(t, drained, "consecutive_failures", float64(1))
+	// 冷却期没过：状态是 drained，usable 是 false。两个字段一起才答得出
+	// 「它为什么没被选路挑中」。
+	assertJSONField(t, drained, "last_failure_at", "2026-10-17T04:59:00Z")
+	assertJSONField(t, drained, "usable", false)
+	assertJSONField(t, drained, "conclusion", "凭证被上游拒绝")
 
 	second := list[1].(map[string]any)
 	// 断言用字面量而不是 channels.HealthUnknown：夹具里那格也是用同一个常量填的，
@@ -1436,6 +1476,13 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	assertJSONField(t, second, "cache_hit_tokens", float64(0))
 	assertJSONField(t, second, "cache_miss_tokens", float64(0))
 	assertJSONField(t, second, "deleted_at", "2026-10-15T01:02:03Z")
+	// 一个账号都没挂：池的状态是 empty（不是 drained），可用个数 0，清单是空数组
+	// 而不是 null——与 channels 那一栏同一条（见 format.go 的 jsonList）。
+	assertJSONField(t, second, "pool", "empty")
+	assertJSONField(t, second, "accounts_usable", float64(0))
+	if n := len(jsonEntries(t, second, "accounts")); n != 0 {
+		t.Errorf("没挂账号的渠道应当打到空数组，得到 %d 个账号", n)
+	}
 
 	bs := jsonEntries(t, got, "buckets")
 	if len(bs) != 1 {
@@ -1451,7 +1498,7 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	assertJSONField(t, bucket, "cost", "1.50000000")
 
 	t.Run("清单那一档不给 buckets", func(t *testing.T) {
-		listOnly := jsonRoundTrip(t, channelHealthDoc(rows, since, false, nil, false))
+		listOnly := jsonRoundTrip(t, channelHealthDoc(rows, now, since, false, nil, false))
 		if _, ok := listOnly["buckets"]; ok {
 			t.Error("没带 --id 时不该有逐小时明细")
 		}
@@ -1462,7 +1509,7 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	})
 
 	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
-		empty := jsonRoundTrip(t, channelHealthDoc(nil, since, false, nil, true))
+		empty := jsonRoundTrip(t, channelHealthDoc(nil, now, since, false, nil, true))
 		if len(jsonEntries(t, empty, "channels")) != 0 {
 			t.Error("空清单应当是空数组")
 		}
@@ -1495,9 +1542,9 @@ func TestChannelHealthShowsCacheTokens(t *testing.T) {
 		print func(w io.Writer)
 	}{
 		{"汇总表", func(w io.Writer) {
-			printChannelHealthList(w, []channels.ChannelHealth{row}, false)
+			printChannelHealthList(w, []channels.ChannelHealth{row}, false, time.Time{})
 		}},
-		{"单条读数", func(w io.Writer) { printChannelHealthDetail(w, row) }},
+		{"单条读数", func(w io.Writer) { printChannelHealthDetail(w, row, time.Time{}) }},
 		{"逐小时明细", func(w io.Writer) {
 			printChannelHealthHours(w, []channels.HealthBucket{bucket})
 		}},
@@ -1955,4 +2002,85 @@ func TestChannelHealthJSONStdoutIsPure(t *testing.T) {
 func hourBucketOf(t *testing.T, n int) time.Time {
 	t.Helper()
 	return time.Now().UTC().Truncate(time.Hour).Add(-time.Duration(n) * time.Hour)
+}
+
+// TestChannelHealthAccountsTable 钉住逐账号那张表的列，以及「可用」这一列的判据。
+//
+// 两行都可以写着 drained：冷却期没过的那个不可用，过了的那个已经重新参选。
+// 只打「状态」的话这两种处境在表上一模一样，而它们该做的补救动作不同
+// ——所以「可用」必须真的按 now 算出来，不能把参数收下不用。
+func TestChannelHealthAccountsTable(t *testing.T) {
+	withTerminal(t, false)
+	at := time.Date(2026, 10, 17, 5, 0, 0, 0, time.UTC)
+	cooling := at.Add(-time.Minute) // 冷却期没过
+	cooled := at.Add(-time.Hour)    // 冷却期已过
+	h := channels.ChannelHealth{
+		ID: 7, Name: "c1",
+		Accounts: []channels.AccountHealth{
+			{ID: 21, Name: "main", Weight: 2, Health: channels.AccountHealthHealthy, Conclusion: "成功"},
+			{ID: 22, Name: "cooling", Weight: 1, Health: channels.AccountHealthDrained,
+				ConsecutiveFailures: 1, LastFailureAt: &cooling, Conclusion: "凭证被上游拒绝"},
+			{ID: 23, Name: "cooled", Weight: 1, Health: channels.AccountHealthDrained,
+				ConsecutiveFailures: 1, LastFailureAt: &cooled, Conclusion: "凭证被上游拒绝"},
+		},
+	}
+
+	var buf bytes.Buffer
+	printChannelHealthAccounts(&buf, h, at)
+	out := buf.String()
+	if !strings.Contains(out, "可用") {
+		t.Fatalf("表头里没有「可用」一列：\n%s", out)
+	}
+
+	// 按行判：名字不会出现在别的列里，所以「这一行里有 是 / 否」就是这一列。
+	for _, tc := range []struct {
+		account string
+		want    string
+	}{
+		{"main", "是"},
+		{"cooling", "否"},
+		{"cooled", "是"},
+	} {
+		line := ""
+		for _, candidate := range strings.Split(out, "\n") {
+			if strings.Contains(candidate, tc.account) {
+				line = candidate
+				break
+			}
+		}
+		if line == "" {
+			t.Fatalf("表里没有账号 %s：\n%s", tc.account, out)
+		}
+		if !strings.Contains(line, tc.want) {
+			t.Errorf("账号 %s 的「可用」=%q，期望「%s」那一格：%s",
+				tc.account, line, tc.want, out)
+		}
+	}
+}
+
+// TestChannelHealthAccountsEmptyHint 钉住空池那句提示——它必须是一条能直接
+// 照抄的命令，且已删的渠道不能被指去 account add（那条路会拒绝已删渠道）。
+func TestChannelHealthAccountsEmptyHint(t *testing.T) {
+	withTerminal(t, false)
+	at := time.Date(2026, 10, 17, 5, 0, 0, 0, time.UTC)
+
+	var live bytes.Buffer
+	printChannelHealthAccounts(&live, channels.ChannelHealth{ID: 7, Name: "c1"}, at)
+	got := live.String()
+	if !strings.Contains(got, "account add <账号> --channel 7") {
+		t.Errorf("空池提示不是一条能照抄的命令：%q", got)
+	}
+
+	var deleted bytes.Buffer
+	printChannelHealthAccounts(&deleted, channels.ChannelHealth{
+		ID: 7, Name: "c1", DeletedAt: at}, at)
+	got = deleted.String()
+	if !strings.Contains(got, "channel restore --id 7") {
+		t.Errorf("已删渠道的提示没指向 restore：%q", got)
+	}
+	// 恢复之后还要挂账号，所以「account add」出现在这里是对的；但顺序不能反
+	// ——先 add 会被拒（account add 不认已删渠道）。
+	if i, j := strings.Index(got, "channel restore"), strings.Index(got, "account add"); i < 0 || j < i {
+		t.Errorf("已删渠道的提示顺序不对（应先 restore 再 add）：%q", got)
+	}
 }

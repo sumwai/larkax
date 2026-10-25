@@ -144,7 +144,7 @@ func insertChannel(ctx context.Context, t *testing.T, db *sql.DB, sealer *creden
 	if err != nil {
 		t.Fatalf("插入渠道失败: %v", err)
 	}
-	// 00067 之后凭证在账号上：渠道行只有关联，选路取账号 id 最小的那一个。
+	// 00067 之后凭证在账号上：渠道行只有关联，选路在挂着的账号里按权重轮询。
 	attachAccount(ctx, t, db, id, spec.credential)
 	return id
 }

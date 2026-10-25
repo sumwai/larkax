@@ -711,6 +711,10 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		Requests: 40, Successes: 39, Failures: 1,
 		CacheHitTokens: 300, CacheMissTokens: 700,
 		LatencyP50ms: &healthP50, LatencyP95ms: &healthP95, Cost: &healthCost,
+		Accounts: []channels.AccountHealth{{
+			ID: 21, Name: "account-abc123", Weight: 2, Health: "healthy",
+			Conclusion: "成功",
+		}},
 	}
 	healthBucket := channels.HealthBucket{
 		Bucket: at, Requests: 40, Successes: 39, Failures: 1,
@@ -761,10 +765,13 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 			printChannelDetail(w, channel)
 		}},
 		{"渠道健康汇总", func(w io.Writer) {
-			printChannelHealthList(w, []channels.ChannelHealth{healthRow}, false)
+			printChannelHealthList(w, []channels.ChannelHealth{healthRow}, false, at)
 		}},
 		{"渠道健康详情", func(w io.Writer) {
-			printChannelHealthDetail(w, healthRow)
+			printChannelHealthDetail(w, healthRow, at)
+		}},
+		{"渠道健康的账号明细", func(w io.Writer) {
+			printChannelHealthAccounts(w, healthRow, at)
 		}},
 		{"渠道健康逐小时", func(w io.Writer) {
 			printChannelHealthHours(w, []channels.HealthBucket{healthBucket})
@@ -1017,8 +1024,8 @@ func TestListTablesStyleWithoutChangingLayout(t *testing.T) {
 		}},
 	}
 
-	if len(cases) != 38 {
-		t.Fatalf("这张表里 %d 条渲染路径，期望 38 条——少了一条就等于那条没人看", len(cases))
+	if len(cases) != 39 {
+		t.Fatalf("这张表里 %d 条渲染路径，期望 39 条——少了一条就等于那条没人看", len(cases))
 	}
 
 	for _, tc := range cases {

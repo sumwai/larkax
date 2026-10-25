@@ -44,6 +44,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sumwai/larkax/internal/catalog"
@@ -67,6 +68,17 @@ type Source struct {
 
 	// Now 可注入，便于测试「健康数据是否过期」这类与当前时间有关的判断。
 	Now func() time.Time
+
+	// rotation 是账号池的加权轮询状态，按渠道分开记（见 accountRotation）。
+	//
+	// 它必须跟着 Source 走，不能每次 Candidates 重建：轮询的全部意义就是
+	// 「上一次选了谁」这件事被记住。同一个 Source 给多条渠道用是正常的
+	// （装配层只建一个），所以状态按渠道 id 分开。
+	rotation accountRotation
+
+	// decryptWarn 记录每条渠道上一次「池里有账号解不开」的告警时刻，
+	// 用于按渠道限流（见 warnAccountDecrypt）。同样是跨请求的状态。
+	decryptWarn sync.Map // map[int64]time.Time
 }
 
 // modelCatalog 按规范名读回目录里与选路有关的那几列。
@@ -376,18 +388,33 @@ func (s *Source) Candidates(ctx context.Context, canonicalModel string) ([]route
 			return nil, err
 		}
 
-		plaintext, err := s.decrypt(row.credentialEnc)
+		// 池子里挑一个账号：按权重轮询，drained 的跳过（见 accountRotation
+		// 与 poolAccount.usable）。池子空、或全挂，这条渠道这次就不参选。
+		//
+		// 跳过不是静默：每个账号的状态与最近结论在 `channel health` 里打出来
+		// （见 health.go 的 AccountHealth），而这里只在 debug 档留一行——
+		// 一条全挂的渠道会让**每一次**选路都走到这里，warn 档会把日志刷满。
+		usable := usablePool(row.accounts, now)
+		if len(usable) == 0 {
+			// 池子空了就把轮询状态一起丢掉：账号回来时从 0 开始。
+			s.rotation.forget(row.id)
+			s.logger().DebugContext(ctx, "渠道的账号池里没有可用账号，本次不参与选路",
+				"channel_id", row.id, "channel", row.name, "accounts", len(row.accounts))
+			continue
+		}
+
+		picked, plaintext, err := s.openPoolAccount(ctx, row.id, usable)
 		if err != nil {
 			// 把账号标进错误：一条渠道可以挂多把 key，只说渠道等于没说
 			// 是哪一行数据要处理。errors.Is 仍然穿得过去（%w）。
-			err = fmt.Errorf("账号 %d: %w", row.accountID, err)
+			//
 			// 一个渠道的密文坏了不该让同一模型下别人的渠道一起不可用，
 			// 所以跳过它继续。跳过不是静默：下面要么记日志，要么整次调用报错。
 			failures = append(failures, DecryptFailure{ChannelID: row.id, Name: row.name, Err: err})
 			continue
 		}
 
-		cand, err := row.candidate(plaintext, now)
+		cand, err := row.candidate(picked, plaintext, now)
 		if err != nil {
 			// 这里与上面相反，整次调用报错。两类失败的性质不同：
 			// 凭证解不开是**运维中会发生的事**（轮换、少配一把钥匙），
@@ -532,6 +559,60 @@ func (s *Source) decrypt(envelope []byte) (string, error) {
 	return openCredential(s.sealer, envelope)
 }
 
+// openPoolAccount 从这条渠道的可用账号里挑一个，并解开它的凭证。
+//
+// # 顺序与推进
+//
+// 顺序由加权轮询给出（见 accountRotation.rotate）。轮询**每个请求只推进一次**：
+// 推进的是「这次用哪个账号」，而它由排在最前的那个决定；后面几个只是备选。
+//
+// # 为什么解不开还要往后试
+//
+// 一个账号的密文坏了，不代表同一渠道里别的账号也坏了：密文是按账号行存的
+// （见迁移 00067），轮换、手工改库都可能只弄坏其中一行。往后试的代价是一次
+// 本地解密，失败的那几次不会被记成上游失败，也不产生任何调用。
+//
+// 全解不开时返回最后一个错误，调用方把它记成这条渠道的解密失败——错误里带着
+// 账号 id，一条渠道挂多把 key 时才知道是哪一行要处理。
+func (s *Source) openPoolAccount(ctx context.Context, channelID int64, usable []poolAccount) (poolAccount, string, error) {
+	ordered := s.rotation.rotate(channelID, usable)
+	var lastErr error
+	for _, account := range ordered {
+		plaintext, err := s.decrypt(account.Envelope)
+		if err == nil {
+			if lastErr != nil {
+				// 兄弟账号能解时这一行以前是静默丢掉的：那条坏密文既不进
+				// DecryptFailure（渠道本身参选了），也没有别的读者，于是
+				// 「池里有一行坏了」只在它恰好排到最前面时才看得见。
+				// 按渠道限流地报一次，让它不再靠运气被发现。
+				s.warnAccountDecrypt(ctx, channelID, lastErr)
+			}
+			return account, plaintext, nil
+		}
+		lastErr = fmt.Errorf("账号 %d: %w", account.ID, err)
+	}
+	return poolAccount{}, "", lastErr
+}
+
+// accountDecryptWarnInterval 是「池里有账号解不开」这条告警的最小间隔。
+//
+// 一行坏密文会被**每一次**选路碰到，不限流的话它会把日志刷满，而刷满之后
+// 没有人再读它。按渠道记一次，别的一律降噪。
+const accountDecryptWarnInterval = 5 * time.Minute
+
+// warnAccountDecrypt 按渠道限流地报一次「池里这个账号解不开」。
+func (s *Source) warnAccountDecrypt(ctx context.Context, channelID int64, err error) {
+	now := s.now()
+	if v, ok := s.decryptWarn.Load(channelID); ok {
+		if last, ok := v.(time.Time); ok && now.Sub(last) < accountDecryptWarnInterval {
+			return
+		}
+	}
+	s.decryptWarn.Store(channelID, now)
+	s.logger().WarnContext(ctx, "渠道池里有账号的凭证解不开，这次跳过它",
+		"channel_id", channelID, "err", err)
+}
+
 // openCredential 把一行的密文解成明文凭证。
 //
 // 错误分类集中在这里：调用方只需要判断 ErrNoMasterKey 与 ErrCredentialCorrupt，
@@ -664,8 +745,7 @@ SELECT
     c.weight,
     c.priority,
     COALESCE(c.owner_user_id, 0),
-    ac.id,
-    ac.credential_enc,
+    ac.accounts,
     c.consecutive_failures,
     c.last_failure_at,
     h.requests,
@@ -693,22 +773,38 @@ SELECT
        FROM channel_protocols p
       WHERE p.channel_id = c.id) AS protocols
   FROM channels c
-  -- 凭证在账号上（见迁移 00067）。这条渠道一个账号都没挂时不产生行，
-  -- INNER JOIN 于是把它整个排除出候选集——零账号是合法的中间态，
-  -- 「建得出、list 可见」，但选路要跳过它。
-  --
-  -- 一条渠道挂多个账号时取 id 最小的那一个：本命令只负责把凭证交到执行器，
-  -- 池内调度（权重、健康、换 key 的轮转）是后续工作的事。按 id 固定取一条
-  -- 让同一份配置每次选到同一把 key——随机挑会让「这条渠道用的是哪把 key」
-  -- 在排查时无法复现。
-  JOIN LATERAL (
-        SELECT a.id, a.credential_enc
-          FROM channel_accounts ca
-          JOIN accounts a ON a.id = ca.account_id
-         WHERE ca.channel_id = c.id
-         ORDER BY a.id
-         LIMIT 1
-       ) ac ON true
+    -- 账号池（见迁移 00067 / 00068）。一条渠道挂几个账号只有池子自己知道，
+    -- 所以这里把**整个池子**一次带回来，由 Go 侧按权重与健康挑一个
+    -- （见 accountRotation 与 poolAccount.usable）：
+    --
+    --   - 权重在 channel_accounts 上（同一账号挂多渠道时各渠道独立）；
+    --   - 健康在 account_state 上，按账号一行，没有行就是 unknown；
+    --   - 密文按账号行取，base64 只是为了让 bytea 能进 JSON（与 listQuery
+    --     同一个做法）。
+    --
+    -- 挑选不能放在 SQL 里：加权轮询要记住「上一次选了谁」，而那是跨请求的
+    -- 状态，一条 SELECT 里没有它的位置（在 SELECT 里写库会把一条读查询变成
+    -- 写查询）。至于「每个候选渠道每次都会被推进一步」——Go 侧对每一行
+    -- 同样如此，那正是平滑加权轮询的定义（每轮按权重累积，被选中的那个
+    -- 再减掉总量），不是换个地方就能省掉的步骤。
+    --
+    -- 零账号时 json_agg 返回 NULL，INNER JOIN 于是把这条渠道整个排除出候选集
+    -- ——零账号是合法的中间态，「建得出、list 可见」，但选路要跳过它。
+    JOIN LATERAL (
+          SELECT json_agg(json_build_object(
+                     'id', a.id,
+                     'name', a.name,
+                     'weight', ca.weight,
+                     'enc', encode(a.credential_enc, 'base64'),
+                     'health', COALESCE(s.health, 'unknown'),
+                     'failures', COALESCE(s.consecutive_failures, 0),
+                     'last_failure_at', extract(epoch FROM s.last_failure_at)
+                 ) ORDER BY a.id)::text AS accounts
+            FROM channel_accounts ca
+            JOIN accounts a ON a.id = ca.account_id
+            LEFT JOIN account_state s ON s.account_id = a.id
+           WHERE ca.channel_id = c.id
+         ) ac ON ac.accounts IS NOT NULL
   LEFT JOIN LATERAL (
         SELECT
             -- 健康列只读渠道级合并行（model = ''）：它把本渠道所有模型合在一起，
@@ -765,6 +861,10 @@ type candidateRow struct {
 	// 所以让数据库把它转成 JSON 文本，再在 Go 侧解成 []string。
 	modelsJSON string
 	models     []string
+	// accountsJSON 是账号池的 JSON 文本（见 candidateQuery），accounts 是解开的
+	// 结果。池子只有几个账号，整批带回来不构成负担。
+	accountsJSON string
+	accounts     []poolAccount
 	// protocolsJSON 是 channel_protocols 里这一行的协议清单（JSON 数组文本），
 	// protocols 是解出来的结果。为空表示这条渠道没有声明（迁移之前的老行、
 	// 或者夹具直接插的 channels 行），那时按 type 一种协议处理。
@@ -774,10 +874,6 @@ type candidateRow struct {
 	weight        int
 	priority      int
 	ownerUserID   int64
-	// accountID 是这份候选实际会用的账号（挂池里 id 最小的那一个）。
-	// 它只用于把解密失败指到具体哪把 key 上，不进 route.Candidate。
-	accountID     int64
-	credentialEnc []byte
 
 	streak        int
 	lastFailureAt sql.NullTime
@@ -823,7 +919,7 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 	err := rows.Scan(
 		&row.id, &row.name, &row.channelType, &row.baseURL,
 		&row.modelsJSON, &row.setting, &row.weight, &row.priority, &row.ownerUserID,
-		&row.accountID, &row.credentialEnc,
+		&row.accountsJSON,
 		&row.streak, &row.lastFailureAt,
 		&row.requests, &row.successes, &row.latencyP95,
 		&row.cost, &row.costEvents, &row.cacheHit, &row.cacheMiss,
@@ -840,6 +936,11 @@ func scanCandidate(rows *sql.Rows) (candidateRow, error) {
 		return candidateRow{}, err
 	}
 	row.models = models
+	accounts, err := decodePoolAccounts(row.id, row.accountsJSON)
+	if err != nil {
+		return candidateRow{}, err
+	}
+	row.accounts = accounts
 	protocols, err := decodeProtocols(row.id, row.protocolsJSON)
 	if err != nil {
 		return candidateRow{}, err
@@ -888,9 +989,9 @@ func decodeModels(channelID int64, modelsJSON string) ([]string, error) {
 
 // candidate 把一行映射成一个候选。
 //
-// plaintext 是已解密的明文，由调用方传入——本函数不接触解密，
-// 于是它可以脱离数据库与主密钥单独测。
-func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candidate, error) {
+// account 是从池子里挑中的那个账号（见 openPoolAccount），plaintext 是它的明文，
+// 由调用方传入——本函数不接触解密，于是它可以脱离数据库与主密钥单独测。
+func (row candidateRow) candidate(account poolAccount, plaintext string, now time.Time) (route.Candidate, error) {
 	setting, err := decodeSetting(row.setting)
 	if err != nil {
 		return route.Candidate{}, fmt.Errorf("渠道 %d 的 setting 不是合法 JSON: %w", row.id, err)
@@ -919,6 +1020,11 @@ func (row candidateRow) candidate(plaintext string, now time.Time) (route.Candid
 			Models:     row.models,
 			Setting:    setting,
 		},
+		// 这次用的是池子里的哪个账号。凭证健康是按账号记的（见 account_state），
+		// 调用结局要能落回这一个账号——只记渠道的话，「这条渠道的两把 key 里
+		// 是哪一把被上游拒了」在库里答不出来。
+		AccountID:    account.ID,
+		AccountName:  account.Name,
 		OwnerUserID:  row.ownerUserID,
 		Priority:     row.priority,
 		Weight:       row.weight,

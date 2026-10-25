@@ -117,6 +117,8 @@ func (g *Gateway) ChatStream(ctx context.Context, req pipeline.Request, upstream
 	res := &Result{
 		Events:        out,
 		Channel:       routed.Channel,
+		AccountID:     routed.AccountID,
+		AccountName:   routed.AccountName,
 		UpstreamModel: routed.UpstreamModel,
 		Attempts:      routed.Attempts,
 	}
@@ -563,6 +565,7 @@ func (g *Gateway) pumpStream(ctx context.Context, canonicalModel string, h *hand
 		// 没有用量可记（一个字都没产生），所以只记结论。
 		g.recordCall(ctx, route.CallOutcome{
 			ChannelID: res.Channel.ID,
+			AccountID: res.AccountID,
 			Model:     canonicalModel,
 			At:        g.now(),
 			Verdict:   verdict,
@@ -647,6 +650,7 @@ func (g *Gateway) pumpStream(ctx context.Context, canonicalModel string, h *hand
 	// rollupSignalsSQL）。
 	g.recordCall(ctx, route.CallOutcome{
 		ChannelID: res.Channel.ID,
+		AccountID: res.AccountID,
 		Model:     canonicalModel,
 		At:        g.now(),
 		Verdict:   verdict,
@@ -929,9 +933,13 @@ func (g *Gateway) recordFailedAttempts(ctx context.Context, canonicalModel strin
 		}
 		g.recordCall(ctx, route.CallOutcome{
 			ChannelID: a.ChannelID,
+			AccountID: a.AccountID,
 			Model:     canonicalModel,
 			At:        attemptTime(a, g.now()),
 			Verdict:   verdict,
+			// 上游在接受请求之前就拒绝身份或余额（401/402/403）时，坏的
+			// 是这一把 key：账号当场摘掉，下一次选路落到池子里别的账号上。
+			AccountDrained: accountAtFault(a.Err),
 		})
 	}
 }

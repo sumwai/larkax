@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -91,6 +92,92 @@ type ChannelHealth struct {
 	// nil 表示没探测过。与 LastProbeAt 配对：一个说「什么时候」，一个说
 	// 「那次怎么样」。
 	LastProbeStatus *string
+
+	// Accounts 是这条渠道凭证池里的账号，按账号 id 升序。
+	//
+	// 空表示这条渠道一个账号都没挂——选路会跳过它（见 accountpool.go 的
+	// usablePool）。读数来自账号自己的状态行（account_state），不是渠道的：
+	// 同一把 key 挂在两条渠道上时两处读数相同，那是对的——被上游拒绝的是
+	// 这把 key，不是某一条渠道。
+	Accounts []AccountHealth
+}
+
+// AccountHealth 是凭证池里一个账号在本渠道上的读数。
+//
+// 名字、权重与渠道有关（权重挂在关联上），健康与失败计数与渠道无关（挂在
+// 账号上）。两半放在同一行是因为这条命令回答的是「这条渠道现在能用谁」，
+// 运维看的是池子，不是两个分离的清单。
+type AccountHealth struct {
+	ID     int64
+	Name   string
+	Weight int
+
+	// Health 是 account_state.health（healthy / degraded / drained / unknown）。
+	// 没有状态行（这个账号还没被调用过）时是 AccountHealthUnknown。
+	Health string
+	// ConsecutiveFailures 是连续失败次数，成功一次清零。
+	ConsecutiveFailures int
+	// LastFailureAt 是最近一次失败的时刻，nil 表示没失败过。
+	LastFailureAt *time.Time
+	// Conclusion 是最近一次调用的结论（成功 / 调用失败 / 凭证被上游拒绝）。
+	// 没有状态行时是空串。
+	Conclusion string
+}
+
+// Usable 判断这个账号此刻参不参选。
+//
+// 判据与选路共用一份（见 accountUsable）：「命令行说可用、选路却跳过」这种
+// 不一致不该由两处各写一遍来判断。
+func (a AccountHealth) Usable(now time.Time) bool {
+	return accountUsable(a.Weight, a.Health, a.LastFailureAt, now)
+}
+
+// 凭证池的整体状态，供 channel health 打一列「池子现在怎么样」。
+const (
+	// PoolStateEmpty：一个账号都没挂。选路跳过这条渠道。
+	PoolStateEmpty = "empty"
+	// PoolStateDrained：挂了账号，但此刻一个都不可用（全被摘了或权重全 0）。
+	// 选路同样跳过——它与空池对流量是同一个后果，只是原因不同。
+	PoolStateDrained = "drained"
+	// PoolStateDegraded：还有可用的账号，但池子里有被摘掉的（或权重 0 的）。
+	// 流量全落在剩下的那几个上，所以这是一条「还能用但已经在咬牙」的渠道。
+	PoolStateDegraded = "degraded"
+	// PoolStateHealthy：池子里每个账号都可用。
+	PoolStateHealthy = "healthy"
+)
+
+// UsableAccounts 数出此刻可用的账号个数。
+func (h ChannelHealth) UsableAccounts(now time.Time) int {
+	n := 0
+	for _, acc := range h.Accounts {
+		if acc.Usable(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// PoolState 给出凭证池的整体状态。
+//
+// **这是推算出来的，不是库里的一列**：它由「挂了几个」与「几个可用」决定，
+// 而可用与否带冷却期（drained 的账号过一个 window 会重新参选），落库就等于
+// 要么写一个会过期的值，要么每 15 分钟扫一遍全表。
+//
+// 「全挂」与「空池」分开报：两者对流量是同一个后果（选路跳过），补救动作
+// 却完全不同——前者去换 key 或等冷却期，后者去挂账号。
+func (h ChannelHealth) PoolState(now time.Time) string {
+	if len(h.Accounts) == 0 {
+		return PoolStateEmpty
+	}
+	usable := h.UsableAccounts(now)
+	switch {
+	case usable == 0:
+		return PoolStateDrained
+	case usable < len(h.Accounts):
+		return PoolStateDegraded
+	default:
+		return PoolStateHealthy
+	}
 }
 
 // FailureRate 给出窗口内的失败率，窗口里没有请求时返回 nil。
@@ -143,7 +230,8 @@ const healthColumns = `
     h.latency_p95_ms,
     h.cost,
     c.consecutive_failures,
-    q.last_probe_status`
+    q.last_probe_status,
+    COALESCE(ac.accounts, '[]')`
 
 // healthFrom 是健康读数的取数主体：channels 是主表，两个信号表按渠道左连。
 //
@@ -211,7 +299,20 @@ const healthFrom = `
            -- 同一个数算两遍（见迁移 00057 与 record.go 的 rollupSignalsSQL）。
            AND r.model = ''
        ) h ON true
-  LEFT JOIN channel_quota_state q ON q.channel_id = c.id`
+  LEFT JOIN channel_quota_state q ON q.channel_id = c.id
+  LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object(
+                   'id', a.id, 'name', a.name, 'weight', ca.weight,
+                   'health', COALESCE(s.health, ''),
+                   'failures', COALESCE(s.consecutive_failures, 0),
+                   'last_failure_at', extract(epoch FROM s.last_failure_at),
+                   'conclusion', COALESCE(s.last_conclusion, '')
+               ) ORDER BY a.id)::text AS accounts
+          FROM channel_accounts ca
+          JOIN accounts a ON a.id = ca.account_id
+          LEFT JOIN account_state s ON s.account_id = a.id
+         WHERE ca.channel_id = c.id
+       ) ac ON true`
 
 // Health 读窗口内的渠道健康，按 id 排序。includeDeleted 为真时带上已软删的渠道。
 func (a *Admin) Health(ctx context.Context, since time.Time, includeDeleted bool) ([]ChannelHealth, error) {
@@ -350,18 +451,19 @@ func (a *Admin) healthBuckets(ctx context.Context, id int64, since time.Time) ([
 
 func scanHealth(rows *sql.Rows) (ChannelHealth, error) {
 	var (
-		h         ChannelHealth
-		deleted   sql.NullTime
-		probeAt   sql.NullTime
-		p50       sql.NullInt64
-		p95       sql.NullInt64
-		cost      sql.NullString
-		probeText sql.NullString
+		h            ChannelHealth
+		deleted      sql.NullTime
+		probeAt      sql.NullTime
+		p50          sql.NullInt64
+		p95          sql.NullInt64
+		cost         sql.NullString
+		probeText    sql.NullString
+		accountsJSON string
 	)
 	err := rows.Scan(&h.ID, &h.Name, &deleted, &h.Health, &probeAt,
 		&h.Requests, &h.Successes, &h.Failures,
 		&h.CacheHitTokens, &h.CacheMissTokens, &p50, &p95, &cost,
-		&h.ConsecutiveFailures, &probeText)
+		&h.ConsecutiveFailures, &probeText, &accountsJSON)
 	if err != nil {
 		return ChannelHealth{}, fmt.Errorf("读取渠道健康行失败: %w", err)
 	}
@@ -375,7 +477,58 @@ func scanHealth(rows *sql.Rows) (ChannelHealth, error) {
 	h.LatencyP95ms = nullIntPtr(p95)
 	h.Cost = nullStringPtr(cost)
 	h.LastProbeStatus = nullStringPtr(probeText)
+	h.Accounts, err = decodeAccountHealth(h.ID, accountsJSON)
+	if err != nil {
+		return ChannelHealth{}, err
+	}
 	return h, nil
+}
+
+// accountHealthJSON 是 healthFrom 里 json_agg 出来的一个账号。
+//
+// 与候选查询那条（poolAccountJSON）分开：这里**没有凭证密文**，多的是最近一次
+// 结论。同一条查询不该把它不解密也用不上的密文读出来。
+type accountHealthJSON struct {
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Weight      int      `json:"weight"`
+	Health      string   `json:"health"`
+	Failures    int      `json:"failures"`
+	LastFailure *float64 `json:"last_failure_at"`
+	Conclusion  string   `json:"conclusion"`
+}
+
+// decodeAccountHealth 解开 healthFrom 带出来的账号池 JSON。
+//
+// health 在 SQL 里是 COALESCE(s.health, ”)：空串表示这个账号没有状态行，
+// 在这里折成 AccountHealthUnknown——健康那套词归 Go 侧的一份常量，SQL 里
+// 不再出现第二份字面量。
+func decodeAccountHealth(channelID int64, raw string) ([]AccountHealth, error) {
+	var decoded []accountHealthJSON
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil, fmt.Errorf("渠道 %d 的账号状态不是合法的 JSON 数组: %w", channelID, err)
+	}
+	out := make([]AccountHealth, 0, len(decoded))
+	for _, acc := range decoded {
+		health := acc.Health
+		if health == "" {
+			health = AccountHealthUnknown
+		}
+		row := AccountHealth{
+			ID:                  acc.ID,
+			Name:                acc.Name,
+			Weight:              acc.Weight,
+			Health:              health,
+			ConsecutiveFailures: acc.Failures,
+			Conclusion:          acc.Conclusion,
+		}
+		if acc.LastFailure != nil {
+			at := time.Unix(int64(*acc.LastFailure), 0)
+			row.LastFailureAt = &at
+		}
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 // nullIntPtr 把可空整数折成指针：NULL 是「没有样本」，与「样本是 0」分开。

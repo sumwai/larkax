@@ -152,6 +152,20 @@ channel_health_rollup 在窗口里的那些小时桶。窗口由 --since 给：
 - 表示这一列没有可用的数：窗口里没有一条带成本的事件，或者合计恰好为 0——
 别把它读成「免费」。
 
+最后两栏讲凭证池。「账号」是**可用个数 / 池内总数**，空池打 -；「凭证池」
+是推算出来的整体状态：
+
+  healthy    池里每个账号都能用
+  degraded   还有能用的，但池里有被摘掉的（或权重是 0 的），流量全压在剩下的上
+  drained    挂了账号，但此刻一个都不能用（全被摘了或权重全 0）
+  empty      一个账号都没挂
+
+drained 与 empty 对流量是同一个后果——选路跳过这条渠道——但补救动作不同：
+前者去换 key 或等冷却期，后者去挂账号。带 --id 时下面会多一张账号表，
+逐账号列出权重、状态、此刻是否可用、连败次数、最近一次失败时刻与最近一次
+调用的结论；状态与选路读的是同一份（account_state），drained 的账号过一段
+冷却期会重新参选，所以「状态 drained 但可用」是正常的一格。
+
 缓存命中 / 未命中也是窗口内各小时之和（未命中算的是 prompt + 缓存写入）。
 0 表示这段时间一个缓存 token 都没有：那两列与成本不同，它们有真的写入方，
 所以 0 是正常读数而不是「没人记过账」。
@@ -161,8 +175,9 @@ delete 是**软删**：置 deleted_at 并把状态改成 disabled，行与它的
 已删的渠道不能再 update / enable / disable，再删一次不报错（打印「已经是删除
 状态」）。
 
-update 的 --credential-* 改的是这条渠道**池里 id 最小的主账号**（选路读的那
-一个）；账号是凭证的单位，同一账号若还挂在别的渠道上，改一次那些渠道一起生效
+update 的 --credential-* 改的是这条渠道**池里 id 最小的主账号**——它是一条
+兼容捷径，与选路无关（选路按权重在池子里轮询，见 larkaxctl help account）。
+账号是凭证的单位，同一账号若还挂在别的渠道上，改一次那些渠道一起生效
 （见 larkaxctl help account）。零账号的渠道走这条路会补一个匿名账号。
 
 restore 是 delete 的逆操作：清掉 deleted_at、把状态置回 enabled，并把这条渠道的
@@ -1148,9 +1163,9 @@ func runChannelHealth(args []string) error {
 		}
 		if jsonOutput() {
 			return emitJSON(os.Stdout,
-				channelHealthDoc([]channels.ChannelHealth{one}, windowStart, false, buckets, true), nil)
+				channelHealthDoc([]channels.ChannelHealth{one}, time.Now(), windowStart, false, buckets, true), nil)
 		}
-		printChannelHealthDetail(humanStdout(), one)
+		printChannelHealthDetail(humanStdout(), one, time.Now())
 		printChannelHealthHours(humanStdout(), buckets)
 		return nil
 	}
@@ -1160,9 +1175,9 @@ func runChannelHealth(args []string) error {
 		return err
 	}
 	if jsonOutput() {
-		return emitJSON(os.Stdout, channelHealthDoc(rows, windowStart, *all, nil, false), nil)
+		return emitJSON(os.Stdout, channelHealthDoc(rows, time.Now(), windowStart, *all, nil, false), nil)
 	}
-	printChannelHealthList(humanStdout(), rows, *all)
+	printChannelHealthList(humanStdout(), rows, *all, time.Now())
 	return nil
 }
 
@@ -1588,7 +1603,11 @@ func settingLabel(setting map[string]any) string {
 //
 // withDeleted 与 list --all 那一栏同义：默认清单里每一行都是零值，那一列只是把
 // 噪音铺满每一行。
-func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDeleted bool) {
+//
+// now 只用来判凭证池里哪些账号此刻可用（drained 的账号过一段冷却期会重新参选，
+// 见 channels.AccountHealth.Usable 与 accountUsable）：同一个读数在不同时刻
+// 可以是不同的结论，所以时刻从调用方传进来，不在这里取。
+func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDeleted bool, now time.Time) {
 	if len(rows) == 0 {
 		// 与 list 共用同一句：空清单与「命令没跑起来」在安静的终端里长得一样
 		// （见 LESSONS.md 第 16 条），而这里的下一步动作也确实是建一条渠道。
@@ -1599,7 +1618,7 @@ func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDele
 	tw := newTableWriter(w)
 	p := newPalette(w)
 	headers := []string{"ID", "名称", "health", "最近探测", "请求数", "失败数", "失败率",
-		"缓存命中", "缓存未命中", "p50", "p95", "成本"}
+		"缓存命中", "缓存未命中", "p50", "p95", "成本", "账号", "凭证池"}
 	if withDeleted {
 		headers = append(headers, "已删")
 	}
@@ -1610,12 +1629,13 @@ func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDele
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 
 	for _, h := range rows {
-		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s",
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s",
 			p.bold(strconv.FormatInt(h.ID, 10)), p.bold(h.Name), h.Health,
 			p.dim(probeLabel(h.LastProbeAt)),
 			h.Requests, h.Failures, rateLabel(h.FailureRate()),
 			h.CacheHitTokens, h.CacheMissTokens,
-			latencyLabel(h.LatencyP50ms), latencyLabel(h.LatencyP95ms), costLabel(h.Cost))
+			latencyLabel(h.LatencyP50ms), latencyLabel(h.LatencyP95ms), costLabel(h.Cost),
+			poolCountLabel(h, now), h.PoolState(now))
 		if withDeleted {
 			line += "\t" + p.dim(deletedAtLabel(h.DeletedAt))
 		}
@@ -1634,11 +1654,22 @@ func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDele
 	printDeletedChannelsNote(w, deleted)
 }
 
-// printChannelHealthDetail 打一条渠道的健康详情：一栏一行。
+// poolCountLabel 是「账号」那一栏：可用个数 / 池内总数，空池是 `-`。
+//
+// 写成 2/3 而不是一句「3 个账号」：这条命令的读者要判的是「还有几个能接活」，
+// 而总数单独一个数答不出这个。
+func poolCountLabel(h channels.ChannelHealth, now time.Time) string {
+	if len(h.Accounts) == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", h.UsableAccounts(now), len(h.Accounts))
+}
+
+// printChannelHealthDetail 打一条渠道的健康详情：一栏一行，随后是凭证池。
 //
 // 与汇总表同一份数据、另一种排版。健康那一栏与几个计数在这里是逐项列出来的，
 // 因为 --id 这一档的读者问的是「这条渠道怎么了」，而不是「哪条渠道最差」。
-func printChannelHealthDetail(w io.Writer, h channels.ChannelHealth) {
+func printChannelHealthDetail(w io.Writer, h channels.ChannelHealth, now time.Time) {
 	tw := newTableWriter(w)
 	p := newPalette(w)
 	row := func(label, value string) {
@@ -1657,10 +1688,71 @@ func printChannelHealthDetail(w io.Writer, h channels.ChannelHealth) {
 	row("p50", latencyLabel(h.LatencyP50ms))
 	row("p95", latencyLabel(h.LatencyP95ms))
 	row("成本", costLabel(h.Cost))
+	row("凭证池", fmt.Sprintf("%s（%s）", h.PoolState(now), poolCountLabel(h, now)))
 	if !h.DeletedAt.IsZero() {
 		row("已删", p.dim(deletedAtLabel(h.DeletedAt)))
 	}
 	_ = tw.Flush()
+
+	printChannelHealthAccounts(w, h, now)
+}
+
+// printChannelHealthAccounts 打这条渠道凭证池里的账号。
+//
+// 空池单独一句话而不是一张空表：**零账号的渠道照样打得出来**（它是合法的中间态，
+// 选路会跳过它），所以这一档必须能表达「一个都没有」，而且要说清下一步敲哪条命令
+// ——与空清单的处置同一条（见 LESSONS.md 第 16 条）。
+func printChannelHealthAccounts(w io.Writer, h channels.ChannelHealth, now time.Time) {
+	_, _ = fmt.Fprintln(w)
+	if len(h.Accounts) == 0 {
+		// 已删的渠道不能挂账号（见 account add 的渠道解析），给它这条建议等于
+		// 让人去撞一个必定失败的错。
+		if !h.DeletedAt.IsZero() {
+			_, _ = fmt.Fprintf(w,
+				"这条渠道已删，池里也没有账号；要让它重新参与选路，先 larkaxctl channel restore --id %d，再 larkaxctl account add <账号> --channel %d 挂一个。\n",
+				h.ID, h.ID)
+			return
+		}
+		_, _ = fmt.Fprintf(w,
+			"这条渠道没挂账号，选路会跳过它；用 larkaxctl account add <账号> --channel %d 挂一个。\n",
+			h.ID)
+		return
+	}
+
+	tw := newTableWriter(w)
+	p := newPalette(w)
+	headers := []string{"账号", "权重", "状态", "可用", "连败", "最近失败", "结论"}
+	bolded := make([]string, len(headers))
+	for i, h := range headers {
+		bolded[i] = p.bold(h)
+	}
+	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
+	for _, acc := range h.Accounts {
+		// 「状态」是库里的结论，「可用」是此刻按它算出来的判据：drained 过了
+		// 冷却期就又是可用（下一次调用成功才把状态改回 healthy）。两列缺一，
+		// 「还在冷却里」与「冷却过了但还没被再次选中」就分不开。
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%s\t%s\n",
+			p.bold(acc.Name), acc.Weight, acc.Health, yesNo(acc.Usable(now)),
+			acc.ConsecutiveFailures,
+			p.dim(probeLabel(acc.LastFailureAt)), conclusionLabel(acc.Conclusion))
+	}
+	_ = tw.Flush()
+}
+
+// yesNo 把布尔列铺成「是 / 否」。
+func yesNo(v bool) string {
+	if v {
+		return "是"
+	}
+	return "否"
+}
+
+// conclusionLabel 打账号最近一次调用的结论，空串（从没调用过）铺成 `-`。
+func conclusionLabel(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // printChannelHealthHours 打一条渠道在这个窗口里的逐小时明细。
@@ -1781,7 +1873,7 @@ func channelDetailEntry(info channels.ChannelInfo) map[string]any {
 //
 // detail 为真时（--id）多给一份逐小时明细。两条路共用同一个顶层形状（channels
 // 数组，--id 那一档恰好一个元素），于是 `jq '.channels[]'` 在两种调用下都成立。
-func channelHealthDoc(rows []channels.ChannelHealth, since time.Time, withDeleted bool,
+func channelHealthDoc(rows []channels.ChannelHealth, now, since time.Time, withDeleted bool,
 	buckets []channels.HealthBucket, detail bool) map[string]any {
 	doc := jsonDoc(jsonOK)
 
@@ -1803,7 +1895,7 @@ func channelHealthDoc(rows []channels.ChannelHealth, since time.Time, withDelete
 	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, h := range rows {
-		entries = append(entries, healthEntry(h))
+		entries = append(entries, healthEntry(h, now))
 	}
 	doc["channels"] = entries
 
@@ -1821,7 +1913,16 @@ func channelHealthDoc(rows []channels.ChannelHealth, since time.Time, withDelete
 //
 // 缓存那两个 token 数是**数字**而不是 null：与 requests 同一档，0 表示窗口里没有
 // 样本（见 channels.ChannelHealth 上那两个字段）。
-func healthEntry(h channels.ChannelHealth) map[string]any {
+//
+// 凭证池那三项是推算出来的（见 channels.ChannelHealth.PoolState）：pool 是整体
+// 结论，accounts_usable 是此刻可用的个数，accounts 是逐账号的读数。**有了
+// usable 就够脚本自己判**，这里再给一个 pool 是因为「全挂」与「空池」对流量是
+// 同一个后果、补救动作却不同，判据写在库里一份比每个脚本各写一遍可靠。
+func healthEntry(h channels.ChannelHealth, now time.Time) map[string]any {
+	accounts := make([]map[string]any, 0, len(h.Accounts))
+	for _, acc := range h.Accounts {
+		accounts = append(accounts, accountHealthEntry(acc, now))
+	}
 	return map[string]any{
 		"id":                h.ID,
 		"name":              h.Name,
@@ -1837,6 +1938,26 @@ func healthEntry(h channels.ChannelHealth) map[string]any {
 		"latency_p95_ms":    jsonOpt(h.LatencyP95ms),
 		"cost":              jsonOpt(h.Cost),
 		"deleted_at":        jsonTimeOrNull(h.DeletedAt),
+		"pool":              h.PoolState(now),
+		"accounts_usable":   h.UsableAccounts(now),
+		"accounts":          accounts,
+	}
+}
+
+// accountHealthEntry 打凭证池里的一个账号。
+//
+// usable 与 pool 那一层同一个判据（见 channels.AccountHealth.Usable）：
+// 命令行上看到「可用」，就是选路会挑它。
+func accountHealthEntry(acc channels.AccountHealth, now time.Time) map[string]any {
+	return map[string]any{
+		"id":                   acc.ID,
+		"name":                 acc.Name,
+		"weight":               acc.Weight,
+		"health":               acc.Health,
+		"consecutive_failures": acc.ConsecutiveFailures,
+		"last_failure_at":      jsonTimePtr(acc.LastFailureAt),
+		"conclusion":           nullableString(acc.Conclusion),
+		"usable":               acc.Usable(now),
 	}
 }
 

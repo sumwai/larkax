@@ -7,7 +7,7 @@ complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin 
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'version' -d '打印版本号与编译元数据'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'completion' -d '打印 bash / zsh / fish 的补全脚本'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'channel' -d '上游渠道管理（网关、凭证、关联模型与出站映射）'
-complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'account' -d '上游凭证账号（建、列、换 key）'
+complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'account' -d '上游凭证账号（建、列、换 key、删）'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'model' -d '规范模型目录（catalog 基础定义）'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'alias' -d '出站映射的旧入口（配置命令在 channel map）'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'price' -d '模型计价规则与日历管理（含 calendar 子命令）'
@@ -29,9 +29,10 @@ complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin 
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'rotate'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'idempotency'
 complete -c larkaxctl -n 'not __fish_seen_subcommand_from doctor settings admin version completion channel account model alias price upstream-cost user apikey wallet plan usage ledger migrate partition secret maintenance snapshot consent plugin reconcile rotate idempotency calendar' -a 'calendar'
-complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list update' -a 'add'
-complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list update' -a 'list'
-complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list update' -a 'update'
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list remove update' -a 'add'
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list remove update' -a 'list'
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list remove update' -a 'update'
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list remove update' -a 'remove'
 complete -c larkaxctl -n '__fish_seen_subcommand_from admin; and not __fish_seen_subcommand_from token' -a 'token'
 complete -c larkaxctl -n '__fish_seen_subcommand_from admin; and __fish_seen_subcommand_from token; and not __fish_seen_subcommand_from create revoke' -a 'create'
 complete -c larkaxctl -n '__fish_seen_subcommand_from admin; and __fish_seen_subcommand_from token; and not __fish_seen_subcommand_from create revoke' -a 'revoke'
@@ -206,6 +207,9 @@ complete -c larkaxctl -l verbose
 complete -c larkaxctl -l format -x -a 'table json'
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from add' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from add' -l credential-env -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from add' -l weight -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from list' -l channel -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from remove' -l force
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from update' -l credential-env -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias; and __fish_seen_subcommand_from create' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias; and __fish_seen_subcommand_from create' -l model -r

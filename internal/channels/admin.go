@@ -274,7 +274,7 @@ func (a *Admin) Create(ctx context.Context, req CreateRequest) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := attachAccountInTx(ctx, tx, id, accountID); err != nil {
+		if err := attachAccountInTx(ctx, tx, id, accountID, 1); err != nil {
 			return 0, err
 		}
 	}
@@ -1019,7 +1019,8 @@ type ChannelInfo struct {
 	// Accounts 是挂在这条渠道上的账号（见迁移 00067），按账号 id 升序。
 	//
 	// 零个是合法的中间态：渠道建得出来、在清单里看得见，但选路会跳过它。
-	// 多个时选路只用第一个（主账号），池内调度是后续工作的事。
+	// 多个时这里只描述第一个（主账号，兼容命令改的那一行）；选路按权重在
+	// 整个池子里轮询，不只是第一个（见 Source.Candidates 与 accountRotation）。
 	Accounts []ChannelAccount
 
 	// CredentialKeys 是**主账号**（Accounts 的第一个）那份密文被哪些主密钥

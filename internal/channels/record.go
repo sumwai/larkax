@@ -25,16 +25,23 @@ import (
 // 它不 import gateway：那个包是入口层，接口由它声明、由本包用结构满足
 // （见文件末尾的编译期断言）。
 //
-// # 一次调用写三处
+// # 一次调用写四处
 //
+//   - account_state：账号（凭证）粒度的健康结论与连续失败。一条渠道可以挂
+//     多把 key，而上游拒绝的是其中某一把（见迁移 00068）
 //   - channels.consecutive_failures / last_failure_at：连续失败的真计数
 //   - channel_health_rollup：小时桶的 requests / successes / failures。每次
 //     调用同时累加模型行与 model 为空串的渠道级合并行（见 rollupSQL）
 //   - channel_quota_state：自记账扣减（有基准、且单位对得上时）
 //
-// 三处都是按主键或唯一键定位的单行写，没有一个大事务把它们绑在一起：
-// 健康度与额度是两个独立的信号，其中一处写不进去不该让另外两处也不写。
-// 错误交给调用方（见 gateway 的 recordCall），由它决定怎么留痕。
+// 四处都是按主键或唯一键定位的单行写，没有一个大事务把它们绑在一起：
+// 账号健康、渠道健康度与额度是三个独立的信号，其中一处写不进去不该让另外
+// 几处也不写。错误交给调用方（见 gateway 的 recordCall），由它决定怎么留痕。
+//
+// 唯一的先后是「连续失败先写」：它的返回值决定后面两处（小时桶、自记账）
+// 还写不写——那两处的外键都指向 channels，渠道在这一行的读取与写入之间被
+// 软删时硬写会撞约束。账号那一层不受它管：它的外键只指向 accounts，渠道
+// 没了也照样能记，而且「这把 key 被拒了」是凭证自己的结论。
 //
 // # 桶里的推导列
 //
@@ -78,31 +85,29 @@ var _ interface {
 
 // RecordCall 记一次上游调用的结局。
 //
-// 渠道已经不存在时（调用进行到一半时管理面删了它）什么都不记，也不报错：
-// 没有东西可记，而「渠道没了」不是故障。
+// 渠道已经不存在时（调用进行到一半时管理面删了它），渠道那一层三处什么都不记，
+// 也不报错：没有东西可记，而「渠道没了」不是故障。账号那一层照写——它的外键只
+// 指向 accounts，渠道没了照样能记，而「这把 key 被拒了」是凭证自己的结论。
 func (r *Recorder) RecordCall(ctx context.Context, rec route.CallOutcome) error {
 	reset, increment, err := streakChange(rec.Verdict)
 	if err != nil {
 		return err
 	}
 
-	// 连续失败先写：它是「别再往这个渠道发」这条保护的唯一来源，
-	// 而后面两处失败时它已经落库了。
+	// 连续失败先写：它是「别再往这个渠道发」这条保护的唯一来源，所以它
+	// 排在最前——这一条写不进去等于一条已知坏的渠道继续接流量，而后面几处
+	// 写不进去各有各的轻后果。
 	//
-	// 返回值是「这一行还在不在」。不在就到此为止——后面的 rollup 有外键，
-	// 硬写会撞约束。
-	alive, err := r.streak(ctx, rec, reset, increment)
-	if err != nil {
-		return err
+	// 返回值是「这一行还在不在」。它只挡后面两处：rollup 与自记账的外键都
+	// 指向 channels，硬写会撞约束。**账号层不挡**——streak 自己失败时照写，
+	// 渠道被软删时也照写（见文件头）。
+	alive, streakErr := r.streak(ctx, rec, reset, increment)
+	errs := []error{streakErr, r.accountState(ctx, rec)}
+	if alive {
+		errs = append(errs, r.rollup(ctx, rec), r.selfAccount(ctx, rec))
 	}
-	if !alive {
-		return nil
-	}
-
-	if err := r.rollup(ctx, rec); err != nil {
-		return err
-	}
-	return r.selfAccount(ctx, rec)
+	// errors.Join 会丢掉 nil：全部成功时返回 nil，与调用方的约定不变。
+	return errors.Join(errs...)
 }
 
 // streakChange 把调用结论翻成对连续失败计数的处置。
@@ -157,8 +162,105 @@ func (r *Recorder) streak(ctx context.Context, rec route.CallOutcome, reset, inc
 	return n > 0, nil
 }
 
-// rollupSQL 把这次调用累加进它所属的小时桶。
+// 账号结局的一句话，进 account_state.last_conclusion。
 //
+// 只放我们自己的词，不照抄上游响应体：那张表是给人看「最近怎么样」的，
+// 而响应体里可能有上游的账号、套餐与额度细节。
+const (
+	accountConclusionSuccess = "成功"
+	accountConclusionFailure = "调用失败"
+	accountConclusionDrained = "凭证被上游拒绝"
+)
+
+// accountStateSQL 维护一个账号的健康结论与连续失败计数。
+//
+// # 三个处置
+//
+//   - 成功（$2）：结论回 healthy、计数清零、失败时刻清空。这也是被摘掉的
+//     账号恢复的唯一入口——冷却期让它重新参选一次，那一次成功就走到这里。
+//   - 凭证被拒（$4）：当场 drained。与渠道侧不同，这里不等连续失败攒到阈值：
+//     401/402/403 说的是「这份凭证或它的余额不行」，再让它碰两次上游只是
+//     多两次注定失败的调用，而池子里可能就有一把能用的 key。
+//   - 其余失败：计数加一；到阈值（$7）才 drained，否则 degraded。
+//
+// # 计数为什么在 SQL 里加一
+//
+// 与 streakSQL 同一条理由：并发两次失败各读到旧值再加一，后写的那次会把前
+// 一次抹掉，于是「连续失败三次才摘」永远到不了，而它与「没失败过」在库里
+// 长得一样。
+//
+// # 取值不写字面量
+//
+// 三个 health 取值由 AccountHealth* 常量拼进来：写成字面量的话，改一个 Go
+// 常量名不会编译失败，只会让这条语句悄悄写进一个 CHECK 约束不认的词。
+const accountStateSQL = `
+INSERT INTO account_state
+       (account_id, health, consecutive_failures, last_failure_at, last_conclusion, updated_at)
+VALUES ($1,
+        CASE WHEN $2 THEN '` + AccountHealthHealthy + `'
+             WHEN $4 THEN '` + AccountHealthDrained + `'
+             ELSE '` + AccountHealthDegraded + `' END,
+        CASE WHEN $2 THEN 0 ELSE 1 END,
+        CASE WHEN $2 THEN NULL ELSE $3::timestamptz END,
+        $5, $6)
+ON CONFLICT (account_id) DO UPDATE
+   SET health = CASE WHEN $2 THEN '` + AccountHealthHealthy + `'
+                     WHEN $4 THEN '` + AccountHealthDrained + `'
+                     WHEN account_state.consecutive_failures + 1 >= $7 THEN '` + AccountHealthDrained + `'
+                     ELSE '` + AccountHealthDegraded + `' END,
+       consecutive_failures = CASE WHEN $2 THEN 0
+                                   ELSE account_state.consecutive_failures + 1 END,
+       last_failure_at = CASE WHEN $2 THEN NULL ELSE $3::timestamptz END,
+       last_conclusion = $5,
+       updated_at = $6`
+
+// accountState 把一个账号的结局写进 account_state。
+//
+// 两种情形直接返回，不是错误：
+//
+//   - 这次调用没有账号维度（AccountID 为 0）：测试夹具、以及候选来源没给
+//     账号的那些路径。
+//   - 这次调用「没成功也没失败」（客户端断开、请求本身有错），**而且**上游
+//     没有拒绝这份凭证：前者与这个账号的凭证无关，与渠道侧不加连续失败是
+//     同一条判据（见 streakChange）。
+//
+// 第二种情形有一个例外，就是 AccountDrained：客户端在上游回 401 的同时
+// 断开，整次调用会落到「不归因」，但「这把 key 被上游拒了」是凭证自己的
+// 结论，与客户端还在不在无关。跟着一起早退的话，一条已知无效的 key 会
+// 继续留在池子里接流量——失败方向正好落在我们最怕的那一侧（见 gateway 的
+// recordAttempts）。
+//
+// 账号在「选出候选」与「记下结局」之间被删掉时，INSERT 撞外键：那一行已经没有
+// 可记的东西，与渠道被软删同一处置（见 streak），不报错也不中断后面的写入。
+func (r *Recorder) accountState(ctx context.Context, rec route.CallOutcome) error {
+	if rec.AccountID == 0 {
+		return nil
+	}
+	if rec.Verdict == route.VerdictUnattributed && !rec.AccountDrained {
+		return nil
+	}
+	success := rec.Verdict == route.VerdictSuccess
+	conclusion := accountConclusionFailure
+	switch {
+	case success:
+		conclusion = accountConclusionSuccess
+	case rec.AccountDrained:
+		conclusion = accountConclusionDrained
+	}
+
+	_, err := r.db.ExecContext(ctx, accountStateSQL,
+		rec.AccountID, success, rec.At, rec.AccountDrained, conclusion, rec.At,
+		accountFailureCutoff)
+	if err != nil {
+		if dberr.IsConstraintViolation(err) {
+			return nil
+		}
+		return fmt.Errorf("更新账号 %d 的健康结论失败: %w", rec.AccountID, err)
+	}
+	return nil
+}
+
+// rollupSQL 把这次调用累加进它所属的小时桶。
 // 一条语句同时写两行：模型行（model = rec.Model）与渠道级合并行（model 为
 // 空串）。合并行让健康列（requests / successes / failures）在多了模型维度
 // 之后仍然是一个数——读侧只读它，成功率这类渠道级读数因此不必跨模型再合

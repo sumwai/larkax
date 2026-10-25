@@ -47,6 +47,21 @@ import (
 type Candidate struct {
 	Channel channel.Channel
 
+	// AccountID / AccountName 是这次会用的那个账号：渠道的凭证池里挑出来的
+	// 一个（见 internal/channels 的 accountRotation）。
+	//
+	// # 为什么它在这里
+	//
+	// 一条渠道可以挂多个账号，而凭证健康是按**账号**记的（account_state）：
+	// 调用结局要落回具体的那一个，否则「这条渠道的两把 key 里是哪一把被上游
+	// 拒了」在库里答不出来，`channel health` 也只能给整条渠道一个笼统的结论。
+	//
+	// 0 表示这份候选不是从账号池来的（测试夹具、以及将来别的候选来源）。
+	// 本包不读它，只把它随 Attempt 带下去——选哪个账号是候选来源的事，
+	// 本包连凭证长什么样都不知道。
+	AccountID   int64
+	AccountName string
+
 	// OwnerUserID 是渠道所属的商家。0 表示平台自营。
 	//
 	// 它不参与打分，但结算需要它：商家级计价规则按这个字段匹配，
@@ -1228,6 +1243,14 @@ func (r *Router) float64() float64 {
 type Attempt struct {
 	ChannelID   int64
 	ChannelName string
+	// AccountID / AccountName 是这次尝试**实际用的那个账号**（见
+	// Candidate.AccountID）。0 表示这个候选没有账号维度。
+	//
+	// 它随 Attempt 一起交给调用方，只为一件事：把**这一次**调用的结局记到那个
+	// 账号上（见 route.CallOutcome.AccountID）。渠道健康与账号健康是两层，
+	// 少了这一格，账号那一层只能笼统地记在渠道头上。
+	AccountID   int64
+	AccountName string
 	Err         error
 	// Retryable 是这次失败是否值得换下一个渠道。
 	Retryable bool
@@ -1557,6 +1580,8 @@ func (r *Router) chatWithPlan(ctx context.Context, exec Executor, req *channel.R
 		result.Attempts = append(result.Attempts, Attempt{
 			ChannelID:   c.Channel.ID,
 			ChannelName: c.Channel.Name,
+			AccountID:   c.AccountID,
+			AccountName: c.AccountName,
 			Err:         err,
 			Retryable:   worthNextCandidate(err),
 			StartedAt:   started,

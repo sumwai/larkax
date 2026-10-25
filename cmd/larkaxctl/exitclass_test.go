@@ -304,6 +304,7 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 		{"store.ErrTxnConflict", store.ErrTxnConflict},
 		{"dberr.ErrConstraintViolation", dberr.ErrConstraintViolation},
 		{"channels.ErrChannelNotFound", channels.ErrChannelNotFound},
+		{"channels.ErrAccountNotFound", channels.ErrAccountNotFound},
 		{"catalog.ErrModelExists", catalog.ErrModelExists},
 		{"catalog.ErrCanonicalTaken", catalog.ErrCanonicalTaken},
 		{"catalog.ErrUpstreamTaken", catalog.ErrUpstreamTaken},

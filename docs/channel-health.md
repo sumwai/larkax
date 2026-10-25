@@ -12,17 +12,18 @@
 写没写进去。额度实测是另一个写入方（`internal/channels.QuotaProbe`），它在
 渠道被用到时异步触发，见下面的「额度」一节。
 
-## 一次调用写三处
+## 一次调用写四处
 
 | 写什么 | 落在哪 | 谁读它 |
 |---|---|---|
+| 账号健康结论 | `account_state.health` / `consecutive_failures` / `last_conclusion` | `internal/channels.Source.Candidates`：被摘掉的账号不参与选路 |
 | 连续失败计数 | `channels.consecutive_failures` / `last_failure_at` | `route.DrainReason`：连续失败到阈值就暂时摘除 |
 | 小时桶计数 | `channel_health_rollup.requests` / `successes` / `failures` | `route.Health.SuccessRate` |
 | 小时桶的延迟、缓存与成本 | `channel_health_rollup.latency_p95_ms` / `cache_hit_tokens` / `cache_miss_tokens` / `cost` / `cost_events` | `route.Health.LatencyP95`、`route.Candidate.CacheHitRate` 与 `route.Candidate.CostPerUnit` |
 | 额度自记账 | `channel_quota_state` 的余量与可信度 | `route.DrainReason`（能不能用）与 `route.scoreQuota`（怎么排） |
 
-三处各自按主键或唯一键定位单行，没有把它们绑在一起的大事务：健康度与额度是
-两个独立的信号，其中一处写不进去不该让另外两处也不写。
+四处各自按主键或唯一键定位单行，没有把它们绑在一起的大事务：账号健康、渠道
+健康度与额度是三个独立的信号，其中一处写不进去不该让另外几处也不写。
 
 ### 延迟、缓存与成本是**重算**出来的，不是累加的
 
@@ -121,6 +122,45 @@
 
 摘除阈值在 `internal/route`（`consecutiveFailureCutoff`），不在这里：写入侧
 只记事实，怎么用它选路是读侧的事。
+
+## 账号粒度的健康
+
+渠道可以挂多把凭证（见 [cli-reference.md](cli-reference.md) 的 `account`
+一节），而**上游拒绝的是其中某一把**：同一个渠道上，一把 key 被 401、另一把
+照常工作。所以健康结论在账号上也记一份，落在 `account_state`（迁移 00068）：
+
+| 列 | 含义 |
+|---|---|
+| `health` | `healthy` / `degraded` / `drained` / `unknown`，与渠道侧同一套词 |
+| `consecutive_failures` | 连续失败次数，成功一次清零 |
+| `last_failure_at` | 最近一次失败的时刻，也是 `drained` 冷却期的时钟 |
+| `last_conclusion` | 最近一次调用的结论（成功 / 调用失败 / 凭证被上游拒绝） |
+
+三条判据：
+
+- **凭证被上游拒绝**（401 / 402 / 403）当场记 `drained`，不等连续失败攒到阈值。
+  这与渠道侧不同：渠道那一层对这三个状态码也是关掉重试，但仍要连败到阈值才
+  摘；账号这一层没有「等一等也许就好」的余地——同一把 key 再试一次还是会被拒。
+- **连续失败到阈值**（3 次，与渠道侧同值但各自一份常量）也记 `drained`。
+- **成功**记 `healthy` 并把计数与失败时刻清零。
+
+`drained` 带一个冷却期（15 分钟，与渠道侧的 `streakCooldown` 同值）：读侧在
+冷却期内不选它，过了冷却期放它回来试一次。没有这条出口时，被摘掉的账号没有
+流量，状态永远不会自己变回去。`account update` 换 key 会直接删掉状态行——
+旧 key 攒下的结论不再说明任何问题，账号立刻回到池子。
+
+**空池与全挂不需要写进渠道状态**：候选查询在取候选时按当前状态过滤账号，
+过滤完一个都不剩就把整条渠道从候选里去掉（`channel_quota_state` 不动——那一列
+是额度探测的结论，写它会与探测互相覆盖）。所以「这条渠道被跳过」是读侧算出来
+的，不需要一个会过期的落库值。
+
+`larkaxctl channel health` 把这件事打出来：清单里的「账号」列是可用个数 /
+池内总数，「凭证池」列是整体状态（`healthy` / `degraded` / `drained` / `empty`），
+带 `--id` 时下面多一张逐账号的表：账号名、权重、状态、此刻是否可用、连败次数、
+最近失败时刻与最近一次结论。表里「状态」与「可用」两列分开，是因为 `drained`
+过了冷却期就已经重新可用了，而状态要等下一次调用成功才改回 `healthy`——只打
+状态的话，这两种处境在表上长得一样。三处判据（两列与选路）共用 `accountUsable`
+一份实现。
 
 ## 额度
 
@@ -263,8 +303,11 @@ NULL 表示不知道按什么计。这个列是**比较的前提**：`route.scor
 - **从错误推断额度**（`error_observed`）：没有实现。一条 `health = 'drained'`
   的行会被读侧映射成余量 0（见 `internal/channels` 的 `quota`），所以它今天
   落在上面那条见底冷却期里——每过一个冷却期被放行一次，而不是永久排除。
-  要不要把一次 402 直接写成 `drained` 仍没有答案：一次 402 也可能只是那一次
-  请求的问题，这是这一档要一并设计的理由。
+  要不要把一次 402 直接写成**渠道额度**的 `drained` 仍没有答案：一次 402 也可能
+  只是那一次请求的问题，这是这一档要一并设计的理由。
+  **凭证那一侧已经有答案了**：402 会当场把**那个账号**标成 `drained`（见上面
+  「账号粒度的健康」），因为「这把 key 付不了」是关于 key 的结论，与渠道还剩
+  多少额度是两件事——换一把 key 之后渠道照常可用。
   **额度那一侧还有第二处同样的坑**：`Merge` 的 `KindErrorObserved` 分支在没有
   数值时会设 `LastErrorCode`，而它只在 `KindAPIQuery` 分支被清。成功的探测会
   走到后者（并清掉库里那两列），所以接上之后要有答案的是「一次 429 之后、
