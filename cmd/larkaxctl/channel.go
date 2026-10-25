@@ -34,7 +34,7 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel list [--all]
   larkaxctl channel get --id <渠道 ID>
   larkaxctl channel health [--id <渠道 ID>] [--since <时长或时刻>] [--all]
-  larkaxctl channel update --id <渠道 ID> [字段同 add，另可换凭证；归属只 add 时定，没有修改入口]
+  larkaxctl channel update --id <渠道 ID> [字段同 add，可换凭证；归属只 add 时定，没有修改入口]
   larkaxctl channel enable|disable|delete|restore --id <渠道 ID>
   larkaxctl channel sync-models|upstream-models --id <渠道 ID>
   larkaxctl channel adapters
