@@ -1774,9 +1774,9 @@ runner 镜像自带。bash-completion 是 `make install` 用例要的：它靠�
 **变异测试另有一个独立的工作流**（`.github/workflows/mutation.yml`），它跑的是
 真的 gremlins，不是脚本自测。**它只对搬钱的代码自动跑**：哪些目录算搬钱，由
 `scripts/check-mutation.sh` 里的 `MONEY_PKGS` 回答——账本、计费、金额、算出结算额、
-给出单价，以及 `internal/plans` 的结转算式。工作流用
-`scripts/check-mutation.sh --list-packages --money` 读这份清单，自己不另列前缀：
-两处各写一份，就会有一个包「改了钱却不量」，而界面上与「不需要跑」长得一样。
+给出单价，`internal/plans` 的结转算式，以及 `internal/payment` 的收款编排与手续费。
+工作流用 `scripts/check-mutation.sh --list-packages --money` 读这份清单，自己不另列
+前缀：两处各写一份，就会有一个包「改了钱却不量」，而界面上与「不需要跑」长得一样。
 这个范围之外的改动不自动跑：全清单一轮以小时计，而 `PKGS` 有三十多个包；
 让每个 PR 都自动跑一遍会把公开仓库的 runner 队列占住，而大多数改动与钱无关。
 要量别的包时，用 `workflow_dispatch` 手工给 `packages`。PR 自动轮还**按改动
@@ -1799,6 +1799,14 @@ gremlins 版本、`workers=1`、系数 10、`--invert-logical`、每个包之前
 summary 会列出那些目录，并提示把覆盖它们的包加进 `PKGS`。两种情形下变异 job 都显示
 为 **skipped**，不是「跑了且通过」。草稿 PR 不跑——还在改的代码不该占着 runner 跑
 几小时；工作流订阅了 `ready_for_review`，标成 ready 的那一刻就会触发一轮。
+
+选包那一步**每轮**还打一行范围总数：`PKGS` 有多少条、自动轮前缀有多少条、其中
+覆盖了 `PKGS` 的几条、剩下几条不在自动轮范围。四个数由
+`scripts/check-mutation.sh --list-packages --summary` 从两份清单现算，工作流只负责
+打出来——在 workflow 里写死一份，清单一改这一行就开始说谎。数的是**清单条目**，
+不是目录：父子对在 `PKGS` 里各占一条，各算一次。覆盖数也不等于两份清单的条数
+之差：`internal/billing` 与 `internal/ledger` 各覆盖了 `PKGS` 里的父子两条，直接
+相减会把那两条说成不在范围，而改动落在它们身上时选包是选得中它们的。
 
 **变异在 CI 上跑是常态，本地变异只作保底。** CI 在独立的 runner 工作区里跑，
 它的锁与本地不是同一个文件。本地那把锁按**克隆**一级：同一克隆的各棵工作树共享
@@ -1983,8 +1991,8 @@ v0.6.0 正常运行不报总数，所以实际看到的是「已完成 + 已用 
 ### CI 里怎么跑
 
 `.github/workflows/mutation.yml` 在 PR 上自动跑，触发范围由脚本里的 `MONEY_PKGS`
-决定（账本、计费、金额、结算额、单价，加上 `internal/plans` 的结转算式；理由见
-「CI 跑什么」）。
+决定（账本、计费、金额、结算额、单价、`internal/plans` 的结转算式、
+`internal/payment` 的收款编排与手续费；理由见「CI 跑什么」）。
 工作流从脚本的 `PINNED_GREMLINS_VERSION` 读版本再安装，脚本装完自己校验一遍；
 它调用同一个 `scripts/check-mutation.sh`——所以「CI 与本地是同一把尺子」不是
 靠两边记得同步，而是只有一份实现。
@@ -2413,9 +2421,10 @@ schema 替它做的。`TestGenerationOrNil` 补了「只有版本」与「只有
 
 **上面这几个包不在自动变异的触发范围里。** `.github/workflows/mutation.yml` 的
 触发范围由 `scripts/check-mutation.sh` 的 `MONEY_PKGS` 决定（账本、计费、金额、
-结算额、单价、额度包结转），这几个包不在其中，PR 的自动轮不会选到它们；要量只能
-手工触发（`workflow_dispatch` 的 `packages` 填包名）或本地跑。所以表里这几行会
-停在入库的这一轮，改了它们不会自动更新——动这几个包时记得手工重跑并在表里更新。
+结算额、单价、额度包结转、收款编排与手续费），这几个包不在其中，PR 的自动轮不会
+选到它们；要量只能手工触发（`workflow_dispatch` 的 `packages` 填包名）或本地跑。
+所以表里这几行会停在入库的这一轮，改了它们不会自动更新——动这几个包时记得手工
+重跑并在表里更新。
 
 **`internal/config` 的三条存活都是真实缺口，这一包没有等价变异。** 两条是
 `RedactDSN` 里判断「这串是不是 URL 形式」的 `&&` 链（`config.go:309` 的两个运算符
