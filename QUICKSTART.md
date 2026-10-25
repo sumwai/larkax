@@ -11,7 +11,7 @@ wallet with an API key. It assumes a running instance — the container command 
 
 ## What the upstream actually calls its models
 
-Ask the upstream first. `--models` and `channel map add` take the **upstream's own model
+Ask the upstream first. `--models` and `channel map` take the **upstream's own model
 id**, which is often not the name on its marketing page:
 
 ```sh
@@ -34,7 +34,7 @@ cat ~/upstream-key.txt | larkaxctl channel create \
   --models claude-x --credential-stdin
 
 # 3. The outbound mapping: canonical name -> the upstream's model id.
-larkaxctl channel map add --all-channels claude-x <upstream-model-id>
+larkaxctl channel map --all claude-x <upstream-model-id>
 
 # 4. A user, then a price rule. A rule records who defined it, so the user comes first.
 larkaxctl user add alice

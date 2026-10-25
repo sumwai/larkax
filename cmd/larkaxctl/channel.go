@@ -38,7 +38,7 @@ const channelShortUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel adapters
   larkaxctl channel probe --type <类型> --base-url <URL>
                           [--credential-stdin | --credential-env <变量名>]
-  larkaxctl channel map add|list|remove（出站映射，见 larkaxctl channel map help）
+  larkaxctl channel map|unmap（出站映射，见 larkaxctl channel map help）
 明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。
 create 的 stdout 只有新渠道的 ID；delete 是软删，restore 是它的逆操作。
 更细的边界：larkaxctl help channel。
@@ -71,11 +71,11 @@ const channelUsage = `larkaxctl channel 管理上游渠道。
   larkaxctl channel adapters
   larkaxctl channel probe --type <类型> --base-url <URL>
                           [--credential-stdin | --credential-env <变量名>]
-  larkaxctl channel map add <渠道> <规范名> <上游模型名> [--overrides <JSON 对象>]
-  larkaxctl channel map add --all-channels <规范名> <上游模型名>
-  larkaxctl channel map list [<渠道>] [--all-channels] [--model <规范名>]
-  larkaxctl channel map remove <渠道> <规范名>
-  larkaxctl channel map remove --all-channels <规范名>
+  larkaxctl channel map <渠道> <规范名> [<上游模型名>] [--overrides <JSON 对象>]
+  larkaxctl channel map --all <规范名> <上游模型名>
+  larkaxctl channel map list [<渠道>] [--all] [--model <规范名>]
+  larkaxctl channel unmap <渠道> <规范名>
+  larkaxctl channel unmap --all <规范名>
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数会
 出现在 ps 的输出与 shell 历史里。
@@ -257,7 +257,7 @@ var credentialInput io.Reader = os.Stdin
 
 // channelActions 是 channel 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var channelActions = []string{"create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "adapters", "probe", "map"}
+var channelActions = []string{"create", "list", "get", "health", "update", "enable", "disable", "delete", "restore", "sync-models", "upstream-models", "adapters", "probe", "map", "unmap"}
 
 func runChannel(args []string) error {
 	if len(args) == 0 {
@@ -295,6 +295,8 @@ func runChannel(args []string) error {
 		return runChannelProbe(rest)
 	case "map":
 		return runChannelMap(rest)
+	case "unmap":
+		return runChannelUnmap(rest)
 	case "-h", "--help":
 		printUsage(os.Stdout, channelShortUsage)
 		return nil

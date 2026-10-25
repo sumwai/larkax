@@ -10,7 +10,7 @@ larkaxctl\-alias \- 出\:站\:映\:射\:的\:旧\:入\:口\:（配\:置\:命\:�
 .br
 二\:级\:动\:作\:与\:参\:数\:见 \fBlarkaxctl alias \-\-help\fR（短\:版）\:与 \fBlarkaxctl help alias\fR（长\:版）。
 .PP
-出\:站\:上\:游\:名\:映\:射\:的\:旧\:入\:口。\fB配\:置\:命\:令\:已\:搬\:到 channel map\fR：\fBalias create\fR / \fBalias add\fR、\fBalias list\fR、\fBalias delete\fR 保\:留\:一\:个\:发\:布\:周\:期，\:行\:为\:与 \fBchannel map\fR 的 \fBadd\fR / \fBlist\fR / \fBremove\fR 逐\:字\:相\:同，\:命\:中\:时\:在 stderr 上\:提\:示\:新\:路\:径。
+出\:站\:上\:游\:名\:映\:射\:的\:旧\:入\:口。\fB配\:置\:命\:令\:已\:搬\:到 channel map\fR：\fBalias create\fR / \fBalias add\fR、\fBalias list\fR、\fBalias delete\fR 保\:留\:一\:个\:发\:布\:周\:期，\:行\:为\:与 \fBchannel map\fR 的 \fBmap\fR / \fBlist\fR / \fBunmap\fR 逐\:字\:相\:同，\:命\:中\:时\:在 stderr 上\:提\:示\:新\:路\:径。
 .PP
 这\:里\:仍\:保\:留\:两\:条：
 .IP \(bu 2
@@ -18,6 +18,6 @@ larkaxctl\-alias \- 出\:站\:映\:射\:的\:旧\:入\:口\:（配\:置\:命\:�
 .IP \(bu 2
 \fBresolve\fR 走\:的\:是\:请\:求\:热\:路\:径\:上\:同\:一\:条\:查\:询，\:回\:答\:「这\:个\:规\:范\:名\:在\:这\:个\:渠\:道\:上\:实\:际\:会\:发\:给\:上\:游\:什\:么\:名\:字」。\:所\:以\:渠\:道\:级\:盖\:过\:平\:台\:级\:这\:件\:事\:在\:这\:里\:看\:得\:见\:（\fBlist\fR 只\:是\:把\:两\:种\:范\:围\:各\:列\:一\:遍，\:不\:回\:答\:谁\:赢）。\:加 \fB\-v\fR 时\:它\:的 stderr 会\:点\:名\:配\:置\:命\:令\:在 \fBchannel map\fR；\:默\:认\:档\:只\:给\:解\:析\:结\:果。
 .PP
-\fBalias create\fR 的 \fB\-\-overrides\fR 口\:径\:与 \fBchannel map add\fR 相\:同。
+\fBalias create\fR 的 \fB\-\-overrides\fR 口\:径\:与 \fBchannel map\fR 相\:同。
 .SH SEE ALSO
 .BR larkaxctl (1)

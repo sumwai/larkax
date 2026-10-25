@@ -101,7 +101,7 @@ func runModelOnboard(args []string) error {
 
 // parseModelOnboard 解析规范名（位置参数）与其余旗标。
 //
-// 位置参数排在旗标前面，与 channel map add 那一族同一个形状：takeOperand
+// 位置参数排在旗标前面，与 channel map 那一族同一个形状：takeOperand
 // 先摘走第一个非选项参数，剩下的交给 flag 集。
 func parseModelOnboard(args []string) (onboardOptions, error) {
 	canonical, rest, err := takeOperand(args, "<规范名>")
