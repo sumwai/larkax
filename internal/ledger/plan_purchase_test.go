@@ -79,7 +79,7 @@ func TestPlanPurchaseRejectsBadInput(t *testing.T) {
 		edit func(*PlanPurchaseParams)
 		want string
 	}{
-		{"没有订阅", func(p *PlanPurchaseParams) { p.SubscriptionID = 0 }, "订阅 id"},
+		{"没有订阅", func(p *PlanPurchaseParams) { p.SubscriptionID = 0 }, "订阅 id 非法"},
 		{"没有通道", func(p *PlanPurchaseParams) { p.Gateway = "" }, "支付通道"},
 		{"手续费为负", func(p *PlanPurchaseParams) { p.GatewayFee = money.MustParse("-1") }, "手续费为负"},
 		{"手续费超过面值", func(p *PlanPurchaseParams) { p.GatewayFee = money.MustParse("11") }, "大于额度包面值"},
@@ -99,6 +99,41 @@ func TestPlanPurchaseRejectsBadInput(t *testing.T) {
 		})
 	}
 }
+
+// 手续费恰好等于面值：**放行**。护栏拒的是「大于面值」，相等是边界上的另一侧，
+// 必须落在放行这一边。
+//
+// 它与上表的「手续费超过面值」成对：只测 11 > 10 的话，把 `>` 写成 `>=` 也能
+// 全绿——那会把「手续费正好吃掉整个面值」这种合法情况判成不可能。
+func TestPlanPurchaseAllowsFeeEqualToFaceValue(t *testing.T) {
+	txn, err := PlanPurchase(PlanPurchaseParams{
+		TxnID:          TxnID("11111111-2222-4333-8444-555555555555"),
+		SubscriptionID: 7,
+		Amount:         money.MustParse("10"),
+		Asset:          AssetCNY,
+		Gateway:        "stub",
+		GatewayFee:     money.MustParse("10"),
+		OrderNo:        "ORD-FEE-CAP",
+	})
+	if err != nil {
+		t.Fatalf("手续费等于面值应当放行（拒的是大于）: %v", err)
+	}
+	if len(txn.Entries) != 4 {
+		t.Fatalf("带手续费的售卖该有 4 条分录，实际 %d 条", len(txn.Entries))
+	}
+}
+
+// 记一处**等价**变异，免得下一轮有人当成缺口去补：
+//
+// PlanCarryMerge 里 `entries := make([]Entry, 0, len(p.Moves)+1)`
+// （transactions.go:617）的 `+1` 会被算术类变异器改成 `-1`。它看着像「负容量
+// 要 panic」，实际是等价的：同一个函数在前面先拒了空并入
+// （transactions.go:587 的 `if len(p.Moves) == 0`），所以走到这一行时
+// `len(p.Moves)` 最小是 1，减一之后最小是 0。make 的容量只要求非负，0 合法，
+// 不 panic；而容量只是提示，append 会自己扩容，任何可观察行为都不变。
+//
+// 所以这一格不造用例——造了也只能靠「读代码读出来的等价」，用例本身证明不了
+// 什么。
 
 // TestVerifyEntriesCatchesFlippedPrepaidDirection 证明 VerifyEntries 自己真的
 // 能发现「方向写反」，而不是「库里存得进去所以应该平」。
