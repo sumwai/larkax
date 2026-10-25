@@ -374,7 +374,7 @@ jobs:
                 echo "PR 自动轮按改动收窄：表上的分数只覆盖改动涉及的生产文件，"
                 echo "**不可与整包基线比较**。参与 / 排除 / 跳过了几个包见下面日志开头。"
                 ;;
-              LARKAX_MUTATION_SCOPE=full)
+              LARKAX_MUTATION_SCOPE=full*)
                 echo "这一轮跑的是整包：分数可与整包基线比较。"
                 ;;
               LARKAX_MUTATION_SCOPE=skipped*)
@@ -385,6 +385,14 @@ jobs:
                 echo "这一轮的口径见下面日志（没有读到脚本的口径标记）。"
                 ;;
             esac
+            # 跳过数单独说一句：上面那几句说的是「跑了的那几个包」的口径，
+            # 整包跳过的包不在里面。标记里没有这个数（`skipped packages=N` 除外）
+            # 时不多说一个字。
+            skipped_n=$(printf '%s' "$scope" | sed -n 's/.*skipped=\([0-9][0-9]*\).*/\1/p')
+            if [ -n "$skipped_n" ] && [ "$skipped_n" -gt 0 ]; then
+              echo
+              echo "另有 $skipped_n 个包整体跳过（本包没有生产文件改动，只有测试文件），上面那句话不覆盖它们。"
+            fi
             echo
             echo '```'
             if [ -s mutation.log ]; then

@@ -1001,15 +1001,22 @@ if [ "$NARROW" -eq 1 ]; then
   # 只按「改动清单非空」推定发生过排除会猜错：整包都被改到时不排除任何文件，
   # 而整轮只改了测试文件时一个包都不跑。第三种 `skipped` 说的就是后者——
   # 它既不是 `full` 也不是 `narrow`，按其中任何一个写进 summary 都是假话。
+  #
+  # **前两种也带上跳过数**：那一行说的是「跑了的那几个包」的口径，被整包跳过
+  # 的包不在其中。不带这个数，summary 就会把「两个包跑了整包、三个包跳过」
+  # 说成「这一轮跑的是整包」，读的人以为五个包都量过。
   if [ "$narrow_excluded" -gt 0 ]; then
-    echo "LARKAX_MUTATION_SCOPE=narrow excluded=$narrow_excluded"
+    echo "LARKAX_MUTATION_SCOPE=narrow excluded=$narrow_excluded skipped=$narrow_skipped"
   elif [ "$narrow_participating" -gt 0 ]; then
-    echo "LARKAX_MUTATION_SCOPE=full"
+    echo "LARKAX_MUTATION_SCOPE=full skipped=$narrow_skipped"
   else
     echo "LARKAX_MUTATION_SCOPE=skipped packages=$narrow_skipped"
   fi
   echo
 else
+  # 整包口径（不给 --changed-*）：**一律不跳**。这条路的语义是「我要量这个包」，
+  # 包括「这一轮只有测试文件改动」——那种时候要看的正是测试强度，跳过等于把
+  # 这条命令关掉。所以这里没有跳过数可报。
   echo "LARKAX_MUTATION_SCOPE=full"
 fi
 

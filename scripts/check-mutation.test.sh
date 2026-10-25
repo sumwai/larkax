@@ -1505,8 +1505,8 @@ fi
 if printf '%s\n' "$LAST_ARGS" | grep -q -- '--invert-logical'; then ok; else
   bad "收窄 -E —— 收窄不该挤掉基础开关（--invert-logical）"
 fi
-if grep -qx "LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded" "$last_out"; then ok; else
-  bad "收窄 -E —— 口径标记应为 LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded"
+if grep -qx "LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded skipped=0" "$last_out"; then ok; else
+  bad "收窄 -E —— 口径标记应为 LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded skipped=0"
 fi
 
 # 29. 只有测试文件变了：这一包**跳过**，不跑变异、不传任何 `-E`。
@@ -1553,22 +1553,72 @@ fi
 grep -q '这一轮没有量到任何变异，不是「跑了且通过」' "$last_out" \
   || bad "只改测试 —— 退出 0 时要明说这一轮什么都没量，不能只说通过"
 
-# 29b. 一半包有生产文件改动、一半只有测试文件改动：跳过的那一包不进表，也不进
-#      「全部跑成」那句话——收尾那一行是很多人唯一会读的一行。
-printf '%s\n' internal/ledger/account.go internal/money/money_test.go >"$tmp/changed-mixed.txt"
-run_narrow "$tmp/changed-mixed.txt" internal/ledger internal/money
-if [ "$LAST_RC" -eq 0 ]; then ok; else bad "一跑一跳 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+# 29b. 一跑多跳：有生产文件改动的包照常跑，只改测试文件的包跳过。
+#
+#      这里钉的是**同一个数在三个地方一致**：`grep '^跳过'` 数出来的行数、
+#      合计行里的跳过数、收尾那一行里的跳过数。两边各断一个「大于 0」不算数——
+#      跳过的包在汇总里少记一个，屏幕上就是「都量过了」。
+printf '%s\n' internal/ledger/account.go internal/money/money_test.go \
+  internal/pricing/pricing_test.go >"$tmp/changed-mixed.txt"
+run_narrow "$tmp/changed-mixed.txt" internal/ledger internal/money internal/pricing
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "一跑多跳 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+skip_lines=$(grep -c '^跳过 ' "$last_out")
+if [ "$skip_lines" -eq 2 ]; then ok; else
+  bad "一跑多跳 —— 跳过行应有 2 条（internal/money 与 internal/pricing），实际 $skip_lines 条"
+fi
 grep -qx '跳过 internal/money（本包没有生产文件改动，只有测试文件）' "$last_out" \
-  || bad "一跑一跳 —— 要说出 internal/money 是跳过的"
-grep -q '全部跑成（跳过了 1 个只改测试文件的包）' "$last_out" \
-  || bad "一跑一跳 —— 收尾那一行也要带上跳过了几个包"
-if grep -qE '^internal/money +[0-9]' "$last_out"; then
-  bad "一跑一跳 —— 表里不该有 internal/money 的行"
+  || bad "一跑多跳 —— 要逐字说出 internal/money 是跳过的"
+grep -qx '跳过 internal/pricing（本包没有生产文件改动，只有测试文件）' "$last_out" \
+  || bad "一跑多跳 —— 要逐字说出 internal/pricing 是跳过的"
+skip_sum=$(grep -m1 '^合计：' "$last_out" | sed -n 's/.*跳过 \([0-9][0-9]*\) 个包.*/\1/p')
+if [ -n "$skip_sum" ] && [ "$skip_sum" -eq "$skip_lines" ]; then ok; else
+  bad "一跑多跳 —— 合计行的跳过数（$skip_sum）必须等于 grep '^跳过' 数出来的行数（$skip_lines）"
+fi
+grep -q '全部跑成（跳过了 2 个只改测试文件的包）' "$last_out" \
+  || bad "一跑多跳 —— 收尾那一行也要带上同一个数"
+ledger_excluded1=$((ledger_files - 1))
+if grep -qx "LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded1 skipped=$skip_lines" "$last_out"; then ok; else
+  bad "一跑多跳 —— 标记要带上跳过数（narrow excluded=$ledger_excluded1 skipped=$skip_lines），否则 CI 的 summary 会把这一轮说成只跑了整包"
+fi
+if grep -qE '^internal/(money|pricing) +[0-9]' "$last_out"; then
+  bad "一跑多跳 —— 跳过的包不该出现在表里"
 else
   ok
 fi
 if grep -qE '^internal/ledger +[0-9]' "$last_out"; then ok; else
-  bad "一跑一跳 —— 表里应有 internal/ledger 的行（它有生产文件改动）"
+  bad "一跑多跳 —— 表里应有 internal/ledger 的行（它有生产文件改动）"
+fi
+
+# 29c. 两个包都只有测试改动：全部跳过，合计行是唯一的汇总。
+#
+#      这一轮走的是「全部跳过」那条退出路径，收尾没有「全部跑成（跳过了…）」，
+#      所以跳过数只能从合计行读。三样一起钉：
+#        1. `grep -c '^跳过 '` 是 2；
+#        2. 合计行**逐字**比对（行文取自脚本的实际输出，不是照源码拼的期望值）；
+#        3. 合计行里解析出来的跳过数 == 第 1 条数出来的行数——任何一边漂移都红。
+#      单包场景里「恰好 1 行」与「合计 1 个包」是两个各自写死的 1，判据退化成
+#      「只要大于 0」也照样绿，所以这里要的是这条相等关系。
+printf '%s\n' internal/ledger/account_test.go internal/money/money_test.go >"$tmp/changed-allskip.txt"
+run_narrow "$tmp/changed-allskip.txt" internal/ledger internal/money
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "两包都跳过 —— 应通过（这一轮没有要量的生产文件），实际退出码 $LAST_RC"; dump; fi
+all_skip_lines=$(grep -c '^跳过 ' "$last_out")
+if [ "$all_skip_lines" -eq 2 ]; then ok; else
+  bad "两包都跳过 —— 跳过行应有 2 条，实际 $all_skip_lines 条"
+fi
+if grep -qxF '合计：参与变异 0 个生产文件，排除 0 个未改动的，跳过 2 个包。' "$last_out"; then ok; else
+  bad "两包都跳过 —— 合计行要逐字对上（参与 0、排除 0、跳过 2）"
+fi
+all_skip_sum=$(grep -m1 '^合计：' "$last_out" | sed -n 's/.*跳过 \([0-9][0-9]*\) 个包.*/\1/p')
+if [ -n "$all_skip_sum" ] && [ "$all_skip_sum" -eq "$all_skip_lines" ]; then ok; else
+  bad "两包都跳过 —— 合计行的跳过数（${all_skip_sum:-读不出}）必须等于 grep '^跳过' 数出来的行数（$all_skip_lines）"
+fi
+if grep -qx 'LARKAX_MUTATION_SCOPE=skipped packages=2' "$last_out"; then ok; else
+  bad "两包都跳过 —— 口径标记应为 skipped packages=2"
+fi
+if grep -q '^全部跑成' "$last_out"; then
+  bad "两包都跳过 —— 这一轮一个变异都没跑，收尾不该说「全部跑成」"
+else
+  ok
 fi
 
 # 30. 新文件算「改到」。
@@ -1662,6 +1712,16 @@ if grep -q '按改动收窄' "$last_out"; then
   bad "默认口径 —— 不打收窄那一段"
 else
   ok
+fi
+# 整包口径**一律不跳**：这条路的语义是「我要量这个包」，包括「这一轮只有测试
+# 文件改动」——那时候要看的正是测试强度，跳过等于把这条命令关掉。
+if grep -q '^跳过 ' "$last_out"; then
+  bad "默认口径 —— 整包口径不该跳过任何包（包括只改了测试文件的包）"
+else
+  ok
+fi
+if grep -qx 'LARKAX_MUTATION_SCOPE=full' "$last_out"; then ok; else
+  bad "默认口径 —— 口径标记应为 LARKAX_MUTATION_SCOPE=full（不带跳过数）"
 fi
 
 # 33a. 收窄到「没有可变代码」的文件：gremlins 正常退出，但说没有结果。
