@@ -761,7 +761,7 @@ func buildPublicHandler(cfg Config, inference *api.Handler, ledgerStore *store.S
 			func(ctx context.Context, orderNo string) (payment.ChannelOrder, error) {
 				return orders.ChannelOrder(ctx, orderNo)
 			}))
-		service := payment.NewService(orders, ledgerStore, map[string]payment.Channel{
+		service := payment.NewService(orders, ledgerStore, plans.New(cfg.DB), map[string]payment.Channel{
 			fakechannel.Name: fake,
 		})
 		logger.Warn("假支付通道已启用：它只用于本地联调，密钥是公开的占位值，不要接真实资金")

@@ -71,7 +71,8 @@ type orderDB interface {
 // 字符串再由 money.Parse 解析，溢出时拿到的是「这个数读不出来」而不是一个被
 // 四舍五入过的金额。
 const orderColumns = `order_no, user_id, gateway, asset, amount::text, fee::text,
-	status, gateway_txn_id, gateway_raw, paid_at, created_at`
+	status, gateway_txn_id, gateway_raw, paid_at, created_at, COALESCE(plan_key, ''),
+	validity_days`
 
 // scanOrder 把一行读成 Order。
 func scanOrder(scan func(dest ...any) error) (Order, error) {
@@ -88,10 +89,16 @@ func scanOrder(scan func(dest ...any) error) (Order, error) {
 		orderNo string
 		gateway string
 		created time.Time
+		days    sql.NullInt64
 	)
 	if err := scan(&orderNo, &userID, &gateway, &asset, &amount, &fee,
-		&status, &txnID, &raw, &paidAt, &created); err != nil {
+		&status, &txnID, &raw, &paidAt, &created, &o.PlanKey, &days); err != nil {
 		return Order{}, err
+	}
+	if days.Valid {
+		// int64 装得下天数（迁移上是 integer），窄化只在这一处。
+		d := int(days.Int64)
+		o.ValidityDays = &d
 	}
 	o.OrderNo = orderNo
 	o.UserID = userID
@@ -169,12 +176,13 @@ func (s *Store) Create(ctx context.Context, o Order) (Order, bool, error) {
 func (s *Store) CreateTx(ctx context.Context, tx *sql.Tx, o Order) (Order, bool, error) {
 	var id int64
 	insertErr := tx.QueryRowContext(ctx, `
-		INSERT INTO payment_orders (order_no, user_id, gateway, asset, amount, fee, status, gateway_raw)
-		VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7, $8::jsonb)
+		INSERT INTO payment_orders (order_no, user_id, gateway, asset, amount, fee, status, gateway_raw, plan_key, validity_days)
+		VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, $7, $8::jsonb, $9, $10)
 		ON CONFLICT (order_no) DO NOTHING
 		RETURNING id`,
 		o.OrderNo, o.UserID, o.Gateway, string(o.Asset),
 		o.Amount.String(), o.Fee.String(), string(StatusCreated), rawOrDefault(o.GatewayRaw),
+		nullString(o.PlanKey), nullInt(o.ValidityDays),
 	).Scan(&id)
 	if insertErr == nil {
 		// 读回库里那一行：created_at 等列由数据库补，入参里的同一字段是零值。
@@ -196,13 +204,16 @@ func (s *Store) CreateTx(ctx context.Context, tx *sql.Tx, o Order) (Order, bool,
 		return Order{}, false, fmt.Errorf("读已有的支付单 %s 失败: %w", o.OrderNo, err)
 	}
 	if stored.UserID != o.UserID || stored.Gateway != o.Gateway ||
-		stored.Asset != o.Asset || stored.Amount.Cmp(o.Amount) != 0 {
+		stored.Asset != o.Asset || stored.Amount.Cmp(o.Amount) != 0 ||
+		stored.PlanKey != o.PlanKey || !sameValidityDays(stored.ValidityDays, o.ValidityDays) {
 		return Order{}, false, fmt.Errorf(
 			"%w: 支付单 %s 已经存在，但内容与这次要写的不一样"+
-				"（库里 用户 %d / 通道 %s / %s %s，这次 用户 %d / 通道 %s / %s %s）",
+				"（库里 用户 %d / 通道 %s / %s %s / 额度包 %q %s，这次 用户 %d / 通道 %s / %s %s / 额度包 %q %s）",
 			ErrOrderConflict, o.OrderNo,
-			stored.UserID, stored.Gateway, stored.Amount, stored.Asset,
-			o.UserID, o.Gateway, o.Amount, o.Asset)
+			stored.UserID, stored.Gateway, stored.Amount, stored.Asset, stored.PlanKey,
+			validityDaysText(stored.ValidityDays),
+			o.UserID, o.Gateway, o.Amount, o.Asset, o.PlanKey,
+			validityDaysText(o.ValidityDays))
 	}
 	return stored, false, nil
 }
@@ -414,6 +425,36 @@ func nullString(v string) any {
 		return nil
 	}
 	return v
+}
+
+// nullInt 把「没有这个值」写成 NULL。
+//
+// 天数是售卖单才有的列（迁移上允许 NULL，充值单就是 NULL），而「0 天」本身
+// 不合法，所以用指针表达「没有」，不拿 0 顶替。
+func nullInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// sameValidityDays 比较两边的售卖天数，把「都没有」与「都有且相等」都算相等。
+//
+// 不能直接比指针（那是地址），也不能先解引用（nil 会 panic）。充值单两边都是
+// nil，售卖单两边都有值——混着比才是冲突。
+func sameValidityDays(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// validityDaysText 把天数打给人看，「没有」时留空而不是打 0。
+func validityDaysText(v *int) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d 天", *v)
 }
 
 // rawOrDefault 保证 gateway_raw 拿到的是合法 JSON。

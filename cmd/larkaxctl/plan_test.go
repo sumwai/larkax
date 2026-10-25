@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strconv"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sumwai/larkax/internal/expiry"
+	"github.com/sumwai/larkax/internal/money"
+	"github.com/sumwai/larkax/internal/plans"
 )
 
 // 这一组钉 plan 这条命令的两半：参数判据（不连库）与一条走通的完整流程（连库）。
@@ -413,6 +416,52 @@ func TestPlanGrantRejectsConflictingExpiryFlags(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误 = %q，里面没有 %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// plan list 的人读表有「售卖」一栏：可售的包打天数，不可售的打「不售卖」。
+//
+// 这一栏回答的是「哪些包能卖」——清单页上缺了它，就得逐个 `plan get` 才知道。
+// 断言按「这一行里有没有那个值」判，不按空白切出来的字段数：表格列宽随内容变，
+// 按字段数解析的用例在加列时会静默错位（本仓踩过这一条）。
+func TestPlanListShowsValidity(t *testing.T) {
+	days := 30
+	list := []plans.Plan{
+		{
+			Key: "sale-listed", Name: "可售包", Unit: plans.UnitAmount,
+			QuotaTotal: money.MustParse("30"), FaceValue: money.MustParse("30"),
+			ValidityDays: &days, Enabled: true,
+		},
+		{
+			Key: "sale-not-listed", Name: "不出售包", Unit: plans.UnitAmount,
+			QuotaTotal: money.MustParse("30"), FaceValue: money.MustParse("30"),
+			Enabled: true,
+		},
+	}
+
+	var buf bytes.Buffer
+	printPlanList(&buf, list)
+	out := buf.String()
+
+	for _, tc := range []struct{ key, want string }{
+		{"sale-listed", "30 天"},
+		{"sale-not-listed", "不售卖"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			line := ""
+			for _, l := range strings.Split(out, "\n") {
+				if strings.Contains(l, tc.key) {
+					line = l
+					break
+				}
+			}
+			if line == "" {
+				t.Fatalf("表里没有 %q 那一行：\n%s", tc.key, out)
+			}
+			if !strings.Contains(line, tc.want) {
+				t.Errorf("%q 那一行里没有 %q（「售卖」栏没打出来）：%q", tc.key, tc.want, line)
 			}
 		})
 	}

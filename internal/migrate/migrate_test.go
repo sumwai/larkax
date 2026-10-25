@@ -1504,3 +1504,166 @@ func TestAccountsEntityMigration(t *testing.T) {
 		t.Fatalf("再次前进之后写 channel_accounts 失败: %v", err)
 	}
 }
+
+// planSaleMigration 是额度包售卖那条迁移。
+const planSaleMigration = "00070_plan_sale.sql"
+
+// 00070 的上下往返，以及 down 的那道守卫**真的会拦**。
+//
+// # 为什么要有这一条
+//
+// 门禁里那道「迁移 up → down → up」跑的是空链：新建库、一路前进、一路回滚。
+// 它证明不了「库里有 plan_purchase 分录时 down 会拒绝」——那条路径在空库上
+// 根本走不到。而那道守卫是要挡住一次会丢数据的回滚：直接收窄 CHECK 的话，
+// PostgreSQL 只会说「某些行违反约束」，看不出下一步该做什么。
+//
+// 所以这里走两遍 down：第一遍带着一条 plan_purchase 分录，断言它报的是
+// 「还有 N 条 plan_purchase 分录」；删掉之后再回滚，断言成功。
+func TestPlanSaleMigrationRoundtrip(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	version, verErr := goose.NumericComponent(planSaleMigration)
+	if verErr != nil {
+		t.Fatalf("从迁移文件名读版本号失败: %v", verErr)
+	}
+	previous := version - 1
+
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+
+	up := func() error { return goose.UpContext(ctx, db, ".") }
+	down := func() error { return goose.DownToContext(ctx, db, ".", previous) }
+
+	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾必须
+	// 把版本推回最新，并且把这条用例自己写进去的那条分录清掉（否则收尾的
+	// 前进会撞上 down 留下的旧约束）。
+	//
+	// 收尾**只记日志、不判红**：中途失败时库可能停在「回滚了一半」的状态上，
+	// 从那里往回推未必推得动。在这里报失败会让用例的结论变成「收尾失败」，
+	// 而真正要报的是中途那一步为什么失败——两件事混在一起，读日志的人会先
+	// 看到后者。所以推不动就记一笔，把判断留给中途那条断言。
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(),
+			`DELETE FROM ledger_entries WHERE entry_type = 'plan_purchase'`)
+		if err := goose.UpContext(context.Background(), db, "."); err != nil {
+			t.Logf("收尾时前进失败（库可能已经不在旧版本上）：%v", err)
+		}
+	})
+
+	if err := up(); err != nil {
+		t.Fatalf("前进到最新失败: %v", err)
+	}
+
+	hasColumn := func(table, column string) bool {
+		t.Helper()
+		var exists bool
+		if err := db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				 WHERE table_name = $1 AND column_name = $2)`, table, column).Scan(&exists); err != nil {
+			t.Fatalf("查列 %s.%s 失败: %v", table, column, err)
+		}
+		return exists
+	}
+	entryTypeCheck := func() string {
+		t.Helper()
+		var def string
+		if err := db.QueryRowContext(ctx, `
+			SELECT pg_get_constraintdef(oid) FROM pg_constraint
+			 WHERE conname = 'ledger_entries_entry_type_check'`).Scan(&def); err != nil {
+			t.Fatalf("读 entry_type 约束失败: %v", err)
+		}
+		return def
+	}
+
+	// 1. 前进态：两列在，约束放行 plan_purchase。
+	if !hasColumn("plans", "validity_days") {
+		t.Error("迁移之后 plans 缺列 validity_days")
+	}
+	if !hasColumn("payment_orders", "plan_key") {
+		t.Error("迁移之后 payment_orders 缺列 plan_key")
+	}
+	if !hasColumn("payment_orders", "validity_days") {
+		t.Error("迁移之后 payment_orders 缺列 validity_days")
+	}
+	if def := entryTypeCheck(); !strings.Contains(def, "plan_purchase") {
+		t.Errorf("迁移之后 entry_type 约束不含 plan_purchase：%s", def)
+	}
+
+	// 造一条 plan_purchase 分录：down 的守卫看的就是它。
+	insertSaleEntry := func() {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO ledger_entries (txn_id, account, asset, amount, entry_type)
+			VALUES (gen_random_uuid(), 'prepaid:1', 'CNY', 1, 'plan_purchase')`); err != nil {
+			t.Fatalf("写 plan_purchase 分录失败: %v", err)
+		}
+	}
+	deleteSaleEntries := func() {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			`DELETE FROM ledger_entries WHERE entry_type = 'plan_purchase'`); err != nil {
+			t.Fatalf("删 plan_purchase 分录失败: %v", err)
+		}
+	}
+	insertSaleEntry()
+
+	// 2. 带着分录回滚：守卫必须拦住，而且那句话要能看出下一步做什么。
+	downErr := down()
+	if downErr == nil {
+		t.Fatal("库里有 plan_purchase 分录时 down 应当被守卫拦住")
+	}
+	if !strings.Contains(downErr.Error(), "plan_purchase 分录") {
+		t.Errorf("报错不是守卫那一句（可能是约束直接失败）：%v", downErr)
+	}
+	// 被拦住之后迁移版本不该动：还停在最新，两列都还在。
+	var current int64
+	if err := db.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version`).Scan(&current); err != nil {
+		t.Fatalf("读迁移版本失败: %v", err)
+	}
+	if current != version {
+		t.Errorf("被守卫拦住之后版本 = %d，期望仍停在 %d", current, version)
+	}
+	if !hasColumn("plans", "validity_days") || !hasColumn("payment_orders", "plan_key") ||
+		!hasColumn("payment_orders", "validity_days") {
+		t.Error("被守卫拦住之后这几列都不该被删掉")
+	}
+
+	// 3. 清掉分录再回滚：成功，两列与 plan_purchase 一起消失。
+	deleteSaleEntries()
+	if err := down(); err != nil {
+		t.Fatalf("清掉分录之后 down 应当成功: %v", err)
+	}
+	if hasColumn("plans", "validity_days") {
+		t.Error("回滚之后 plans.validity_days 还在")
+	}
+	if hasColumn("payment_orders", "plan_key") {
+		t.Error("回滚之后 payment_orders.plan_key 还在")
+	}
+	if hasColumn("payment_orders", "validity_days") {
+		t.Error("回滚之后 payment_orders.validity_days 还在")
+	}
+	if def := entryTypeCheck(); strings.Contains(def, "plan_purchase") {
+		t.Errorf("回滚之后 entry_type 约束仍含 plan_purchase：%s", def)
+	}
+
+	// 4. 再前进：两列与那一档取值都回来。
+	if err := up(); err != nil {
+		t.Fatalf("再次前进失败: %v", err)
+	}
+	if !hasColumn("plans", "validity_days") {
+		t.Error("再次前进之后 plans.validity_days 没有回来")
+	}
+	if !hasColumn("payment_orders", "plan_key") {
+		t.Error("再次前进之后 payment_orders.plan_key 没有回来")
+	}
+	if !hasColumn("payment_orders", "validity_days") {
+		t.Error("再次前进之后 payment_orders.validity_days 没有回来")
+	}
+	if def := entryTypeCheck(); !strings.Contains(def, "plan_purchase") {
+		t.Errorf("再次前进之后 entry_type 约束不含 plan_purchase：%s", def)
+	}
+}

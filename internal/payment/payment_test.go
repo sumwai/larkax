@@ -82,7 +82,7 @@ func TestValidateNotification(t *testing.T) {
 
 // TestChannelLookupRejectsMissingOrNil 验取通道的两条拒绝路径。
 func TestChannelLookupRejectsMissingOrNil(t *testing.T) {
-	service := NewService(NewStore(nil), nil, map[string]Channel{
+	service := NewService(NewStore(nil), nil, nil, map[string]Channel{
 		"nil":   nil,
 		"empty": &stubChannel{},
 	})

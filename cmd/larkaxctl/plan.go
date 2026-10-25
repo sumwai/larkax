@@ -28,12 +28,13 @@ const planShortUsage = `larkaxctl plan 管理额度包（商品定义）。
 用法：
   larkaxctl plan add <key> --name <名称> --unit <amount|token|request>
                            [--quota <可用量>] [--face-value <面值>]
-                           [--models <模型,...>]
+                           [--models <模型,...>] [--validity-days <天数>]
   larkaxctl plan list
   larkaxctl plan get --key <key>
   larkaxctl plan enable|disable --key <key>
 
 key 也可写成 --key，旧动词 create 照旧可用；--name 是展示名。
+--validity-days 决定这个包能不能卖：给了才能被 wallet payment create --plan 买。
 用户持有的订阅、扣费顺序与 Key 的额度包名单：larkaxctl user plan、larkaxctl user key。
 更细的边界：larkaxctl help plan。
 `
@@ -45,6 +46,7 @@ const planUsage = `larkaxctl plan 管理额度包（商品定义）。
   larkaxctl plan add <key> --name <名称> --unit <amount|token|request>
                            [--quota <可用量>] [--face-value <面值>]
                            [--models <模型,...>] [--description <说明>]
+                           [--validity-days <天数>]
   larkaxctl plan list
   larkaxctl plan get --key <key>
   larkaxctl plan enable|disable --key <key>
@@ -69,6 +71,19 @@ const planUsage = `larkaxctl plan 管理额度包（商品定义）。
 get 打一个包的详情，list 列出全部（含停用的），两者都不改任何东西。
 enable / disable 控制一个包还能不能用于**新的发放**：已经发出去的订阅不受影响，
 它们的面值在发放时就定下了。
+
+# 售卖
+
+--validity-days 是这个包卖出去时给订阅的有效期天数。**没给它的包不出售**：
+wallet payment create --plan 会拒绝，get 里那一栏打「不售卖」。运营发放（user plan
+grant）不读它，有效期仍然由发放那条命令给。商户包（owner_user_id 非空）今天
+也不出售——售卖的分成口径未定。
+
+**改天数不影响已经卖出去的单子**：每张支付单在下单时把当时的天数记在自己身上，
+付款到账时按它算到期时刻，不回头读包。已经发出去的订阅更不受影响（它按库里那一行
+算）。还在等付款的单子**不再自动发放**：包上的天数被改成别的值之后，这类单子在发放前
+会被拒（报错点名「售卖有效期在售出之后改过」），单子留在 created 等人工核对。包没动过
+的单子照常按下单时记下的天数发放。
 
 # 用户持有的订阅
 
@@ -180,6 +195,7 @@ func runPlanCreate(args []string) error {
 	unit := fs.String("unit", "", "")
 	quota := fs.String("quota", "", "")
 	faceValue := fs.String("face-value", "", "")
+	validityDays := fs.Int("validity-days", 0, "")
 	models := fs.String("models", "", "")
 	asset := fs.String("asset", string(ledger.AssetCNY), "")
 	if err := fs.Parse(rest); err != nil {
@@ -241,6 +257,14 @@ func runPlanCreate(args []string) error {
 		if in.FaceValue, err = parseNamedAmountFlag("--face-value", *faceValue); err != nil {
 			return err
 		}
+	}
+	if given["validity-days"] {
+		if *validityDays <= 0 {
+			return usageErr(fmt.Errorf(
+				"--validity-days 必须是正数天，得到 %d：0 天等于发出去就已经到期", *validityDays))
+		}
+		days := *validityDays
+		in.ValidityDays = &days
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -780,10 +804,22 @@ func planModelsLabel(p plans.Plan) string {
 	return "-"
 }
 
+// planValidityLabel 打一个包的售卖有效期。没设天数的包不出售。
+func planValidityLabel(p plans.Plan) string {
+	if p.ValidityDays == nil {
+		return "不售卖"
+	}
+	return fmt.Sprintf("%d 天", *p.ValidityDays)
+}
+
 // printCreatedPlan 打印新建出来的额度包。
 func printCreatedPlan(w io.Writer, p plans.Plan) {
-	_, _ = fmt.Fprintf(w, "已建额度包 %s：%s，%s，可用量 %s，面值 %s，模型 %s。\n",
-		p.Key, p.Name, unitLabel(p.Unit), p.QuotaTotal, p.FaceValue, planModelsLabel(p))
+	sale := ""
+	if p.ValidityDays != nil {
+		sale = fmt.Sprintf("，售卖 %d 天", *p.ValidityDays)
+	}
+	_, _ = fmt.Fprintf(w, "已建额度包 %s：%s，%s，可用量 %s，面值 %s，模型 %s%s。\n",
+		p.Key, p.Name, unitLabel(p.Unit), p.QuotaTotal, p.FaceValue, planModelsLabel(p), sale)
 }
 
 // printPlanDetail 打印一个额度包的详情，一栏一行。
@@ -803,8 +839,12 @@ func printPlanDetail(w io.Writer, p plans.Plan) {
 		{"可用量", p.QuotaTotal.String()},
 		{"面值", p.FaceValue.String()},
 		{"模型", planModelsLabel(p)},
-		{"状态", status},
+		{"售卖有效期", planValidityLabel(p)},
 	}
+	if p.OwnerUserID != nil {
+		rows = append(rows, [2]string{"归属商户", strconv.FormatInt(*p.OwnerUserID, 10)})
+	}
+	rows = append(rows, [2]string{"状态", status})
 	for _, row := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\n", pal.bold(row[0]), row[1])
 	}
@@ -829,17 +869,19 @@ func printPlanList(w io.Writer, list []plans.Plan) {
 
 	pal := newPalette(w)
 	tw := newTableWriter(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		pal.bold("KEY"), pal.bold("名称"), pal.bold("单位"), pal.bold("可用量"),
-		pal.bold("面值"), pal.bold("模型"), pal.bold("状态"))
+		pal.bold("面值"), pal.bold("售卖"), pal.bold("模型"), pal.bold("状态"))
 	for _, p := range list {
 		status := "启用"
 		if !p.Enabled {
 			status = "停用"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		// 「售卖」这一栏回答的是「哪些包能卖」：有天数才卖，空表示不出售。
+		// 它与「状态」是两件事——停用的包也可能配了天数，只是暂时不上架。
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			pal.bold(p.Key), p.Name, unitLabel(p.Unit), p.QuotaTotal.String(),
-			p.FaceValue.String(), planModelsLabel(p), status)
+			p.FaceValue.String(), planValidityLabel(p), planModelsLabel(p), status)
 	}
 	_ = tw.Flush()
 }
@@ -972,6 +1014,9 @@ func planEntry(p plans.Plan) map[string]any {
 		"face_value":  jsonAmount(p.FaceValue),
 		"models":      jsonList(p.Models),
 		"enabled":     p.Enabled,
+		// nil 会被编码成 null：那一栏的含义是「这个包不出售」。
+		"validity_days": p.ValidityDays,
+		"owner_user_id": p.OwnerUserID,
 	}
 }
 

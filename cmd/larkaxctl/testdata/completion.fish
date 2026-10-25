@@ -388,6 +388,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subc
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l name -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l quota -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l unit -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from add' -l validity-days -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from disable' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from enable' -l key -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from plan; and __fish_seen_subcommand_from get' -l key -r
@@ -662,6 +663,7 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_su
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from create' -l auto-ref
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from create' -l dry-run
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from create' -l notify-url -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from create' -l plan -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from create' -l ref -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from create' -l user -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from payment; and __fish_seen_subcommand_from status' -l order -r

@@ -150,3 +150,84 @@ func TestWalletPaymentLifecycle(t *testing.T) {
 		t.Errorf("缺钱包退出码 = %d，期望 %d", got, exitConflict)
 	}
 }
+
+// TestWalletPaymentPlanIgnoresDefaultAsset 钉住「买额度包不读默认资产」。
+//
+// 把 settings.billing.default_asset 改成一个不受支持的取值，然后：
+//   - 带 --plan 下单（不给 --asset）→ 成功，币种取自包；
+//   - 不带 --plan 走充值 → 报「不是受支持的资产」。
+//
+// 这一对钉的是**行为**，不是实现结构：将来谁把 resolveWalletAsset 挪回买包
+// 那条路，第二条会先红。它必须写在 cmd/larkaxctl 包：读 settings 的是 CLI 侧的
+// resolveWalletAsset，服务层 Service.Create 根本不读它——写在 internal/payment
+// 里断言那句话是假绿，那条错误路径在那一层不存在。
+//
+// **这两条用例必须读同一个 settings 行**（同一份 "XYZ"），否则「同一份 settings
+// 下两条路分叉」这个语义就没了。取值要写成合法的 JSON 字符串（settings.Load
+// 会校验 json.Valid），否则报的是「不是合法 JSON」，走不到资产那一句。
+func TestWalletPaymentPlanIgnoresDefaultAsset(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	setupEnv(t)
+	setPaymentFake(t, ctx, db, true)
+	t.Cleanup(func() { setPaymentFake(t, ctx, db, false) })
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO plans (key, name, asset, unit, quota_total, face_value, validity_days)
+		VALUES ('cli-plan-asset', '命令行售卖包', 'CNY', 'amount', 42, 42, 30)
+		ON CONFLICT (key) DO NOTHING`); err != nil {
+		t.Fatalf("建额度包失败: %v", err)
+	}
+
+	// 两个用户与钱包都在改配置**之前**建好：wallet create 自己也要读默认资产，
+	// 放到改之后会先撞上同一个错误，用例就测不到 payment create 那条路了。
+	planUser := createTestUserID(t)
+	topupUser := createTestUserID(t)
+	for _, id := range []string{planUser, topupUser} {
+		if err := runCaptured(t, func() error {
+			return runWalletCreate([]string{"--user", id})
+		}); err != nil {
+			t.Fatalf("wallet create 失败: %v", err)
+		}
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE settings SET value = '"XYZ"' WHERE key = 'billing.default_asset'`); err != nil {
+		t.Fatalf("改默认资产失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`UPDATE settings SET value = '"CNY"' WHERE key = 'billing.default_asset'`); err != nil {
+			t.Errorf("还原默认资产失败（后续用例会看到 XYZ）: %v", err)
+		}
+	})
+
+	// 第一条路：买额度包，不读默认资产，币种由包决定。
+	stdout, _ := captureStreams(t, func() {
+		if err := runPaymentCreate([]string{
+			"--user", planUser, "--plan", "cli-plan-asset", "--ref", "ORD-CLI-PLAN-ASSET",
+		}); err != nil {
+			t.Fatalf("默认资产不可用时买额度包不该失败: %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "CNY") {
+		t.Errorf("下单回执里没有包决定的币种 CNY：%q", stdout)
+	}
+	// 回执要打出**单子上记的**天数：用户买的是「42 元 / 30 天」这件商品，
+	// 只打金额不打天数等于只报了一半。钉单子上的值而不是包上的现值——包在
+	// 下单之后被改过时，用户该看到的是自己买的那一档。
+	if !strings.Contains(stdout, "30 天") {
+		t.Errorf("下单回执里没有这张单的天数（30 天），用户看不到自己买了多久：%q", stdout)
+	}
+
+	// 第二条路：同一份 settings 下走充值，必须报那句。
+	err := runCaptured(t, func() error {
+		return runPaymentCreate([]string{"--user", topupUser, "--amount", "1.00", "--ref", "ORD-CLI-DEFAULT-ASSET"})
+	})
+	if err == nil {
+		t.Fatal("默认资产不可用时充值应当报错")
+	}
+	if !strings.Contains(err.Error(), "不是受支持的资产") {
+		t.Errorf("报错没有点名默认资产不可用：%v", err)
+	}
+}

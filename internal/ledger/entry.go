@@ -67,6 +67,13 @@ const (
 	// 与 plan_carry 分开记，是因为两者的触发时机与对家都不同：前者在到期，
 	// 对家是 prepaid；后者在发放，对家是另一个 prepaid。
 	EntryPlanCarryMerge EntryType = "plan_carry_merge"
+	// EntryPlanPurchase 是用户**自己买**一个额度包：付款到账时，面值记进
+	// prepaid:<订阅 id>，对方科目是支付通道，而不是平台收入。
+	//
+	// 它与 plan_grant 的科目不同，所以不合并成一档：赠送是平台让出一份收入
+	//（贷 platform_revenue），售卖是钱真的从通道进来（贷 payment_gateway）。
+	// 账面上要能回答「这份额度是送的还是卖的」，收入确认的口径正落在这个区别上。
+	EntryPlanPurchase EntryType = "plan_purchase"
 	// EntryAdjustment 是人工调账。它不参与任何业务推导，
 	// 只在必须手工修正账目时使用，且强制要求写备注。
 	EntryAdjustment EntryType = "adjustment"
@@ -91,6 +98,7 @@ func EntryTypes() []EntryType {
 		EntryTopup, EntryConsume, EntryRefund, EntrySettle,
 		EntryPayoutRequest, EntryPayoutPaid, EntryPayoutReject,
 		EntryPlanGrant, EntryPlanVoid, EntryPlanCarry, EntryPlanCarryMerge,
+		EntryPlanPurchase,
 		EntryAdjustment,
 	}
 }
@@ -214,6 +222,14 @@ var entryDirections = map[EntryType]map[AccountType]signMask{
 	EntryPlanCarryMerge: {
 		AccountCarryover: signCredit, // 待并入的额度转出去了
 		AccountPrepaid:   signDebit,  // 新订阅的面值多了这一份
+	},
+	// 售卖：prepaid 变大、通道科目变大，方向与充值那一档逐字相同（钱从通道
+	// 进来，平台欠用户一份等值的额度）。手续费也是成本，由平台承担。
+	EntryPlanPurchase: {
+		AccountPrepaid:         signDebit,  // 平台欠用户的预存额度增加
+		AccountPaymentGateway:  signCredit, // 通道收到的钱增加
+		AccountUpstreamCost:    signDebit,  // 通道手续费是成本
+		AccountPlatformRevenue: signCredit, // 手续费由平台承担：平台科目减少
 	},
 	// 人工调账是唯一的开口：它本就是要修正别处算错的余额，
 	// 所以科目与方向都不设限。代价是它不能被自动推导，

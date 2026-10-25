@@ -21,6 +21,13 @@
 // `ledger/store.PostTransaction`（同键同内容算重放、同键不同内容报冲突）。
 // 本包不另造一套幂等判据。
 //
+// # 买额度包走同一条链
+//
+// 下单时带 `plan_key` 的支付单不是充值：付款通知到达后，它在同一个事务里发放
+// 一条订阅并写一组 `plan_purchase` 分录（借 `prepaid:<订阅 id>`、贷
+// `payment_gateway:<通道>`），钱不进用户钱包。两条路共用同一个状态机与同一个
+// 幂等键（订单号），差别只在「入账时写哪一档分录」。
+//
 // # 状态只许往前走
 //
 // `created` 是唯一能入账的起点：只有它收到「已支付」才写分录并转成 `paid`；
@@ -112,6 +119,17 @@ type Order struct {
 	Amount  money.Amount
 	Fee     money.Amount
 	Status  Status
+	// PlanKey 是这张单买的额度包（plans.key）；空表示充值。
+	PlanKey string
+	// ValidityDays 是**下单那一刻**包上的售卖天数，售卖的单子才有；充值为 nil。
+	//
+	// 到期时刻由它与收款时刻算出，入账时**不再读包上的值**：用户按多少天付的钱，
+	// 从下单那一刻起就只由这张单回答。包后来被改成 365 天，这一单也不会多给
+	// 11 个月——那一格由 plans.purchasePlanMismatch 拦下（首次发放拒绝）。
+	//
+	// 用指针而不是 int 表达「没有」：0 天与「这不是售卖单」是两件事，而 0 天
+	// 本身不合法（迁移上写着 > 0），混用会让「没记」看起来像「记了 0 天」。
+	ValidityDays *int
 	// GatewayTxnID 是通道侧的流水号，只有付过款之后才有。
 	GatewayTxnID string
 	// GatewayRaw 是通道原始响应的 JSON 文本。
@@ -133,6 +151,33 @@ type CreateOrderRequest struct {
 	Subject string
 	// NotifyURL 是通道把结果发回来的地址（本服务的支付回调入口）。
 	NotifyURL string
+	// PlanKey 非空表示这笔不是充值，而是买一个额度包：钱不进用户钱包，付款
+	// 通知到达后发放一条订阅，面值记进 prepaid:<订阅 id>。
+	//
+	// 给了它时 Amount 与 Asset 可以留空，服务端从包上取（见 Service.applyPlan）；
+	// 给了就必须与包上的值相等——金额与币种由商品决定，不由调用方决定。
+	// 「给没给」看下面两个 Given 标志，不看字段的零值（理由见各自的注释）。
+	PlanKey string
+	// AmountGiven 表示调用方**明确给了**金额。
+	//
+	// 买额度包时它决定 applyPlan 走哪一条：给了就必须为正且等于包的面值，
+	// 没给就用包的面值。充值（PlanKey 为空）不看它——那条路 validateCreateOrder
+	// 要求金额为正。
+	AmountGiven bool
+	// AssetGiven 表示调用方**明确给了**币种，形状与 AmountGiven 相同。
+	//
+	// 买额度包时币种由商品决定：给了只用来核对，与包不符就拒；没给就用包的。
+	// 币种也单独用一个标志：CLI 在充值那条路上会把 settings 里的默认资产
+	// 填进 Asset，买包那条路不填。两条路都落到同一个 CreateOrderRequest 上，
+	// 服务层只有看这个标志才分得清「调用方给的」与「CLI 补的默认值」。
+	AssetGiven bool
+	// ValidityDays 由 applyPlan 在下单时从包上取，**调用方不该填**。
+	//
+	// 它落进 payment_orders.validity_days，成为「用户按多少天付的钱」的唯一
+	// 依据：入账时按它算到期时刻，不再读包（见 Order.ValidityDays）。放在这里
+	// 是因为订单那一行由 req 翻译而成（orderForCreate），而包只在 applyPlan
+	// 里读得到。
+	ValidityDays *int
 }
 
 // CreatedOrder 是通道建单之后回来的东西。
@@ -253,7 +298,21 @@ var ErrChannelDisabled = errors.New("支付通道没有启用")
 // `larkaxctl wallet credit` 的键用不同的域前缀：同一张单据手工入账与走通道
 // 入账是两笔互不相干的动作，共用一个域会让它们互相算成重放。
 func TxnIDForOrder(orderNo string) ledger.TxnID {
-	sum := sha256.Sum256([]byte("larkax:payment-topup:v1\x00" + orderNo))
+	return txnIDForDomain("larkax:payment-topup:v1", orderNo)
+}
+
+// PlanTxnIDForOrder 把支付单号确定性地映射成**额度包售卖**那笔交易的账本交易号。
+//
+// 与 TxnIDForOrder 用不同的域前缀：同一张单子只可能是其中一种，但充值与售卖
+// 是两种业务事件，共用一个域会让将来的对账把它们混成一类。
+func PlanTxnIDForOrder(orderNo string) ledger.TxnID {
+	return txnIDForDomain("larkax:plan-purchase:v1", orderNo)
+}
+
+// txnIDForDomain 是上面两条共用的映射：域前缀、分隔符与置位规则只有一份，
+// 两条命令的 id 因此除了前缀之外逐字同形。
+func txnIDForDomain(domain, orderNo string) ledger.TxnID {
+	sum := sha256.Sum256([]byte(domain + "\x00" + orderNo))
 	var b [16]byte
 	copy(b[:], sum[:16])
 	// 置版本位与变体位，使它能被任何标准 uuid 解析器读回（同 ledger.NewTxnID）。

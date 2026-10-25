@@ -30,7 +30,8 @@
 //
 // 做：额度包与订阅的增删查、发放、作废；一把 key 能用哪些订阅（`api_key_plans`，
 // 空集合 = 全部）；一个用户的有效扣费顺序（用户覆盖或平台默认）。**不做**请求
-// 路径上的选源与扣费，也不做售卖、周期续费与结转。本包不改计价规则。
+// 路径上的选源与扣费，也不做周期续费。售卖（下单、收款通知）在 internal/payment，
+// 这里只提供它要的那一次发放（见 GrantInput.Purchase）。本包不改计价规则。
 //
 // # 幂等
 //
@@ -139,6 +140,13 @@ type Plan struct {
 	// Models 是这个包能用的规范模型名。空表示不限模型——只有金额包允许为空。
 	Models  []string
 	Enabled bool
+	// ValidityDays 是售卖时给订阅的有效期天数。空表示这个包**不出售**：运营
+	// 发放的有效期由发放那条命令给，与包无关；而售卖要在下单那一刻就把到期
+	// 时刻算出来，所以天数必须长在包上。
+	ValidityDays *int
+	// OwnerUserID 是包的归属商户；空表示平台包。售卖今天只收平台包——商户包的
+	// 分成口径未定（见 internal/payment 的下单校验）。
+	OwnerUserID *int64
 }
 
 // UserPlan 是一个订阅，连同它「还剩多少」。
@@ -210,7 +218,7 @@ var ErrPlanScope = errors.New("额度包的模型范围不合要求")
 // 再由 money.Parse 解析，溢出时拿到的是「这个数读不出来」而不是一个被四舍五入
 // 过的值（同 store 的 Wallets 那一组）。
 const planColumns = `id, key, name, COALESCE(description, ''), asset, unit,
-	quota_total::text, face_value::text, enabled`
+	quota_total::text, face_value::text, enabled, validity_days, owner_user_id`
 
 // scanPlan 把一行额度包读成 Plan。收一个扫描函数，于是「读一行」与「读一批」
 // 共用同一份解析。
@@ -219,10 +227,20 @@ func scanPlan(scan func(dest ...any) error) (Plan, error) {
 		p                     Plan
 		asset, unit           string
 		quotaTotal, faceValue string
+		validityDays          sql.NullInt32
+		ownerUserID           sql.NullInt64
 	)
 	if err := scan(&p.ID, &p.Key, &p.Name, &p.Description, &asset, &unit,
-		&quotaTotal, &faceValue, &p.Enabled); err != nil {
+		&quotaTotal, &faceValue, &p.Enabled, &validityDays, &ownerUserID); err != nil {
 		return Plan{}, err
+	}
+	if validityDays.Valid {
+		days := int(validityDays.Int32)
+		p.ValidityDays = &days
+	}
+	if ownerUserID.Valid {
+		owner := ownerUserID.Int64
+		p.OwnerUserID = &owner
 	}
 	p.Asset = ledger.Asset(asset)
 	if !p.Asset.Valid() {
@@ -268,6 +286,9 @@ type CreatePlanInput struct {
 	FaceValue  money.Amount
 	// Models 是可用的规范模型名。token / 次数包至少要有一个。
 	Models []string
+	// ValidityDays 是售卖时给订阅的有效期天数；空表示这个包不出售。给了就必须
+	// 为正——0 天等于「发出去就已经到期」，那不是一个能卖的商品。
+	ValidityDays *int
 }
 
 // CreatePlan 新建一个额度包，连同它的模型范围，在一个事务里写完。
@@ -286,11 +307,11 @@ func (s *Service) CreatePlan(ctx context.Context, in CreatePlanInput) (Plan, err
 	defer func() { _ = tx.Rollback() }()
 
 	row, err := scanPlan(tx.QueryRowContext(ctx, `
-		INSERT INTO plans (key, name, description, asset, unit, quota_total, face_value)
-		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6::numeric, $7::numeric)
+		INSERT INTO plans (key, name, description, asset, unit, quota_total, face_value, validity_days)
+		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6::numeric, $7::numeric, $8)
 		RETURNING `+planColumns,
 		p.Key, p.Name, p.Description, string(p.Asset), string(p.Unit),
-		p.QuotaTotal.String(), p.FaceValue.String()).Scan)
+		p.QuotaTotal.String(), p.FaceValue.String(), nullableInt(p.ValidityDays)).Scan)
 	if err != nil {
 		return Plan{}, dberr.ConstraintFailure(fmt.Errorf("建额度包失败: %w", err))
 	}
@@ -369,16 +390,29 @@ func normalizePlanInput(in CreatePlanInput) (Plan, error) {
 			"%w：%s 包至少要对一个模型开放。它的价值与模型强相关，"+
 				"不限定范围就等于给出一个可能亏本的包", ErrPlanScope, in.Unit)
 	}
+	if in.ValidityDays != nil && *in.ValidityDays <= 0 {
+		return Plan{}, fmt.Errorf("售卖有效期必须是正数天，得到 %d：0 天等于发出去就已经到期",
+			*in.ValidityDays)
+	}
 	return Plan{
-		Key:         key,
-		Name:        name,
-		Description: strings.TrimSpace(in.Description),
-		Asset:       in.Asset,
-		Unit:        in.Unit,
-		QuotaTotal:  total,
-		FaceValue:   face,
-		Models:      models,
+		Key:          key,
+		Name:         name,
+		Description:  strings.TrimSpace(in.Description),
+		Asset:        in.Asset,
+		Unit:         in.Unit,
+		QuotaTotal:   total,
+		FaceValue:    face,
+		Models:       models,
+		ValidityDays: in.ValidityDays,
 	}, nil
+}
+
+// nullableInt 把一个可空的正整数写成 SQL 参数：nil 落成 NULL。
+func nullableInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 // normalizeModels 去掉空项与重复，按字典序返回。
@@ -446,7 +480,7 @@ func (s *Service) Plans(ctx context.Context) ([]Plan, error) {
 // 禁用的包照样读得出来：运营要能看到它、也才能把它重新启用。能不能发放是
 // Grant 的判断，不是这里的。
 func (s *Service) PlanByKey(ctx context.Context, key string) (Plan, error) {
-	p, err := planByKeyIn(ctx, s.db, key)
+	p, err := planByKeyIn(ctx, s.read(), key)
 	if err != nil {
 		return Plan{}, err
 	}

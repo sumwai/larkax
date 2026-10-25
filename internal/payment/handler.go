@@ -124,6 +124,23 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, err 
 		observe.FromContext(r.Context()).Error("支付回调的通道流水号冲突", "err", err)
 		writeCallbackError(w, http.StatusConflict, err.Error())
 	default:
+		// 落到这里的不止一类，共同点是「重发不会让它变好」，只能人工处理：
+		//
+		//   - 这张单的前提变了：买额度包的单子在下单与首次发放之间，包的面值/
+		//     币种/售卖有效期/启停/归属被改过（见 plans.purchasePlanMismatch）。
+		//   - 通知送晚了：收款时刻早于「现在 − 售卖天数」，算出的到期时刻已经
+		//     过去（见 plans.GrantTx）。包一动没动，重发也算出同一个过去的时刻。
+		//
+		// **500 是有意的**，不是没归类：这两类要人工核对后补发或退款，而
+		// 4xx 会让通道停止重试、把它当成已经处理过——那正是我们要避免的。
+		// 它们也**不**包 ErrOrderConflict：那不是「两张单冲突」，映射 409 会
+		// 让通道同样停下。
+		//
+		// 这两类的 err 都带订单号：第一类由 plans.purchasePlanMismatch 点名哪一格，
+		// 第二类由 plans.GrantTx 点名到期时刻，两者都在 payment.purchasePlan 里被
+		// 同一句补上「支付单 <单号>: 」。这里只加 request_id。
+		// 落进本分支的其余来路（充值那一路的账本或落库失败、改状态的失败）没有
+		// 单号，只能按时间与 request_id 反查。
 		observe.FromContext(r.Context()).Error("处理支付通知失败", "err", err)
 		writeCallbackError(w, http.StatusInternalServerError, "failed to process payment notification")
 	}
