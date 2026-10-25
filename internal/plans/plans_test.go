@@ -163,6 +163,46 @@ func TestCreatePlanRequiresModelsForQuotaUnits(t *testing.T) {
 	}
 }
 
+// 售卖有效期的边界：0 天要拒（发出去就已经到期），正数天要放行并原样落库。
+//
+// 两格成对：只测「0 天被拒」的话，把 `<=` 写成 `>` 也能过——那会把任何正数天
+// 都拒掉，包从此卖不出去；只测「30 天能建」的话，`<=` 改成 `<` 也能过，因为
+// plans.validity_days 上有 CHECK，库那道约束会替它拒掉 0 天，只是报出来的
+// 是 SQL 错，不是这里那句「售卖有效期必须是正数天」。
+func TestCreatePlanValidityDaysBoundary(t *testing.T) {
+	ctx := context.Background()
+	svc := New(testDB(t))
+
+	zero := 0
+	_, err := svc.CreatePlan(ctx, CreatePlanInput{
+		Key: "plan-" + itoa(nextID()), Name: "0 天的包", Asset: ledger.AssetCNY,
+		Unit: UnitAmount, QuotaTotal: amount(t, "10"), ValidityDays: &zero,
+	})
+	if err == nil {
+		t.Fatal("0 天应当被拒：发出去就已经到期")
+	}
+	if !strings.Contains(err.Error(), "售卖有效期必须是正数天") {
+		t.Errorf("报错不是「售卖有效期必须是正数天」那一句：%v", err)
+	}
+
+	days := 30
+	p, err := svc.CreatePlan(ctx, CreatePlanInput{
+		Key: "plan-" + itoa(nextID()), Name: "30 天的包", Asset: ledger.AssetCNY,
+		Unit: UnitAmount, QuotaTotal: amount(t, "10"), ValidityDays: &days,
+	})
+	if err != nil {
+		t.Fatalf("正数天应当放行: %v", err)
+	}
+	// 从库里读回：判据要落在落库那一份上，不是入参。
+	got, err := svc.PlanByKey(ctx, p.Key)
+	if err != nil {
+		t.Fatalf("读回额度包失败: %v", err)
+	}
+	if got.ValidityDays == nil || *got.ValidityDays != 30 {
+		t.Errorf("库里记的天数 = %v，期望 30", got.ValidityDays)
+	}
+}
+
 // 金额包的可用量与面值是同一个数：只填一个时补齐，两个都给时必须相等。
 func TestCreatePlanFillsAmountPackage(t *testing.T) {
 	ctx := context.Background()
@@ -464,6 +504,80 @@ func TestGrantRejectsDisabledPlan(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("禁用的额度包发放应当被拒")
+	}
+}
+
+// 售卖发放**不传** ExpiresAt（留零值）：到期时刻由 PaidAt + ValidityDays 算出。
+// 这是售卖走的合法路径，不能因为「ExpiresAt 是零值」被当成缺参数拒掉。
+//
+// 与下面那条成对：只钉「两个都不给要拒」的话，把 `&&` 里的 `==` 写成 `!=`
+// 也会绿——那会把每一笔正当的售卖发放都挡在门口。
+func TestGrantWithPurchaseComputesExpiryFromPaidAt(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	userID := seedUser(t, ctx, db)
+
+	days := 30
+	plan, err := svc.CreatePlan(ctx, CreatePlanInput{
+		Key: "plan-" + itoa(nextID()), Name: "售卖包", Asset: ledger.AssetCNY,
+		Unit: UnitAmount, QuotaTotal: amount(t, "100"), ValidityDays: &days,
+	})
+	if err != nil {
+		t.Fatalf("建售卖包失败: %v", err)
+	}
+
+	paidAt := time.Now().UTC().Add(-time.Minute)
+	up, applied, err := svc.Grant(ctx, GrantInput{
+		TxnID: newTxnID(), Ref: "grant-" + itoa(nextID()), UserID: userID, PlanKey: plan.Key,
+		// ExpiresAt 留零值：售卖这一路不给它，由单子上记的天数与收款时刻算。
+		Purchase: &PurchaseInput{
+			Gateway:        "stub",
+			PaidAt:         paidAt,
+			ExpectedAmount: plan.FaceValue,
+			ExpectedAsset:  plan.Asset,
+			ValidityDays:   &days,
+		},
+	})
+	if err != nil {
+		t.Fatalf("售卖发放应当成功（到期时刻由 PaidAt + 天数算出）: %v", err)
+	}
+	if !applied {
+		t.Error("首次发放应当 applied=true")
+	}
+	if up.ExpiresAt == nil {
+		t.Fatal("发放出来的订阅没有到期时刻")
+	}
+	want := paidAt.AddDate(0, 0, days)
+	if diff := up.ExpiresAt.Sub(want); diff > time.Second || diff < -time.Second {
+		t.Errorf("到期时刻 = %s，期望收款时刻 + %d 天 = %s",
+			up.ExpiresAt.Format(time.RFC3339), days, want.Format(time.RFC3339))
+	}
+}
+
+// 赠予发放既没有 Purchase、也没给 ExpiresAt：拒，并且点名缺的是什么。
+//
+// 报错要说「有效期终点」，不是泛泛的「参数不对」：发放这一层的调用方（CLI、
+// 未来的运营后台）要能一眼看出该补哪一项。
+func TestGrantWithoutExpiryOrPurchaseIsRejected(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	svc := New(db)
+	userID := seedUser(t, ctx, db)
+	plan := newPlan(t, ctx, svc, "100")
+
+	ref := "grant-" + itoa(nextID())
+	_, _, err := svc.Grant(ctx, GrantInput{
+		TxnID: newTxnID(), Ref: ref, UserID: userID, PlanKey: plan.Key,
+	})
+	if err == nil {
+		t.Fatal("既没有 Purchase 也没有 ExpiresAt 时应当拒")
+	}
+	if !strings.Contains(err.Error(), "缺少有效期终点") {
+		t.Errorf("报错不是「缺少有效期终点」那一句：%v", err)
+	}
+	if got := countUserPlansByRef(t, db, ref); got != 0 {
+		t.Errorf("被拒的发放不该建订阅，这个单号下有 %d 条", got)
 	}
 }
 
