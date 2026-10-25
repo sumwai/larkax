@@ -466,6 +466,46 @@ func TestSetAccountWeightOnDeletedOrMissingChannel(t *testing.T) {
 	}
 }
 
+// TestSetAccountWeightRejectsInvalidChannelID 覆盖入口那道渠道 id 守卫。
+//
+// 今天从命令行走不到这里：唯一的调用方先经 ChannelIDByRef，数字引用 <= 0 在
+// 那一步就报错了。而 SetAccountWeight 是 Admin 的导出方法，这条判据在任何
+// 查询之前，是给将来直接调用 Admin 的一方留的契约——「渠道 id 非法」说的是
+// 调用方的参数错了，「这条渠道不存在」说的是库里没有那一行，两者对使用者
+// 是两个不同的事实。判据放宽成 < 0 之后，0 会一路走到查渠道，拿回后者。
+//
+// 两条断言缺一不可：只说错误里带「渠道 id 无效」，一个把这句话拼到所有错误
+// 上的改动也能过；没拿到 ErrChannelNotFound，才说明请求没走到查渠道那一步。
+func TestSetAccountWeightRejectsInvalidChannelID(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	// 账号必须真实存在：0 被放行之后，代码会先查到账号、再去查渠道，那时
+	// 才拿到 ErrChannelNotFound。这条用例要的正是那一步不该被走到。
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	_, name := attachPoolAccount(t.Context(), t, db, sealer, channelID, "guard-key", 1)
+
+	admin := NewAdmin(db, nil, nil)
+	for _, invalid := range []int64{0, -1} {
+		t.Run(itoa(invalid), func(t *testing.T) {
+			_, err := admin.SetAccountWeight(context.Background(), name, invalid, 1)
+			if err == nil {
+				t.Fatalf("渠道 id %d 应当被拒", invalid)
+			}
+			if !strings.Contains(err.Error(), "渠道 id 无效") {
+				t.Errorf("错误里没有指出渠道 id 非法：%v", err)
+			}
+			if !strings.Contains(err.Error(), itoa(invalid)) {
+				t.Errorf("错误里没有带上被拒的 id %d：%v", invalid, err)
+			}
+			if errors.Is(err, ErrChannelNotFound) {
+				t.Errorf("渠道 id %d 被报成了渠道不存在，说明入口没拦住：%v", invalid, err)
+			}
+		})
+	}
+}
+
 // TestSetAccountWeightDetectsVanishedLink 钉住「读与写之间那一对关联没了」。
 //
 // 判据是写完之后有没有真的改到行：`UPDATE` 影响 0 行时照报成功，调用方会以为
