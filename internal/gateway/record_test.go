@@ -268,6 +268,42 @@ func TestChatDoesNotBlameChannelForRequestErrors(t *testing.T) {
 	}
 }
 
+// 客户端在上游回 401 的同时断开时，这把 key 的结论仍然要交下去。
+//
+// 取消会把这一次失败改判成 VerdictUnattributed——一条断连不该给渠道记一笔
+// 失败，这条判据不变。但「上游拒了这份凭证」是凭证自己的结论，与客户端还
+// 在不在无关：两样一起丢掉的话，一次断连就能让 401 的账号继续留在池子里
+// 接流量（账号层据此当场摘，见 channels.Recorder.accountState）。
+func TestCanceledRequestKeepsCredentialVerdict(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.gw.Executor = &cancelingExecutor{
+		cancel: cancel,
+		inner: &fakeExecutor{failFor: map[int64]error{
+			1: &channel.ErrUpstream{StatusCode: 401, GotResponse: true, Retryable: false},
+		}},
+	}
+	cand := preferred(candidate(1, "gpt-4o"))
+	cand.AccountID = 9
+	h.candidates.cands = []route.Candidate{cand}
+
+	if _, err := h.gw.Chat(ctx, request(), upstreamRequest(), Hooks{}); err == nil {
+		t.Fatal("ctx 已取消时不该成功")
+	}
+
+	rec := h.recorder.only(t)
+	if rec.Verdict != route.VerdictUnattributed {
+		t.Errorf("Verdict = %q，期望 %q（断连不给渠道记失败）", rec.Verdict, route.VerdictUnattributed)
+	}
+	if !rec.AccountDrained {
+		t.Error("AccountDrained = false：上游已经回了 401，客户端断开不该让这条凭证结论消失")
+	}
+	if rec.AccountID != 9 {
+		t.Errorf("AccountID = %d，期望 9", rec.AccountID)
+	}
+}
+
 // 换渠道重试：每一次尝试各记一次，失败的那些也要记。
 //
 // 只记最后一次的话，排在前面那个一直失败的渠道永远不会攒够连续失败数。

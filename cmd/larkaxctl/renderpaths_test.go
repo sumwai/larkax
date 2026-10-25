@@ -59,11 +59,12 @@ var tableRenderPaths = []string{
 	"printAliasList",
 	"printAllowlists", // snapshot allowlist
 	"printCalendarList",
-	"printChannelAdapters",     // channel adapters
-	"printChannelDetail",       // channel get
-	"printChannelHealthDetail", // channel health --id 的读数
-	"printChannelHealthHours",  // channel health --id 的逐小时明细
-	"printChannelHealthList",   // channel health 的汇总表
+	"printChannelAdapters",       // channel adapters
+	"printChannelDetail",         // channel get
+	"printChannelHealthAccounts", // channel health --id 的逐账号明细
+	"printChannelHealthDetail",   // channel health --id 的读数
+	"printChannelHealthHours",    // channel health --id 的逐小时明细
+	"printChannelHealthList",     // channel health 的汇总表
 	"printChannelList",
 	"printChannelUpstreamModels", // channel upstream-models
 	"printConsentList",           // consent list

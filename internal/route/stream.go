@@ -19,6 +19,12 @@ type StreamResult struct {
 	Events <-chan channel.StreamEvent
 	// Channel 是最终选中的渠道。
 	Channel channel.Channel
+	// AccountID / AccountName 是这次实际用的那个账号（见 Candidate.AccountID）。
+	//
+	// 与 Channel 成对：流式的收尾在后台，那里拿不到候选，只拿得到这份结果，
+	// 而账号健康要记到具体的那一个账号上。
+	AccountID   int64
+	AccountName string
 	// UpstreamModel 是这次请求**实际发出去**的上游模型名。
 	//
 	// 与非流式那条路上的 Result.UpstreamModel 同一件事：由本包给出来，因为
@@ -105,12 +111,18 @@ func (r *Router) chatStreamWithPlan(ctx context.Context, exec StreamExecutor, re
 		result.Attempts = append(result.Attempts, Attempt{
 			ChannelID:   c.Channel.ID,
 			ChannelName: c.Channel.Name,
+			AccountID:   c.AccountID,
+			AccountName: c.AccountName,
 			Err:         err,
 			Retryable:   worthNextCandidate(err),
 			StartedAt:   started,
 			Duration:    r.now().Sub(started),
 		})
 		result.Channel = c.Channel
+		// 账号与渠道成对：流式的收尾在后台（见 gateway 的 pumpStream），
+		// 那里只知道结果对象，所以「这次用的是池里哪个账号」要在这里落下。
+		result.AccountID = c.AccountID
+		result.AccountName = c.AccountName
 		// 与非流式那条路同一个位置、同一个理由：这一对说的是「这次实际发去了
 		// 哪里、用哪个名字」，失败的那一次调用同样发出去过（见
 		// Result.UpstreamModel）。

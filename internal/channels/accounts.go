@@ -96,6 +96,16 @@ type CreateAccountRequest struct {
 
 	// ChannelID 非 0 时，创建之后立刻挂到这条渠道上。
 	ChannelID int64
+
+	// Weight 是挂到渠道上时的池内权重，nil 表示 1。
+	//
+	// 用指针而不是 0 值代表「没给」：0 是合法取值（「先别用」，见迁移 00067
+	// 的 CHECK），把它与「没给」合成一个数，会让 `account add --weight 0`
+	// 与 `account add` 在库里长得一样——而前者是运维明确写下的决定。
+	//
+	// 它只在 ChannelID 非 0 时有意义：权重挂在渠道与账号的关联上，没挂到
+	// 任何渠道上的账号没有权重可写。
+	Weight *int
 }
 
 // CreateAccount 新建一个账号。
@@ -114,6 +124,15 @@ func (a *Admin) CreateAccount(ctx context.Context, req CreateAccountRequest) (Ac
 	if !generated {
 		if nameErr := validateAccountName(name); nameErr != nil {
 			return AccountInfo{}, nameErr
+		}
+	}
+	if req.Weight != nil {
+		if *req.Weight < 0 {
+			return AccountInfo{}, fmt.Errorf("账号权重不能为负，得到 %d", *req.Weight)
+		}
+		if req.ChannelID == 0 {
+			return AccountInfo{}, errors.New(
+				"权重挂在渠道与账号的关联上：给权重时要同时指定挂到哪条渠道")
 		}
 	}
 
@@ -152,7 +171,11 @@ func (a *Admin) CreateAccount(ctx context.Context, req CreateAccountRequest) (Ac
 	}
 
 	if req.ChannelID != 0 {
-		if err := attachAccountInTx(ctx, tx, req.ChannelID, id); err != nil {
+		weight := 1
+		if req.Weight != nil {
+			weight = *req.Weight
+		}
+		if err := attachAccountInTx(ctx, tx, req.ChannelID, id, weight); err != nil {
 			return AccountInfo{}, err
 		}
 		channels, err := accountChannels(ctx, tx, id)
@@ -170,10 +193,13 @@ func (a *Admin) CreateAccount(ctx context.Context, req CreateAccountRequest) (Ac
 	return info, nil
 }
 
-// ListAccounts 列出全部账号，按名字排序。
+// ListAccounts 列出账号，按名字排序。channelID 非 0 时只列挂在那条渠道上的。
 //
 // 列举只解析信封头部，不解密正文，所以不需要主密钥。
-func (a *Admin) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
+func (a *Admin) ListAccounts(ctx context.Context, channelID int64) ([]AccountInfo, error) {
+	if channelID < 0 {
+		return nil, errors.New("渠道 id 无效")
+	}
 	rows, err := a.handle().QueryContext(ctx, `
 		SELECT a.id, a.name, a.credential_enc, a.credential_hint,
 		       a.created_at, a.updated_at,
@@ -184,7 +210,10 @@ func (a *Admin) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 		          JOIN channels c ON c.id = ca.channel_id
 		         WHERE ca.account_id = a.id AND c.deleted_at IS NULL) AS channels
 		  FROM accounts a
-		 ORDER BY a.name`)
+		 WHERE $1 = 0
+		    OR EXISTS (SELECT 1 FROM channel_accounts f
+		                WHERE f.account_id = a.id AND f.channel_id = $1)
+		 ORDER BY a.name`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("查询账号失败: %w", err)
 	}
@@ -249,6 +278,21 @@ func (a *Admin) UpdateAccount(ctx context.Context, name, plaintext string) (Acco
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf("更新账号失败: %w", err)
 	}
+
+	// 换了 key 之后，旧 key 攒下的失败记录不再说明任何问题。删掉状态行就等于
+	// 回到「从没用过」，账号立刻重新参与选路，不用等 drained 的冷却期。
+	//
+	// 两步不是一个事务，方向是安全的：万一这一步失败，账号仍停在旧状态，
+	// 只是白等一个冷却期，不会把一把已知被拒的 key 放回池子。
+	//
+	// 并发那一半也是同一个方向：换 key 之前发出的一次调用，它的失败可能在
+	// 这行 DELETE 之后才落库，于是刚换上的新 key 又被标成 drained。代价
+	// 同样是新 key 白等一个冷却期——要消除它得把「哪一把 key 的结局」也写进
+	// account_state，那已经超出这张表的职责。
+	if _, delErr := a.handle().ExecContext(ctx,
+		`DELETE FROM account_state WHERE account_id = $1`, info.ID); delErr != nil {
+		return AccountInfo{}, fmt.Errorf("重置账号健康状态失败: %w", delErr)
+	}
 	info.Name = name
 	info.Hint = credential.Hint(plaintext)
 	info.CreatedAt = createdAt
@@ -261,6 +305,120 @@ func (a *Admin) UpdateAccount(ctx context.Context, name, plaintext string) (Acco
 	}
 	info.Channels = channels
 	return info, nil
+}
+
+// ErrAccountInUse 表示这个账号还挂在多于一条渠道上，不能不加确认地删。
+//
+// 它与 ErrAccountNotFound 分开：一个要改命令（加 --force），一个要核对名字。
+var ErrAccountInUse = errors.New("账号还挂在多条渠道上")
+
+// AccountInUseError 带着「还挂在哪些渠道上」的清单。
+//
+// 清单必须能带到调用方：只说「还挂着」而不说是哪几条，运维还得自己再查一遍，
+// 而那条查询正是本类型刚刚做过的。
+type AccountInUseError struct {
+	Name     string
+	Channels []AccountChannel
+}
+
+func (e *AccountInUseError) Error() string {
+	parts := make([]string, 0, len(e.Channels))
+	for _, ch := range e.Channels {
+		parts = append(parts, fmt.Sprintf("%d（%s）", ch.ID, ch.Name))
+	}
+	return fmt.Sprintf("%s：账号 %s 还挂在 %d 条渠道上（%s）。"+
+		"删掉它会让这些渠道各少一个账号；确认要删请加 --force。",
+		ErrAccountInUse, e.Name, len(e.Channels), strings.Join(parts, "、"))
+}
+
+// Unwrap 让 errors.Is(err, ErrAccountInUse) 成立。
+func (e *AccountInUseError) Unwrap() error { return ErrAccountInUse }
+
+// RemoveAccountResult 是一次 account remove 的结果。
+type RemoveAccountResult struct {
+	Name string
+	// Channels 是删之前挂着它的渠道（未软删的），按渠道 id 升序。
+	Channels []AccountChannel
+	// EmptiedChannels 是删完之后一个账号都不剩的渠道。
+	//
+	// 那些渠道从此不参与选路（零账号是合法的中间态）。调用方要把它说出来
+	// ——「删了一个账号」与「有一条渠道因此下线」不是同一个后果。
+	EmptiedChannels []AccountChannel
+}
+
+// RemoveAccount 删除一个账号，连同它在各条渠道上的关联。
+//
+// # 还挂在**别的**渠道上时默认不删
+//
+// 账号与渠道是多对多（见迁移 00067）：删一行会让每一条挂着它的渠道少一把
+// key，而那条渠道的池子可能就只剩这一个账号。这种后果不该由一次「删一个
+// 账号」隐式带出来，所以挂在多于一条渠道上时要求 force——拒绝时把渠道清单
+// 带回去，人不必再查一遍。
+//
+// 只挂在一条渠道上时照删。那条渠道因此可能变成零账号，结果里单独列出来。
+//
+// # 在飞请求
+//
+// 不等、也不打断：正在跑的请求在选出候选时就把明文凭证拿到手了（见
+// Source.Candidates），删这一行不影响它们；新的请求从此选不到它。
+// 所以这是一次单行 DELETE，不需要任何锁，也不需要「先摘关联再等一会儿」。
+func (a *Admin) RemoveAccount(ctx context.Context, name string, force bool) (RemoveAccountResult, error) {
+	name = strings.TrimSpace(name)
+	if err := validateAccountName(name); err != nil {
+		return RemoveAccountResult{}, err
+	}
+
+	tx, ownTx, err := a.begin(ctx)
+	if err != nil {
+		return RemoveAccountResult{}, fmt.Errorf("删除账号失败: %w", err)
+	}
+	if ownTx {
+		defer func() { _ = tx.Rollback() }()
+	}
+
+	var id int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM accounts WHERE name = $1`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RemoveAccountResult{}, fmt.Errorf("%w：%s", ErrAccountNotFound, name)
+	}
+	if err != nil {
+		return RemoveAccountResult{}, fmt.Errorf("查询账号失败: %w", err)
+	}
+
+	channels, err := accountChannels(ctx, tx, id)
+	if err != nil {
+		return RemoveAccountResult{}, err
+	}
+	if len(channels) > 1 && !force {
+		return RemoveAccountResult{}, &AccountInUseError{Name: name, Channels: channels}
+	}
+
+	// 「删完这条渠道还剩几个账号」要**在删之前**数：删除之后关联行已经没了，
+	// 数出来的是删完之后的结果；而这里问的是「这次删除会不会让某条渠道
+	// 变成零账号」，那个判断需要知道删之前有几个。
+	emptied := []AccountChannel{}
+	for _, ch := range channels {
+		var rest int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM channel_accounts
+			 WHERE channel_id = $1 AND account_id <> $2`, ch.ID, id).Scan(&rest); err != nil {
+			return RemoveAccountResult{}, fmt.Errorf("统计渠道 %d 的账号池失败: %w", ch.ID, err)
+		}
+		if rest == 0 {
+			emptied = append(emptied, ch)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id = $1`, id); err != nil {
+		return RemoveAccountResult{}, dberr.ConstraintFailure(
+			fmt.Errorf("删除账号失败: %w", err))
+	}
+	if ownTx {
+		if err := tx.Commit(); err != nil {
+			return RemoveAccountResult{}, fmt.Errorf("删除账号失败: %w", err)
+		}
+	}
+	return RemoveAccountResult{Name: name, Channels: channels, EmptiedChannels: emptied}, nil
 }
 
 // ChannelIDByRef 把命令行给的渠道引用解析成 id。
@@ -323,37 +481,53 @@ func (a *Admin) ChannelIDByRef(ctx context.Context, ref string) (int64, error) {
 
 // replaceChannelCredential 换掉一条渠道主账号的凭证。
 //
-// 主账号是挂池里账号 id 最小的那个，与选路取的那一个同一条判据（见
-// candidateQuery）。它可能同时挂在别的渠道上：那些渠道不需要改任何引用，
-// 下一次读到这一行就是新 key——这就是账号实体存在的理由。
+// 「主账号」是池里账号 id 最小的那一个：`channel update` 的 `--credential-*`
+// 认的就是它。**选路不再按同一条判据取账号**——它按权重与健康从池子里挑
+// （见 accountRotation），所以「主账号」在这里回答的是「这条兼容命令改哪一行」，
+// 不是「下一次请求会用哪一把 key」。
+//
+// 这一行可能同时挂在别的渠道上：那些渠道不需要改任何引用，下一次读到这一行
+// 就是新 key——这就是账号实体存在的理由。
 //
 // 零账号的渠道没有主账号可换，这里按 `channel create --credential-env` 的
-// 兼容捷径补一个匿名账号并挂上。
+// 兼容捷径补一个匿名账号并挂上（权重 1，与表上的默认值一致）。
+//
+// 换掉的那一行连同它的健康状态一起重置：这条判据与 `account update` 共用，
+// 见下面 DELETE 处的注释。
 func replaceChannelCredential(ctx context.Context, tx *sql.Tx, channelID int64,
 	envelope []byte, hint string) error {
-	res, err := tx.ExecContext(ctx, `
+	var accountID int64
+	err := tx.QueryRowContext(ctx, `
 		UPDATE accounts
 		   SET credential_enc = $2, credential_hint = $3, updated_at = now()
 		 WHERE id = (SELECT ca.account_id
 		               FROM channel_accounts ca
 		              WHERE ca.channel_id = $1
 		              ORDER BY ca.account_id
-		              LIMIT 1)`, channelID, envelope, hint)
+		              LIMIT 1)
+		 RETURNING id`, channelID, envelope, hint).Scan(&accountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		newID, _, _, _, insertErr := insertAccount(ctx, tx, "", hint, envelope, true)
+		if insertErr != nil {
+			return insertErr
+		}
+		return attachAccountInTx(ctx, tx, channelID, newID, 1)
+	}
 	if err != nil {
 		return fmt.Errorf("更新渠道 %d 的主账号失败: %w", channelID, err)
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("确认主账号更新结果失败: %w", err)
+
+	// 与 UpdateAccount 同一条判据：换 key 之后旧 key 攒下的失败记录不再说明
+	// 任何问题，删掉状态行就等于回到「从没用过」。留着它的表现是换好的 key
+	// 仍被 drained 挡在候选之外，要白等一个冷却期。
+	//
+	// 与那次 UPDATE 在同一个事务里：两半要么都落，要么都不落。分开写的话，
+	// 凭证换成了新的、状态却没清，正是上面那种要被避免的中间态。
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM account_state WHERE account_id = $1`, accountID); err != nil {
+		return fmt.Errorf("重置账号健康状态失败: %w", err)
 	}
-	if affected > 0 {
-		return nil
-	}
-	accountID, _, _, _, err := insertAccount(ctx, tx, "", hint, envelope, true)
-	if err != nil {
-		return err
-	}
-	return attachAccountInTx(ctx, tx, channelID, accountID)
+	return nil
 }
 
 // insertAccount 插入一行账号，必要时为生成的名字重试。
@@ -403,12 +577,16 @@ func insertAccount(ctx context.Context, h dbHandle, name, hint string,
 //
 // 用 INSERT ... SELECT 而不是先查后插：渠道在两步之间被软删时，语句会
 // 因为 WHERE 不成立而写 0 行，调用方拿到的是同一条「渠道不存在/已删」。
-func attachAccountInTx(ctx context.Context, tx *sql.Tx, channelID, accountID int64) error {
+//
+// weight 是池内权重（0 表示「先别用」，见迁移 00067）。它由调用方显式给：
+// 表上有 DEFAULT 1，但让这条语句省略它意味着「没给权重」与 1 在代码里
+// 分不开，而 0 与「没给」恰好是两件不同的事。
+func attachAccountInTx(ctx context.Context, tx *sql.Tx, channelID, accountID int64, weight int) error {
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO channel_accounts (channel_id, account_id)
-		SELECT c.id, $2 FROM channels c
+		INSERT INTO channel_accounts (channel_id, account_id, weight)
+		SELECT c.id, $2, $3 FROM channels c
 		 WHERE c.id = $1 AND c.`+channelAlive,
-		channelID, accountID)
+		channelID, accountID, weight)
 	if err != nil {
 		return fmt.Errorf("把账号挂到渠道 %d 上失败: %w", channelID, err)
 	}

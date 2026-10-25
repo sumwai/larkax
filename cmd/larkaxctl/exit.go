@@ -199,6 +199,9 @@ var conflictErrors = []error{
 	dberr.ErrConstraintViolation,
 
 	channels.ErrChannelNotFound,
+	// 按名字找不到账号：与上一条同一个形状，下一步都是先跑一遍 list 看库里
+	// 现在有什么，而不是改一下命令重发。
+	channels.ErrAccountNotFound,
 
 	catalog.ErrModelExists,
 	catalog.ErrCanonicalTaken,

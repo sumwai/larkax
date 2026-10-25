@@ -1354,7 +1354,7 @@ ingress 规则下。同一个端口上还有管理面 `/admin/v1/*`，用单独�
 | 子命令 | 做什么 |
 |---|---|
 | `channel` | 上游渠道：`add`（`create` 是兼容别名，两者同一条实现）/ `list`（`--all` 含已删）/ `get`（单条详情）/ `health`（健康与窗口内的用量）/ `update` / `enable` / `disable` / `delete`（软删）/ `restore`（`delete` 的逆操作）/ `sync-models`（从上游拉一次模型清单并落库）/ `upstream-models`（读库里那一份清单与同步状态）/ `adapters`（列出适配器类型）/ `probe`（落库之前探一次上游模型清单）；出站映射：`map`（渠道级同时写渠道白名单）/ `unmap` / `map list`（`add` / `remove` 是前两个的兼容别名） |
-| `account` | 上游凭证账号（一条渠道可挂零个或多个，凭证存在账号上）：`add`（新建；`--channel` 一步挂到那条渠道的池子里）/ `list`（含它挂在哪些渠道上）/ `update`（换 key，同池渠道一起生效） |
+| `account` | 上游凭证账号（一条渠道可挂零个或多个，凭证存在账号上）：`add`（新建；`--channel` 一步挂到那条渠道的池子里，`--weight` 给池内权重）/ `list`（含它挂在哪些渠道上；`--channel` 只看一条渠道的池子）/ `update`（换 key，同池渠道一起生效）/ `remove`（删账号与它的关联；挂在多于一条渠道上时要 `--force`） |
 | `model` | 模型目录：`add` / `list` / `get` / `update` / `delete` / `onboard`（一个事务里写完目录、渠道白名单、出站映射与两条价格规则）；入站别名（调用方写的名字 → 规范名）：`alias`（`add` / `remove` / `list`）；名字链路诊断：`trace` |
 | `alias` | 规范模型名到上游模型名的映射（旧入口，配置改用 `channel map`）：`create` / `list` / `update` / `delete` / `resolve` |
 | `price` | 计价规则：`add` / `list` / `show` / `update` / `enable` / `disable` / `explain`；阶梯档位：`tier`（`add` / `list` / `remove`）；峰段：`peak`（`add` / `list` / `remove`）；兼管分时计价的日历数据：`calendar`（`import` / `sync` / `list`） |

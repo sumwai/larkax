@@ -20,13 +20,15 @@ var accountHelp = helpText{short: accountShortUsage, long: accountUsage}
 const accountShortUsage = `larkaxctl account 管理上游凭证账号。
 
 用法：
-  larkaxctl account add [<名称>] [--channel <渠道>] [--credential-env <变量名>]
-  larkaxctl account list
+  larkaxctl account add [<名称>] [--channel <渠道>] [--weight <权重>] [--credential-env <变量名>]
+  larkaxctl account list [--channel <渠道>]
   larkaxctl account update <名称> [--credential-env <变量名>]
+  larkaxctl account remove <名称> [--force]
 
 凭证默认从标准输入读；明文凭证不能写在命令行参数里。
 add 的 stdout 只有账号名；没给 <名称> 时生成 account- 加六位随机串。
 一条渠道可以挂零个或多个账号，零账号的渠道不参与选路。
+remove 在账号还挂在多条渠道上时要加 --force。
 更细的边界：larkaxctl help account。
 `
 
@@ -39,9 +41,10 @@ const accountUsage = `larkaxctl account 管理上游凭证账号。
 看得见，选路跳过它。
 
 用法：
-  larkaxctl account add [<名称>] [--channel <渠道>] [--credential-env <变量名>]
-  larkaxctl account list
+  larkaxctl account add [<名称>] [--channel <渠道>] [--weight <权重>] [--credential-env <变量名>]
+  larkaxctl account list [--channel <渠道>]
   larkaxctl account update <名称> [--credential-env <变量名>]
+  larkaxctl account remove <名称> [--force]
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数
 会出现在 ps 的输出与 shell 历史里。
@@ -59,18 +62,42 @@ add 不给 <名称> 时生成 account- 加六位随机 [a-z0-9]，撞名自动�
 它把新账号一步挂进那条渠道的凭证池。已有账号可以用 channel update 的
 --credential-* 换 key，效果相同。
 
-update 只换凭证：挂在同一条账号上的渠道一个都不用动，下一次请求就用到新 key。
-账号名与关联都不变，updated_at 记下换 key 的时刻。
+--weight 是池内权重：同一条渠道上，权重大的账号被选中的次数多。默认 1，
+0 表示先别用它（权重 0 的账号不参与选路）。它挂在渠道与账号的关联上，
+所以必须与 --channel 一起给；同一个账号挂在两条渠道上时，两条渠道上的权重
+各算各的。没给 --weight 时是 1。
 
-list **不打印凭证密文**，只打印它挂在哪些主密钥下（那不需要任何密钥材料）
-与末四位提示。没有「挂在哪条渠道上」的账号也列出来——它可能正准备挂上去。
+权重在挂上去的那一刻写定，今天要改它只能先把账号摘下来重挂：account remove
+（挂在多条渠道上时要 --force，它会把账号从每一条渠道上一起摘掉）之后，再用
+account add --channel ... --weight N 挂回去——那是新的一行，凭证要重新给一遍。
+重挂会清空健康记录（连败次数、最近结论）。
+
+一条渠道上多个账号时的选法：按权重轮询，跳过被上游拒绝过的账号与权重 0 的。
+被摘掉的账号在冷却期之后会再被试一次，成功就回到池子里；换掉凭证
+（account update）也会让它立刻回到池子里。轮到的那个账号密文解不开时，这一次
+选路会接着试池里的下一个。
+
+list 不给 --channel 时列出全部账号；给了 --channel 就只列挂在那条渠道上的
+（渠道 ID 或未删除渠道的名字）。**它不打印凭证密文**，只打印挂在哪些主密钥下
+（那不需要任何密钥材料）与末四位提示。没有「挂在哪条渠道上」的账号也列出来
+——它可能正准备挂上去。
+
+update 只换凭证：挂在同一条账号上的渠道一个都不用动，下一次请求就用到新 key。
+账号名与关联都不变，updated_at 记下换 key 的时刻。换 key 会把这个账号的健康
+状态清回「没用过」，先前凭证被上游拒过、已经摘出池子的，改完立刻重新参与选路。
+
+remove 删掉账号本身，连同它在各条渠道上的关联。只挂在一条渠道上时直接删；
+挂在多于一条渠道上时要加 --force——删一行会让每一条渠道各少一个账号，
+而其中某条渠道可能因此一个账号都不剩（它会退出选路，直到挂上新账号）。
+正在进行的请求不受影响：它们的凭证在选路时已经解密；新的请求不会再选到它。
+账号行与它的健康状态一起消失，库里不留空壳。
 
 更细的约定见 docs/cli-reference.md 的「account」一节。
 `
 
 // accountActions 是 account 的动作清单，补全从这里取。
 // 分派仍是下面 switch 的 case——新增动作时两处都要加。
-var accountActions = []string{"add", "list", "update"}
+var accountActions = []string{"add", "list", "update", "remove"}
 
 func runAccount(args []string) error {
 	if len(args) == 0 {
@@ -86,6 +113,8 @@ func runAccount(args []string) error {
 		return runAccountList(rest)
 	case "update":
 		return runAccountUpdate(rest)
+	case "remove":
+		return runAccountRemove(rest)
 	case "help":
 		printUsage(os.Stdout, accountHelp.long)
 		return nil
@@ -102,7 +131,7 @@ func runAccountAdd(args []string) error {
 	if err := jsonUnsupported("account add"); err != nil {
 		return err
 	}
-	name, channelRef, plaintext, err := parseAccountAdd(args)
+	name, channelRef, weight, plaintext, err := parseAccountAdd(args)
 	if err != nil {
 		return usageErr(err)
 	}
@@ -117,6 +146,7 @@ func runAccountAdd(args []string) error {
 		req := channels.CreateAccountRequest{
 			Name:       name,
 			Credential: plaintext,
+			Weight:     weight,
 		}
 		if channelRef != "" {
 			req.ChannelID, err = admin.ChannelIDByRef(ctx, channelRef)
@@ -142,6 +172,13 @@ func runAccountAdd(args []string) error {
 		for _, ch := range info.Channels {
 			_, _ = fmt.Fprintf(humanStderr(), "已挂到渠道 %d（%s）。\n", ch.ID, ch.Name)
 		}
+		// 与 account remove 的「这条渠道因此没有账号了」对称：权重 0 不会让
+		// 渠道下线，但它同样意味着这次挂载不给池子增加任何可用账号。不说
+		// 这一句，人会以为它已经在分担流量。
+		if weight != nil && *weight == 0 {
+			_, _ = fmt.Fprintln(humanStderr(),
+				"注意：权重 0 表示先别用这个账号——关联已经建好，但选路会跳过它。")
+		}
 		return nil
 	})
 }
@@ -153,7 +190,9 @@ func runAccountAdd(args []string) error {
 // `account add 名字 --channel c1` 与 `account add --channel c1` 都走得通。
 // `--channel c1 名字` 这种「选项之后才给位置参数」也认——fs.Parse 停下之后
 // fs.Args() 里剩下的那一个就是名字。
-func parseAccountAdd(args []string) (name, channelRef, plaintext string, err error) {
+//
+// weight 用指针区分「没给」与「给了 0」：0 是合法值（先别用它），缺省是 1。
+func parseAccountAdd(args []string) (name, channelRef string, weight *int, plaintext string, err error) {
 	var positional string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		positional, args = args[0], args[1:]
@@ -163,16 +202,17 @@ func parseAccountAdd(args []string) (name, channelRef, plaintext string, err err
 	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
 	channel := fs.String("channel", "", "")
 	credentialEnv := fs.String("credential-env", "", "")
+	weightFlag := fs.Int("weight", 0, "")
 	if err = fs.Parse(args); err != nil {
-		return "", "", "", err
+		return "", "", nil, "", err
 	}
 	if fs.NArg() > 0 {
 		if positional != "" {
-			return "", "", "", fmt.Errorf(
+			return "", "", nil, "", fmt.Errorf(
 				"add 只收一个账号名，多出来的 %q 没有去处", fs.Arg(0))
 		}
 		if fs.NArg() > 1 {
-			return "", "", "", fmt.Errorf(
+			return "", "", nil, "", fmt.Errorf(
 				"add 只收一个账号名，多出来的 %q 没有去处", fs.Arg(1))
 		}
 		positional = fs.Arg(0)
@@ -181,19 +221,38 @@ func parseAccountAdd(args []string) (name, channelRef, plaintext string, err err
 	name = strings.TrimSpace(positional)
 	if name != "" {
 		if err = checkDisplayText("账号名", name); err != nil {
-			return "", "", "", err
+			return "", "", nil, "", err
 		}
 	}
+	channelRef = strings.TrimSpace(*channel)
+
+	// 显式给过的 flag 才进 seen：fs.Int 的零值分不出「--weight 0」与「没给」。
+	seen := make(map[string]bool, 3)
+	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+	if seen["weight"] {
+		if *weightFlag < 0 {
+			return "", "", nil, "", fmt.Errorf("--weight 不能为负，得到 %d", *weightFlag)
+		}
+		// 权重挂在渠道与账号的关联上，没有渠道就没有地方放它。替调用方猜一条
+		// 渠道，猜错就是给错误的对象设了权重。
+		if channelRef == "" {
+			return "", "", nil, "", errors.New("--weight 挂在渠道与账号的关联上：要同时给 --channel")
+		}
+		w := *weightFlag
+		weight = &w
+	}
+
 	plaintext, err = readAccountCredential(*credentialEnv)
 	if err != nil {
-		return "", "", "", err
+		return "", "", nil, "", err
 	}
-	return name, strings.TrimSpace(*channel), plaintext, nil
+	return name, channelRef, weight, plaintext, nil
 }
 
 func runAccountList(args []string) error {
 	fs := newFlagSet("account list", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
+	channelRef := fs.String("channel", "", "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -203,7 +262,17 @@ func runAccountList(args []string) error {
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
 		// 列举只解析信封头部，不解密正文：一台没有主密钥的只读机器也能核对配置。
-		infos, err := channels.NewAdmin(db, nil, nil).ListAccounts(ctx)
+		admin := channels.NewAdmin(db, nil, nil)
+		var channelID int64
+		if ref := strings.TrimSpace(*channelRef); ref != "" {
+			id, err := admin.ChannelIDByRef(ctx, ref)
+			if err != nil {
+				return err
+			}
+			channelID = id
+		}
+		// 0 表示不过滤：ListAccounts 把「没给 --channel」当作列全部。
+		infos, err := admin.ListAccounts(ctx, channelID)
 		if err != nil {
 			return err
 		}
@@ -242,6 +311,86 @@ func runAccountUpdate(args []string) error {
 			info.Name, len(info.Channels))
 		return nil
 	})
+}
+
+// runAccountRemove 摘掉一个账号。
+//
+// 三件事在实现里分得开：
+//   - **还挂在别的渠道上**：多于一条时要 --force（ErrAccountInUse）。少一条
+//     渠道各少一个账号是调用方看得见的后果，不该由它悄悄发生。
+//   - **正在进行的请求**：不拦。凭证在选路那一刻就解密并带在请求里，删行只
+//     影响之后的新请求；这里既没有锁也没有等待。
+//   - **渠道因此空了**：删完把那些渠道打出来。零账号是合法的中间态，但
+//     「删掉一个账号」与「有一条渠道从此退出选路」不是同一个后果。
+func runAccountRemove(args []string) error {
+	if err := jsonUnsupported("account remove"); err != nil {
+		return err
+	}
+	name, force, err := parseAccountRemove(args)
+	if err != nil {
+		return usageErr(err)
+	}
+
+	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
+		res, err := channels.NewAdmin(db, nil, nil).RemoveAccount(ctx, name, force)
+		if err != nil {
+			// 还挂在多条渠道上时，补救动作是改命令加 --force：归 usageErr。
+			if errors.Is(err, channels.ErrAccountInUse) {
+				return usageErr(err)
+			}
+			return err
+		}
+		// stdout 不放东西：删掉的是调用方自己点的名字，没有新值要接走。
+		_, _ = fmt.Fprintf(humanStderr(), "已删除账号 %s。\n", res.Name)
+		if len(res.Channels) > 0 {
+			_, _ = fmt.Fprintf(humanStderr(), "已从这 %d 条渠道的凭证池里摘掉：%s。\n",
+				len(res.Channels), accountChannelList(res.Channels))
+		}
+		for _, ch := range res.EmptiedChannels {
+			_, _ = fmt.Fprintf(humanStderr(),
+				"渠道 %d（%s）现在没有账号了，选路会跳过它，直到挂上新账号。\n", ch.ID, ch.Name)
+		}
+		return nil
+	})
+}
+
+// parseAccountRemove 解析 remove 的参数：一个必填的账号名与 --force。
+func parseAccountRemove(args []string) (name string, force bool, err error) {
+	var positional string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		positional, args = args[0], args[1:]
+	}
+
+	fs := newFlagSet("account remove", flag.ContinueOnError)
+	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
+	forceFlag := fs.Bool("force", false, "")
+	if err = fs.Parse(args); err != nil {
+		return "", false, err
+	}
+	switch {
+	case fs.NArg() == 0:
+	case fs.NArg() == 1 && positional == "":
+		positional = fs.Arg(0)
+	default:
+		return "", false, fmt.Errorf("remove 只收一个账号名，多出来的 %q 没有去处", fs.Arg(0))
+	}
+	name = strings.TrimSpace(positional)
+	if name == "" {
+		return "", false, errors.New("缺少账号名：把它写成位置参数")
+	}
+	if err = checkDisplayText("账号名", name); err != nil {
+		return "", false, err
+	}
+	return name, *forceFlag, nil
+}
+
+// accountChannelList 把渠道清单拼成「12（主）、13（备用）」。
+func accountChannelList(chs []channels.AccountChannel) string {
+	parts := make([]string, 0, len(chs))
+	for _, ch := range chs {
+		parts = append(parts, fmt.Sprintf("%d（%s）", ch.ID, ch.Name))
+	}
+	return strings.Join(parts, "、")
 }
 
 // parseAccountUpdate 解析 update 的参数：一个必填的账号名与可选的凭证来源。

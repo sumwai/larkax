@@ -37,6 +37,18 @@ const (
 // 「上游中途断了」是两回事），而只有编排层看得见。
 type CallOutcome struct {
 	ChannelID int64
+	// AccountID 是这次调用实际用的那个账号（见 Attempt.AccountID）。
+	//
+	// 0 表示这次调用没有账号维度：测试夹具、以及候选来源没给账号的路径。
+	// 写入方据此决定要不要动账号健康——凭证健康按账号记（见 internal/channels
+	// 的 account_state），落不到账号上的结局只记渠道那一层。
+	AccountID int64
+	// AccountDrained 表示这次失败证明**这份凭证本身**不可用（上游拒绝了身份
+	// 或余额）。写入方据此把它当场标成 drained，而不是等连续失败攒到阈值。
+	//
+	// 由入口层填：它拿得到上游错误，而「哪个状态码算凭证坏了」的判断与渠道侧
+	// 的 channelAtFault 是同一套（401/402/403）。
+	AccountDrained bool
 	// Model 是这次请求的**规范模型名**，不是发往上游的别名。
 	//
 	// 它是健康度桶的模型维度：写入方按它落一行模型桶，同时维护那一行

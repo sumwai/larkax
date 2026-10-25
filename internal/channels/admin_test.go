@@ -123,7 +123,8 @@ func baseRequest(name string) CreateRequest {
 // rawCredentialEnc 直接读库里渠道主账号的密文，用来断言「写入侧到底存了什么」。
 //
 // 00067 之后渠道行没有凭证列：一条渠道的凭证挂在它挂着的账号上，主账号是
-// 账号 id 最小的那一个（与选路同一条判据）。
+// 账号 id 最小的那一个——那是 `channel update --credential-*` 改哪一行的判据，
+// 与选路无关（选路按权重在整个池子里轮询）。
 func rawCredentialEnc(t *testing.T, db *sql.DB, id int64) []byte {
 	t.Helper()
 	var enc []byte

@@ -328,7 +328,7 @@ func seedChannelOfType(t *testing.T, db *sql.DB, sealer *credential.Sealer, owne
 	).Scan(&id); err != nil {
 		t.Fatalf("插渠道失败: %v", err)
 	}
-	// 凭证在账号上（见 00067）：选路取账号 id 最小的那一个，端到端要它
+	// 凭证在账号上（见 00067）：池子里只有一个账号时选路必定取它，端到端要它
 	// 能解出明文才打得到上游。
 	var accountID int64
 	if err := db.QueryRowContext(context.Background(), `

@@ -654,6 +654,17 @@ type Result struct {
 	// billing_requests.upstream_model 的值——导出它是为了让测试与排查能看到
 	// 「发出去的是什么」，而不必从库里反推。
 	UpstreamModel string
+	// AccountID / AccountName 是这次实际用的那个账号（渠道凭证池里的一个）。
+	//
+	// **只有流式那条路填了它。** 那边的收尾在后台（见 pumpStream），拿不到
+	// 候选，只拿得到这份结果，而账号健康要记到具体的那一个账号上（见
+	// route.CallOutcome.AccountID），所以选路结果必须一路带到收尾。
+	//
+	// 非流式那条路故意留零值：它的调用方手里有 Attempts，每一次尝试的渠道
+	// 与账号都在里面（见 route.Attempt），再抄一份到这里只会多一个会漂的
+	// 来源。要读「实际用了哪个账号」，按这条区分两条路。
+	AccountID   int64
+	AccountName string
 	// Charge 是这次请求的结算结果。流式请求在事件流**关闭之后**才有值。
 	Charge *pipeline.Charge
 
@@ -1884,9 +1895,13 @@ func (g *Gateway) recordAttempts(ctx context.Context, canonicalModel string, att
 		}
 		rec := route.CallOutcome{
 			ChannelID: a.ChannelID,
+			AccountID: a.AccountID,
 			Model:     canonicalModel,
 			At:        attemptTime(a, g.now()),
 			Verdict:   verdict,
+			// 「这份凭证本身不可用」与「渠道坏了」分开判：账号那一层不等
+			// 连续失败攒到阈值，一次 401 就摘（见 accountAtFault）。
+			AccountDrained: accountAtFault(a.Err),
 		}
 		if a.Err == nil && usage != nil {
 			rec.Usage = *usage
@@ -1957,6 +1972,32 @@ func channelAtFault(err error) bool {
 	if channel.IsRetryable(err) {
 		return true
 	}
+	var up *channel.ErrUpstream
+	if !errors.As(err, &up) {
+		return false
+	}
+	switch up.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	}
+	return false
+}
+
+// accountAtFault 判断一次失败是不是**这份凭证本身**不可用。
+//
+// 判据与 channelAtFault 的身份/余额分支完全同一组状态码（401/402/403），处置
+// 却不同：渠道侧让它累进连续失败（三次才摘），账号侧当场标成 drained——
+// 换一把 key 是另一个结果，没理由再让同一把坏 key 在上游那儿碰两次
+// （见 internal/channels 的 account_state）。
+//
+// 它能这么判，是因为候选集里已经写着这次用的是哪个账号（见
+// route.Candidate.AccountID）：一条渠道挂多把 key 时，这个 401 只说明其中
+// 一把不行，不能推广到整条渠道。
+//
+// 429 与 5xx **不在**这里：它们说「此刻不行」（可能整条渠道、也可能只是这一
+// 把 key 被限流），但都不证明凭证坏了。前者让账号累积连续失败（到阈值才摘），
+// 后者让渠道累积——两层各自按自己的判据走。
+func accountAtFault(err error) bool {
 	var up *channel.ErrUpstream
 	if !errors.As(err, &up) {
 		return false

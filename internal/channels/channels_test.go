@@ -1,9 +1,11 @@
 package channels
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -624,7 +626,7 @@ func TestCandidateMapsChannelFields(t *testing.T) {
 		weight:  3, priority: 5, ownerUserID: 42,
 	}
 
-	got, err := row.candidate("test-key-placeholder", now)
+	got, err := row.candidate(testPoolAccount(3, "main", 1), "test-key-placeholder", now)
 	if err != nil {
 		t.Fatalf("candidate 出错: %v", err)
 	}
@@ -649,6 +651,10 @@ func TestCandidateMapsChannelFields(t *testing.T) {
 	}
 	if got.Priority != 5 || got.Weight != 3 {
 		t.Errorf("Priority/Weight = %d/%d，期望 5/3", got.Priority, got.Weight)
+	}
+	// 账号维度随候选一起带出去：网关记调用结果时按它落到 account_state 上。
+	if got.AccountID != 3 || got.AccountName != "main" {
+		t.Errorf("AccountID/AccountName = %d/%q，期望 3/main", got.AccountID, got.AccountName)
 	}
 
 	// 这一行通过了 route 的硬性条件，说明映射出来的候选确实可选。
@@ -682,7 +688,7 @@ func TestCandidateSelectable(t *testing.T) {
 		baseURL: "https://api.example.com/v1",
 		models:  []string{"model-a"},
 	}
-	cand, err := row.candidate("test-key-placeholder", now)
+	cand, err := row.candidate(testPoolAccount(3, "main", 1), "test-key-placeholder", now)
 	if err != nil {
 		t.Fatalf("candidate 出错: %v", err)
 	}
@@ -715,7 +721,7 @@ func TestCandidateEndpointFromChannelType(t *testing.T) {
 				baseURL: "https://api.example.com/v1",
 				models:  []string{"model-a"},
 			}
-			got, err := row.candidate("test-key-placeholder", time.Now())
+			got, err := row.candidate(testPoolAccount(3, "main", 1), "test-key-placeholder", time.Now())
 			if err != nil {
 				t.Fatalf("candidate 出错: %v", err)
 			}
@@ -726,8 +732,14 @@ func TestCandidateEndpointFromChannelType(t *testing.T) {
 	}
 }
 
-func sqlNullInt(v int64) sql.NullInt64      { return sql.NullInt64{Int64: v, Valid: true} }
-func sqlNullTime(v time.Time) sql.NullTime  { return sql.NullTime{Time: v, Valid: true} }
+func sqlNullInt(v int64) sql.NullInt64     { return sql.NullInt64{Int64: v, Valid: true} }
+func sqlNullTime(v time.Time) sql.NullTime { return sql.NullTime{Time: v, Valid: true} }
+
+// testPoolAccount 是候选映射用例里的一个账号：`candidate` 现在要一个从池子里
+// 挑出来的账号，而不是只给明文凭证。
+func testPoolAccount(id int64, name string, weight int) poolAccount {
+	return poolAccount{ID: id, Name: name, Weight: weight, Health: AccountHealthHealthy}
+}
 func sqlNullString(v string) sql.NullString { return sql.NullString{String: v, Valid: true} }
 func ptr[T any](v T) *T                     { return &v }
 
@@ -741,4 +753,38 @@ func showPtr[T any](p *T) string {
 		return "<nil>"
 	}
 	return fmt.Sprint(*p)
+}
+
+// TestWarnAccountDecryptIsRateLimited 钉住「池里有账号解不开」那条告警按渠道限流。
+//
+// 一行坏密文会被**每一次**选路碰到。不限流时它每来一个请求就写一行，日志
+// 很快没人读了；限得太死又会让修好之后的下一条看不见。两条判据：同一渠道
+// 冷却期内只写一次、过了间隔再写一次，且别的渠道互不影响。
+func TestWarnAccountDecryptIsRateLimited(t *testing.T) {
+	var buf strings.Builder
+	now := time.Date(2026, 10, 25, 6, 0, 0, 0, time.UTC)
+	src := &Source{
+		Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		Now:    func() time.Time { return now },
+	}
+	count := func() int { return strings.Count(buf.String(), "解不开") }
+
+	src.warnAccountDecrypt(context.Background(), 7, errors.New("boom"))
+	src.warnAccountDecrypt(context.Background(), 7, errors.New("boom"))
+	if got := count(); got != 1 {
+		t.Fatalf("冷却期内写了 %d 条告警，期望 1 条：%s", got, buf.String())
+	}
+
+	// 另一条渠道不受渠道 7 那条的限流影响。
+	src.warnAccountDecrypt(context.Background(), 8, errors.New("boom"))
+	if got := count(); got != 2 {
+		t.Fatalf("另一条渠道没写出来，总共 %d 条", got)
+	}
+
+	// 过了间隔，渠道 7 再写一条。
+	now = now.Add(accountDecryptWarnInterval + time.Minute)
+	src.warnAccountDecrypt(context.Background(), 7, errors.New("boom"))
+	if got := count(); got != 3 {
+		t.Fatalf("冷却期过后没有重报，总共 %d 条", got)
+	}
 }
