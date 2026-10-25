@@ -199,6 +199,15 @@ func TestRotationRestartsAfterAbsence(t *testing.T) {
 //
 // 长度也要钉：把暂停的账号从返回值里去掉会让「正权重账号的密文全解不开」变成
 // 一个账号都没有，而 openPoolAccount 拿到空列表时会返回零值账号 + nil 错误。
+//
+// rotate 里给 weights 赋值时的 `if acc.Weight > 0` 与 `>=` 不可分辨：
+// weights 由 `make([]int, len(accounts))` 零值初始化。
+// Weight == 0 时原式不赋值、留下零值 0，`>=` 赋 acc.Weight、也是 0，
+// 两种写法写进去的是同一个值；Weight < 0 时两种写法都不赋值。
+// 所以对任意输入，两版算出的 weights 与 total 全等，
+// 其后的累积、挑选与返回值不会有一处分岔。
+// 自己验一次：把那一行改成 `>=` 造一份副本，
+// 用 `go test -overlay` 跑 `./internal/channels/` 的 `TestRotation*`，全绿即等价。
 func TestRotationSkipsPausedAccounts(t *testing.T) {
 	pool := []poolAccount{
 		{ID: 1, Name: "paused", Weight: 0, Health: AccountHealthHealthy},

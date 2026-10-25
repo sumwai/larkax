@@ -456,3 +456,23 @@ func TestChannelHelpListsAdaptersAndProbe(t *testing.T) {
 		}
 	}
 }
+
+// TestChannelHelpStatesOwnershipBoundary 钉住两版用法文本都写明「归属没有修改入口」。
+//
+// 短版受一屏预算约束，最容易被下次加内容时挤掉；而它在参数写错时是读者唯一
+// 看到的一页。归属在 add 时定下之后没有修改入口这件事，只在文档里说是不够的。
+func TestChannelHelpStatesOwnershipBoundary(t *testing.T) {
+	for _, help := range []struct {
+		name string
+		text string
+	}{
+		{"短版", channelShortUsage},
+		{"长版", channelUsage},
+	} {
+		for _, want := range []string{"归属", "没有修改入口"} {
+			if !strings.Contains(help.text, want) {
+				t.Errorf("%s里没有 %q", help.name, want)
+			}
+		}
+	}
+}
