@@ -325,6 +325,42 @@ func idsOf(accounts []poolAccount) []int64 {
 	return ids
 }
 
+// TestRotationPausedCreditResumesAfterRestore 钉住「暂停期间不清零累积值」。
+//
+// 这是「按 0 累积」与「把暂停账号的累积值清零」两版之间唯一的分水岭：其余
+// 用例里暂停的账号要么本来没有旧值可清，要么清不清都不改变第一名。池子是
+// `{1: 2, 2: 1}`（账号 id 与权重），三轮分别是正常、把 2 号权重改成 0、
+// 再恢复成 1。逐步手算：
+//
+//	第 1 轮：1 号 2、2 号 1，选中 1 号；1 号减掉总和 3 后是 -1，2 号是 1。
+//	第 2 轮：2 号暂停（权重 0）。1 号 -1+2=1、减掉总和 2 后仍是 -1；2 号
+//	         的累积值冻结在 1（清零那版是 0）。这一轮两版都选中 1 号——
+//	         它分不开两版，放在这里是为了让「暂停真的生效了」成为用例自带的
+//	         前提：暂停没落地时这一轮会选中 2 号，第三轮就会红在一个与注释
+//	         无关的原因上。
+//	第 3 轮：2 号恢复权重 1。不清零时 2 号是 1+1=2，大过 1 号的 -1+2=1，
+//	         选中 2 号；清零那版 2 号只有 0+1=1，与 1 号打平，`best` 用严格
+//	         `>` 且从输入靠前开始，退回 1 号。
+func TestRotationPausedCreditResumesAfterRestore(t *testing.T) {
+	pool := []poolAccount{
+		{ID: 1, Weight: 2, Health: AccountHealthHealthy},
+		{ID: 2, Weight: 1, Health: AccountHealthHealthy},
+	}
+	var r accountRotation
+
+	if got := r.rotate(7, pool)[0].ID; got != 1 {
+		t.Fatalf("第 1 轮选中账号 %d，期望 1（权重 2 的先上）", got)
+	}
+	pool[1].Weight = 0
+	if got := r.rotate(7, pool)[0].ID; got != 1 {
+		t.Fatalf("第 2 轮选中账号 %d，期望 1（2 号暂停了，这一轮不该轮到它）", got)
+	}
+	pool[1].Weight = 1
+	if got := r.rotate(7, pool)[0].ID; got != 2 {
+		t.Errorf("恢复权重后选中账号 %d，期望 2（暂停期间冻结的累积值应当接着用）", got)
+	}
+}
+
 // TestRotationEmptyPool 钉住空池不 panic。
 func TestRotationEmptyPool(t *testing.T) {
 	var r accountRotation
