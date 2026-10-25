@@ -1574,7 +1574,7 @@ skip_sum=$(grep -m1 '^合计：' "$last_out" | sed -n 's/.*跳过 \([0-9][0-9]*\
 if [ -n "$skip_sum" ] && [ "$skip_sum" -eq "$skip_lines" ]; then ok; else
   bad "一跑多跳 —— 合计行的跳过数（$skip_sum）必须等于 grep '^跳过' 数出来的行数（$skip_lines）"
 fi
-grep -q '全部跑成（跳过了 2 个只改测试文件的包）' "$last_out" \
+grep -q '全部跑成（跳过了 2 个包）' "$last_out" \
   || bad "一跑多跳 —— 收尾那一行也要带上同一个数"
 ledger_excluded1=$((ledger_files - 1))
 if grep -qx "LARKAX_MUTATION_SCOPE=narrow excluded=$ledger_excluded1 skipped=$skip_lines" "$last_out"; then ok; else
@@ -1619,6 +1619,45 @@ if grep -q '^全部跑成' "$last_out"; then
   bad "两包都跳过 —— 这一轮一个变异都没跑，收尾不该说「全部跑成」"
 else
   ok
+fi
+if grep -qE '^包 +killed' "$last_out"; then
+  bad "两包都跳过 —— 表头也不该打：表头加零行与「跑了、一个都没活」的形状太像"
+else
+  ok
+fi
+
+# 29d. 只改测试的清单 + 一个匹配不到的包参数：整轮判失败，退出码 1。
+#
+#      「全部跳过」那条若排在没匹配到的包参数之前，屏幕上会先说过「那些包这一轮
+#      没跑」，紧接着说「都跳过了」并 exit 0——说出去的话与退出码对不上。包名
+#      写错是写参数的人犯的错，与这一轮跳过了几个包无关。
+run_narrow "$tmp/changed-testonly.txt" internal/ledger internal/no-such-package
+if [ "$LAST_RC" -eq 1 ]; then ok; else bad "跳过 + 包名写错 —— 应退出 1，实际退出码 $LAST_RC"; dump; fi
+grep -q 'internal/no-such-package' "$last_out" \
+  || bad "跳过 + 包名写错 —— 要列出没匹配到的那个参数"
+if grep -q '都跳过了' "$last_out"; then
+  bad "跳过 + 包名写错 —— 退出码是 1，就不该再打「都跳过了」那句"
+else
+  ok
+fi
+
+# 29e. 这一包的 `.go` 一条都没改（改动都在别的包）：括号里说另一种话。
+#
+#      点名 internal/ledger，而清单里只有 internal/pricing/pricing.go。两种情形
+#      都会让 NARROW_CHANGED 是 0，但这一包连测试文件都没动过——照「只有测试
+#      文件」去说，等于替它编了一条没发生过的改动。
+printf '%s\n' internal/pricing/pricing.go >"$tmp/changed-elsewhere.txt"
+run_narrow "$tmp/changed-elsewhere.txt" internal/ledger
+if [ "$LAST_RC" -eq 0 ]; then ok; else bad "改动都在别的包 —— 应通过，实际退出码 $LAST_RC"; dump; fi
+grep -qx '跳过 internal/ledger（改动都落在别的包）' "$last_out" \
+  || bad "改动都在别的包 —— 跳过那行要说「改动都落在别的包」"
+if grep -qx '跳过 internal/ledger（本包没有生产文件改动，只有测试文件）' "$last_out"; then
+  bad "改动都在别的包 —— 不能说成「只有测试文件」：这一包一条 .go 都没改"
+else
+  ok
+fi
+if grep -c '^跳过 ' "$last_out" | grep -qx 1; then ok; else
+  bad "改动都在别的包 —— 两种跳过都算进 grep '^跳过' 的数，这里应为 1 条"
 fi
 
 # 30. 新文件算「改到」。
