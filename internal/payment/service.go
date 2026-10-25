@@ -447,8 +447,7 @@ func (s *Service) purchasePlan(ctx context.Context, order Order, paidAt time.Tim
 		// 两层都留着不是冗余：删掉这一层不会让缺口复活（RED 里验证过，报的是
 		// GrantTx 那句），只是报错会指错方向。
 		return false, fmt.Errorf(
-			"支付单 %s 买的是额度包，却没有记下售卖有效期；带 plan_key 的单子不会长成这样"+
-				"（下单时一并写入），先核一下是不是手工改过或从备份恢复的",
+			"支付单 %s 买的是额度包，却没有记下售卖有效期；带 plan_key 的单子不会长成这样（下单时一并写入），先核一下是不是手工改过或从备份恢复的",
 			order.OrderNo)
 	}
 	_, applied, err := s.plans.GrantTx(ctx, tx, plans.GrantInput{

@@ -371,6 +371,51 @@ func TestPlanPurchaseRejectsPlanWithoutValidity(t *testing.T) {
 	}
 }
 
+// 停用的包不可售：拒绝，并且报错把复原命令一并指出。
+//
+// 同一个 switch 的三条守卫里，商户包（TestPlanPurchaseRejectsMerchantPlan）与
+// 没有有效期（TestPlanPurchaseRejectsPlanWithoutValidity）都有下单侧用例，停用
+// 这条没有——这是不对称，不是工具口径。这一支今天**没有变异体**：那道门开着的
+// 变异器里没有一个碰一元 `!`（INVERT_LOGICAL 只管 `&&`/`||`，日志里 165:15 的
+// `||`、192:21 的 `&&` 是它的料；150 的 `if !hasWallet` 同样一个变异体都没有），
+// 所以这道门结构上保护不到它，用例是唯一的东西。
+func TestPlanPurchaseRejectsDisabledPlan(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	plan := seedSalePlanRow(t, ctx, h.db, "sale-disabled", "39", 30)
+	userID := seedUserWithoutWallet(t, ctx, h.db)
+	const orderNo = "ORD-PLAN-DISABLED"
+
+	if _, err := h.db.ExecContext(ctx,
+		`UPDATE plans SET enabled = false WHERE key = $1`, plan.Key); err != nil {
+		t.Fatalf("停用额度包失败: %v", err)
+	}
+
+	_, err := h.service.Create(ctx, stubName, CreateOrderRequest{
+		OrderNo: orderNo,
+		UserID:  userID,
+		PlanKey: plan.Key,
+	})
+	if err == nil {
+		t.Fatal("停用的包应当拒绝售卖")
+	}
+	// 报错要给两条信息：为什么拒（已停用），以及下一步怎么做（plan enable）。
+	if !strings.Contains(err.Error(), "已停用") {
+		t.Errorf("报错没有点名「已停用」：%v", err)
+	}
+	if !strings.Contains(err.Error(), "plan enable") {
+		t.Errorf("报错没有给出复原命令 plan enable：%v", err)
+	}
+	var orders int
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM payment_orders WHERE order_no = $1`, orderNo).Scan(&orders); err != nil {
+		t.Fatalf("数支付单失败: %v", err)
+	}
+	if orders != 0 {
+		t.Errorf("被拒的下单不该落库，实际 %d 行", orders)
+	}
+}
+
 // 同一份付款通知重放 N 次（N=3）：只有一条订阅、一组分录，之后每一次都走
 // applied=false。
 //
