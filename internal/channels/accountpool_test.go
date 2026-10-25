@@ -191,6 +191,140 @@ func TestRotationRestartsAfterAbsence(t *testing.T) {
 	}
 }
 
+// TestRotationSkipsPausedAccounts 钉住「权重 0 的账号不被选中、但仍留在返回值里」。
+//
+// 权重 0 在迁移、accountUsable 与 `account update --channel … --weight N` 里
+// 的含义都是「先别用」。曾经这里有一条兜底把它读成 1，方向正好相反——被明确
+// 暂停的账号会继续吃到流量，而且屏幕上没有任何一行说这件事发生过。
+//
+// 长度也要钉：把暂停的账号从返回值里去掉会让「正权重账号的密文全解不开」变成
+// 一个账号都没有，而 openPoolAccount 拿到空列表时会返回零值账号 + nil 错误。
+func TestRotationSkipsPausedAccounts(t *testing.T) {
+	pool := []poolAccount{
+		{ID: 1, Name: "paused", Weight: 0, Health: AccountHealthHealthy},
+		{ID: 2, Name: "main", Weight: 1, Health: AccountHealthHealthy},
+	}
+	var r accountRotation
+
+	for i := range 20 {
+		ordered := r.rotate(7, pool)
+		if len(ordered) != len(pool) {
+			t.Fatalf("第 %d 次返回 %d 个账号，期望 %d 个", i+1, len(ordered), len(pool))
+		}
+		if ordered[0].ID != 2 {
+			t.Fatalf("第 %d 次选中账号 %d，期望 2（权重 0 的 1 号不参选）",
+				i+1, ordered[0].ID)
+		}
+		// 暂停的账号排在末尾，但仍然在列表里：正权重账号解不开时还能试它。
+		if ordered[1].ID != 1 {
+			t.Errorf("第 %d 次返回的第 2 个账号是 %d，期望 1（排在末尾但保留）",
+				i+1, ordered[1].ID)
+		}
+	}
+}
+
+// TestRotationPausedAccountNeverWinsWithCredit 钉住「不参与 best 的挑选」这一条
+// 本身，而不是只钉「加 0」。
+//
+// 2 号在被暂停之前攒下了累积值，光把它的权重按 0 累加，它仍然靠这份旧值排在
+// 最前面。只把 `weight = 1` 改成 `continue` 而不跳过挑选时，这条用例会红，其余
+// 几条不一定。
+func TestRotationPausedAccountNeverWinsWithCredit(t *testing.T) {
+	pool := []poolAccount{
+		{ID: 1, Weight: 1, Health: AccountHealthHealthy},
+		{ID: 2, Weight: 1, Health: AccountHealthHealthy},
+	}
+	var r accountRotation
+
+	// 第一轮平局取输入靠前的：选 1 号，累积表里留下 1 号 -1、2 号 1。
+	if got := r.rotate(7, pool)[0].ID; got != 1 {
+		t.Fatalf("第一轮选中账号 %d，期望 1（平局取输入靠前）", got)
+	}
+	// 2 号被暂停。加权重之后 1 号是 0、2 号停在它的旧值 1——只跳过累积、
+	// 不跳过挑选时，选中会落到 2 号上。
+	pool[1].Weight = 0
+	ordered := r.rotate(7, pool)
+	if ordered[0].ID != 1 {
+		t.Errorf("选中账号 %d，期望 1（2 号的旧累积值不该让它参选）", ordered[0].ID)
+	}
+	if len(ordered) != 2 || ordered[1].ID != 2 {
+		t.Errorf("返回 %v，期望 [1 2]（暂停的 2 号仍在列表末尾）", ordered)
+	}
+}
+
+// TestRotationPausedAccountsTrailInInputOrder 钉住暂停账号的位置与相对顺序。
+//
+// 生产路径上 rotate 的入参由候选查询的 `json_agg(... ORDER BY a.id)` 给出，
+// 这里只保证「保持入参里的相对顺序」：正权重账号（去掉被选中的那个）按原序
+// 跟在后头，权重 ≤ 0 的按原序排在最后。负权重与 0 一视同仁。
+func TestRotationPausedAccountsTrailInInputOrder(t *testing.T) {
+	pool := []poolAccount{
+		{ID: 1, Weight: 2, Health: AccountHealthHealthy},
+		{ID: 2, Weight: 0, Health: AccountHealthHealthy},
+		{ID: 3, Weight: 1, Health: AccountHealthHealthy},
+		{ID: 4, Weight: -1, Health: AccountHealthHealthy},
+	}
+	var r accountRotation
+
+	want := [][]int64{
+		{1, 3, 2, 4}, // 权重 2 加完后最大，选中 1 号
+		{3, 1, 2, 4}, // 1 号减掉总和后是 -1，3 号 1 最大
+	}
+	for i, ids := range want {
+		ordered := r.rotate(7, pool)
+		if len(ordered) != len(pool) {
+			t.Fatalf("第 %d 次返回 %d 个账号，期望 %d 个", i+1, len(ordered), len(pool))
+		}
+		for j, id := range ids {
+			if ordered[j].ID != id {
+				t.Fatalf("第 %d 次的顺序 = %v，期望 %v", i+1, idsOf(ordered), ids)
+			}
+		}
+	}
+}
+
+// TestRotationAllPausedKeepsTodayBehavior 钉住「池子里一个正权重账号都没有」
+// 这一格：退回等权轮流（与兜底改之前一字不差）、不返回空列表。
+//
+// 空列表不是「没什么可挑」这么轻：openPoolAccount 拿到它时 lastErr 是 nil，
+// 于是返回零值账号 + nil 错误，调用方会把它当成挑到了账号。
+func TestRotationAllPausedKeepsTodayBehavior(t *testing.T) {
+	pool := []poolAccount{
+		{ID: 1, Weight: 0, Health: AccountHealthHealthy},
+		{ID: 2, Weight: 0, Health: AccountHealthHealthy},
+		{ID: 3, Weight: -2, Health: AccountHealthHealthy},
+	}
+	var r accountRotation
+
+	want := []int64{1, 2, 3, 1, 2, 3}
+	for i, id := range want {
+		ordered := r.rotate(7, pool)
+		if len(ordered) != len(pool) {
+			t.Fatalf("第 %d 次返回 %d 个账号，期望 %d 个", i+1, len(ordered), len(pool))
+		}
+		if ordered[0].ID != id {
+			t.Fatalf("第 %d 次选中账号 %d，期望 %d（全部暂停时退回等权轮流）",
+				i+1, ordered[0].ID, id)
+		}
+	}
+
+	// 单个暂停账号也一样：返回它自己，不是空列表。
+	var single accountRotation
+	got := single.rotate(8, pool[:1])
+	if len(got) != 1 || got[0].ID != 1 {
+		t.Errorf("只有一个暂停账号时返回 %v，期望 [1]", idsOf(got))
+	}
+}
+
+// idsOf 把轮询结果折成 id 清单，只用于失败信息。
+func idsOf(accounts []poolAccount) []int64 {
+	ids := make([]int64, 0, len(accounts))
+	for _, acc := range accounts {
+		ids = append(ids, acc.ID)
+	}
+	return ids
+}
+
 // TestRotationEmptyPool 钉住空池不 panic。
 func TestRotationEmptyPool(t *testing.T) {
 	var r accountRotation
