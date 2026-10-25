@@ -307,6 +307,120 @@ func (a *Admin) UpdateAccount(ctx context.Context, name, plaintext string) (Acco
 	return info, nil
 }
 
+// ErrAccountNotOnChannel 表示这个账号没有挂在那条渠道上。
+//
+// 权重挂在关联上（迁移 00067），没有那一对关联就没有地方放权重。它与
+// ErrAccountNotFound 分开：一个要换一条渠道（或换一个账号），一个要核对名字。
+var ErrAccountNotOnChannel = errors.New("账号没有挂在这条渠道上")
+
+// AccountNotOnChannelError 带着「这个账号实际挂在哪些渠道上」。
+//
+// 与 AccountInUseError 同一条理由：只说「没挂在这条上」而不说是哪几条，运维
+// 还得自己再查一遍，而那条查询正是本类型刚刚做过的。
+type AccountNotOnChannelError struct {
+	Name        string
+	ChannelID   int64
+	ChannelName string
+	// Channels 是它实际挂着的渠道（未软删的），按渠道 id 升序。
+	Channels []AccountChannel
+}
+
+func (e *AccountNotOnChannelError) Error() string {
+	if len(e.Channels) == 0 {
+		return fmt.Sprintf("%s：账号 %s 没有挂在渠道 %d（%s）上，它现在没有挂任何渠道。"+
+			"权重挂在渠道与账号的关联上，没有关联就没有地方放它。",
+			ErrAccountNotOnChannel, e.Name, e.ChannelID, e.ChannelName)
+	}
+	parts := make([]string, 0, len(e.Channels))
+	for _, ch := range e.Channels {
+		parts = append(parts, fmt.Sprintf("%d（%s）", ch.ID, ch.Name))
+	}
+	return fmt.Sprintf("%s：账号 %s 没有挂在渠道 %d（%s）上。它挂在：%s。",
+		ErrAccountNotOnChannel, e.Name, e.ChannelID, e.ChannelName, strings.Join(parts, "、"))
+}
+
+// Unwrap 让 errors.Is(err, ErrAccountNotOnChannel) 成立。
+func (e *AccountNotOnChannelError) Unwrap() error { return ErrAccountNotOnChannel }
+
+// SetAccountWeight 改一个账号挂在某条渠道上的池内权重。
+//
+// 权重挂在关联上，所以「改权重」问的是渠道与账号的那一对：同一个账号挂在两条
+// 渠道上时，这里只动被点名的那一条。0 表示「先别用」（见迁移 00067 的 CHECK 与
+// accountUsable），负数在这里就被拒——表上也有 CHECK，但那条错误说的是数据库
+// 约束，而这件事是调用方的参数错了。
+//
+// 它不碰 accounts.updated_at，也不碰健康状态：改的是「往这条渠道派多少流量」，
+// 不是这份凭证本身。换 key 才重置健康（见 UpdateAccount）。
+func (a *Admin) SetAccountWeight(ctx context.Context, name string, channelID int64, weight int) (AccountChannel, error) {
+	name = strings.TrimSpace(name)
+	if err := validateAccountName(name); err != nil {
+		return AccountChannel{}, err
+	}
+	if weight < 0 {
+		return AccountChannel{}, fmt.Errorf("账号权重不能为负，得到 %d", weight)
+	}
+	if channelID <= 0 {
+		return AccountChannel{}, fmt.Errorf("渠道 id 无效：%d", channelID)
+	}
+
+	var accountID int64
+	err := a.handle().QueryRowContext(ctx,
+		`SELECT id FROM accounts WHERE name = $1`, name).Scan(&accountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AccountChannel{}, fmt.Errorf("%w：%s", ErrAccountNotFound, name)
+	}
+	if err != nil {
+		return AccountChannel{}, fmt.Errorf("查询账号失败: %w", err)
+	}
+
+	// 一次读带出三件事，省的是一条语句一种含义各查一遍：
+	//   - 渠道不在 / 已软删：与 explainNoRow 那两档同一个分法；
+	//   - 这一对关联的当前值不在：账号没挂在这条渠道上——参数错，要指出它
+	//     实际挂在哪儿。
+	var (
+		channelName string
+		deleted     bool
+		current     sql.NullInt64
+	)
+	err = a.handle().QueryRowContext(ctx, `
+		SELECT c.name, c.deleted_at IS NOT NULL, ca.weight
+		  FROM channels c
+		  LEFT JOIN channel_accounts ca
+		         ON ca.channel_id = c.id AND ca.account_id = $2
+		 WHERE c.id = $1`, channelID, accountID).
+		Scan(&channelName, &deleted, &current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AccountChannel{}, fmt.Errorf("%w：id %d", ErrChannelNotFound, channelID)
+	}
+	if err != nil {
+		return AccountChannel{}, fmt.Errorf("查渠道 %d 失败: %w", channelID, err)
+	}
+	if deleted {
+		return AccountChannel{}, fmt.Errorf("%w：id %d", ErrChannelDeleted, channelID)
+	}
+	if !current.Valid {
+		attached, listErr := accountChannels(ctx, a.handle(), accountID)
+		if listErr != nil {
+			return AccountChannel{}, listErr
+		}
+		return AccountChannel{}, &AccountNotOnChannelError{
+			Name:        name,
+			ChannelID:   channelID,
+			ChannelName: channelName,
+			Channels:    attached,
+		}
+	}
+
+	if _, err := a.handle().ExecContext(ctx, `
+		UPDATE channel_accounts SET weight = $3
+		 WHERE channel_id = $1 AND account_id = $2`,
+		channelID, accountID, weight); err != nil {
+		return AccountChannel{}, dberr.ConstraintFailure(
+			fmt.Errorf("改账号 %s 在渠道 %d 上的权重失败: %w", name, channelID, err))
+	}
+	return AccountChannel{ID: channelID, Name: channelName, Weight: weight}, nil
+}
+
 // ErrAccountInUse 表示这个账号还挂在多于一条渠道上，不能不加确认地删。
 //
 // 它与 ErrAccountNotFound 分开：一个要改命令（加 --force），一个要核对名字。
