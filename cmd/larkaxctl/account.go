@@ -629,15 +629,28 @@ func accountKeysLabel(info channels.AccountInfo) string {
 	return strings.Join(info.CredentialKeys, ",")
 }
 
+// accountChannelsLabel 打这一行挂着的渠道，每条都带上它在关联上的权重。
+//
+// 权重 0 是「这条渠道先别用这个账号」的暂停开关，人读表里要能一眼看见它，
+// 不必切到 `--format json`。默认值 1 也照打：这一栏回答的是「这个账号在每条
+// 渠道上是什么权重」，那个数就是答案本身，省掉 1 等于把「改完看不到结果」
+// 从 0 挪到了 1。
+//
+// 形态与 channel.go 的 accountRefsLabel 相同，规则不同——那边回答「这条渠道
+// 挂了谁」，权重只是附注，默认值可以不写；不要为了「看着统一」把两处改成
+// 同一条规则，无论统一到哪边都会改坏一侧。
+//
+// 没有关联时打「-」：「没有这个数」与「这个数是 0」在选路里是相反的结论，
+// 不能在这里合并成一个空值。
 func accountChannelsLabel(info channels.AccountInfo) string {
 	if len(info.Channels) == 0 {
 		return "-"
 	}
-	names := make([]string, 0, len(info.Channels))
+	parts := make([]string, 0, len(info.Channels))
 	for _, ch := range info.Channels {
-		names = append(names, ch.Name)
+		parts = append(parts, fmt.Sprintf("%s（权重 %d）", ch.Name, ch.Weight))
 	}
-	return strings.Join(names, ",")
+	return strings.Join(parts, ", ")
 }
 
 // accountListDoc 组装 account list 的机器可读输出。
