@@ -166,9 +166,19 @@
 #
 # ## 口径上的三条规矩
 #
-#   - **一个包里只有 `_test.go` 变了**（或者改动都在别的包）时，不排除任何文件、
-#     跑整包。这种改动的风险恰恰是「测试被改弱」，排除文件反而把要看的地方
-#     排除掉了。
+#   - **一个包里没有生产文件改动时，这一包跳过**，一个变异都不跑（#1229）。
+#     只改了 `_test.go`、改的不是 Go（`.sql`、`.md`）、改动都落在别的包，都算。
+#     这道门问的是「新写的生产逻辑有没有被钉住」，而这一包的生产代码一个字没动；
+#     退回整包会为一份不碰生产代码的改动付整包的价（搬钱的包一轮以小时计），
+#     回答的却是另一个问题：测试强度有没有变。
+#     跳过时打一行，三种话：这一包有 `_test.go` 改动是
+#     `跳过 <包>（本包没有生产文件改动，只有测试文件）`；这一包改了但改的不是
+#     Go（`.sql`、`.md`）是 `跳过 <包>（本包没有生产文件改动）`；这一包一条改动
+#     都没有是 `跳过 <包>（改动都落在别的包）`。括号分三种是因为三种来路都会被
+#     说成「没有生产文件改动」，而三句话不能互相顶替——照第一种说后两种，等于
+#     替这一包编了一条它没发生过的测试改动。「跳过」与「跑完 0 存活」在输出里
+#     长得一样，这一行是唯一的区分（LESSONS 第 16 条）。要看这些包的测试强度，
+#     不加 `--changed-*` 跑整包，脚本自己打 `LARKAX_MUTATION_SCOPE=full`。
 #   - **新文件算「改到」**：判据是改动清单本身，不是 git 的文件状态。新文件在
 #     清单里，就不会被排除。
 #   - **改动同时落在父子包**时只留外层（外层那条命令递归含子包），`-E` 按整棵
@@ -936,14 +946,24 @@ narrow_regex_escape() {  # 给一个字面量路径，打印它能当正则用�
 }
 
 # narrow_plan <包>：扫这一包的**生产** `.go` 文件（不含 `_test.go`），结果放在
-# NARROW_TOTAL / NARROW_CHANGED / NARROW_EXCLUDED_REL 里。
+# NARROW_TOTAL / NARROW_CHANGED / NARROW_EXCLUDED_REL / NARROW_TEST_CHANGED /
+# NARROW_TOUCHED 里。
 #
-# 只有 `_test.go` 变了、或者改动都在别的包时，NARROW_CHANGED 是 0——调用方据此
-# 跑整包，不传任何 `-E`。
+# NARROW_CHANGED 是 0 有三种来路：这一包只改了 `_test.go`、改的不是 Go，
+# 或者一条改动都没落在这一包名下。三种来路下调用方都**跳过这一包**（#1229），
+# 不跑变异、也不传 `-E`。
+#
+# NARROW_TEST_CHANGED / NARROW_TOUCHED 说的是这一包**被动没被动过**：前者是
+# 「有没有 `_test.go` 被改到」，后者是「有没有任何一份改动落在它名下」。它们只
+# 影响跳过时那句话的括号——三种来路都会让 NARROW_CHANGED 是 0，而「改了测试」
+# 「改的不是 Go」与「这一包根本没被动过」不是同一件事，话说错了，读的人会以为
+# 这一包发生过它没发生过的改动。
 narrow_plan() {
   local pkg="$1" f rel
   NARROW_TOTAL=0
   NARROW_CHANGED=0
+  NARROW_TEST_CHANGED=0
+  NARROW_TOUCHED=0
   NARROW_EXCLUDED_REL=()
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -955,10 +975,19 @@ narrow_plan() {
       NARROW_EXCLUDED_REL+=("$rel")
     fi
   done < <(find "$pkg" -type f -name '*.go' ! -name '*_test.go' | sort)
+  for f in "${changed_files[@]}"; do
+    case "$f" in
+      "$pkg"/*) NARROW_TOUCHED=1 ;;
+    esac
+    case "$f" in
+      "$pkg"/*_test.go) NARROW_TEST_CHANGED=1 ;;
+    esac
+  done
 }
 
 narrow_participating=0
 narrow_excluded=0
+narrow_skipped=0
 if [ "$NARROW" -eq 1 ]; then
   echo "── 按改动收窄 ──"
   echo "改动文件清单：${#changed_files[@]} 个（来源：${CHANGED_SOURCE}）"
@@ -966,32 +995,61 @@ if [ "$NARROW" -eq 1 ]; then
     selected "$pkg" || continue
     narrow_plan "$pkg"
     if [ "$NARROW_CHANGED" -eq 0 ]; then
-      # 整包跑：这一包的生产文件没有被改到（常见的是只改了 `_test.go`）。
-      narrow_participating=$((narrow_participating + NARROW_TOTAL))
-      printf '  %-24s 整包（这一包没有生产文件改动）\n' "$pkg"
-    else
-      narrow_participating=$((narrow_participating + NARROW_CHANGED))
-      narrow_excluded=$((narrow_excluded + NARROW_TOTAL - NARROW_CHANGED))
-      printf '  %-24s 参与 %d / 共 %d 个生产文件，排除 %d 个未改动的\n' \
-        "$pkg" "$NARROW_CHANGED" "$NARROW_TOTAL" "$((NARROW_TOTAL - NARROW_CHANGED))"
+      # 这一包的生产文件一个都没被改到。跳过它，而不是退回整包（#1229）：
+      # 没有新增的生产逻辑要量，整包跑几十分钟回答的是另一个问题。
+      # **这一行必须打**——它是「跳过」与「跑完 0 存活」在输出里唯一的区分
+      # （LESSONS 第 16 条），`grep '^跳过'` 要能数出跳了几个包。
+      #
+      # 括号里分三种话，因为 NARROW_CHANGED 为 0 有三种来路：这一包只改了
+      # `_test.go`、这一包改了但改的不是 Go（`.sql` / `.md`）、这一包一条改动
+      # 都没有。三句话不能互相顶替——后两种里这一包都没有测试改动，照第一种说
+      # 等于替它编了一条它没发生过的测试改动。
+      narrow_skipped=$((narrow_skipped + 1))
+      if [ "$NARROW_TEST_CHANGED" -eq 1 ]; then
+        printf '跳过 %s（本包没有生产文件改动，只有测试文件）\n' "$pkg"
+      elif [ "$NARROW_TOUCHED" -eq 1 ]; then
+        printf '跳过 %s（本包没有生产文件改动）\n' "$pkg"
+      else
+        printf '跳过 %s（改动都落在别的包）\n' "$pkg"
+      fi
+      continue
     fi
+    narrow_participating=$((narrow_participating + NARROW_CHANGED))
+    narrow_excluded=$((narrow_excluded + NARROW_TOTAL - NARROW_CHANGED))
+    printf '  %-24s 参与 %d / 共 %d 个生产文件，排除 %d 个未改动的\n' \
+      "$pkg" "$NARROW_CHANGED" "$NARROW_TOTAL" "$((NARROW_TOTAL - NARROW_CHANGED))"
   done
-  echo "合计：参与变异 $narrow_participating 个生产文件，排除 $narrow_excluded 个未改动的。"
+  # 跳过的不进「参与」与「排除」两个数：它们既没有被变异，也没有被排除——
+  # 合进任何一个数里，这一步就没有交代它到底跑没跑。
+  echo "合计：参与变异 $narrow_participating 个生产文件，排除 $narrow_excluded 个未改动的，跳过 $narrow_skipped 个包。"
   if [ "$narrow_excluded" -gt 0 ]; then
     echo "这一轮的表只覆盖改动涉及的生产文件：efficacy、存活、超时都与整包基线不可比，"
     echo "别拿它与 docs/development.md「各包的现状」那张表对账。"
-  else
+  elif [ "$narrow_participating" -gt 0 ]; then
     echo "这一轮没有排除任何生产文件，口径与整包一致。"
-  fi
-  # 机读口径标记，独占一行：CI 的 job summary 按它选措辞。只按「改动清单非空」
-  # 推定发生过排除会猜错——只改 `_test.go` 时这一轮实际跑的是整包。
-  if [ "$narrow_excluded" -gt 0 ]; then
-    echo "LARKAX_MUTATION_SCOPE=narrow excluded=$narrow_excluded"
   else
-    echo "LARKAX_MUTATION_SCOPE=full"
+    echo "这一轮没有要变异的包：选中的包都没有生产文件改动，一个变异都不会跑。"
+  fi
+  # 机读口径标记，独占一行：CI 的 job summary 按它选措辞。
+  # 只按「改动清单非空」推定发生过排除会猜错：整包都被改到时不排除任何文件，
+  # 而整轮只改了测试文件时一个包都不跑。第三种 `skipped` 说的就是后者——
+  # 它既不是 `full` 也不是 `narrow`，按其中任何一个写进 summary 都是假话。
+  #
+  # **前两种也带上跳过数**：那一行说的是「跑了的那几个包」的口径，被整包跳过
+  # 的包不在其中。不带这个数，summary 就会把「两个包跑了整包、三个包跳过」
+  # 说成「这一轮跑的是整包」，读的人以为五个包都量过。
+  if [ "$narrow_excluded" -gt 0 ]; then
+    echo "LARKAX_MUTATION_SCOPE=narrow excluded=$narrow_excluded skipped=$narrow_skipped"
+  elif [ "$narrow_participating" -gt 0 ]; then
+    echo "LARKAX_MUTATION_SCOPE=full skipped=$narrow_skipped"
+  else
+    echo "LARKAX_MUTATION_SCOPE=skipped packages=$narrow_skipped"
   fi
   echo
 else
+  # 整包口径（不给 --changed-*）：**一律不跳**。这条路的语义是「我要量这个包」，
+  # 包括「这一轮改动没有落在生产文件上」——那种时候要看的正是测试强度，
+  # 跳过等于把这条命令关掉。所以这里没有跳过数可报。
   echo "LARKAX_MUTATION_SCOPE=full"
 fi
 
@@ -1006,9 +1064,13 @@ fi
 # 而处置完全相反（前者要补测试，后者要判等价）。
 #
 # 两栏都照实打、都不进退出码：判据仍然只看存活与超时。
-printf '%-20s %7s %6s %7s %12s %17s  %s\n' \
-  "包" "killed" "存活" "超时" "Not covered" "Mutator coverage" "efficacy"
-printf '%s\n' "─────────────────────────────────────────────────────────────────────────────────"
+# 全部跳过时整块表都不打：表头加零行与「跑了、一个都没活」的形状太像，而这一轮
+# 一个包都没跑。非收窄模式不会跳，表头照打。
+if [ "$NARROW" -eq 0 ] || [ "$narrow_participating" -gt 0 ]; then
+  printf '%-20s %7s %6s %7s %12s %17s  %s\n' \
+    "包" "killed" "存活" "超时" "Not covered" "Mutator coverage" "efficacy"
+  printf '%s\n' "─────────────────────────────────────────────────────────────────────────────────"
+fi
 
 # 存活清单。docs/development.md 要求「对存活的变异逐个判断」，而只打一个计数时
 # 那句话没法执行：数得出来，看不了。所以每个包一跑完就把它的存活行抄下来，
@@ -1020,6 +1082,16 @@ trap 'rm -f "$SURVIVORS"; rm -rf "$LOCK_FILE.d"' EXIT
 
 for pkg in "${PKGS[@]}"; do
   selected "$pkg" || continue
+
+  # 只改了测试文件的包在这一轮不参与（#1229）：没有生产文件被改，
+  # 就没有「新写的逻辑有没有被钉住」可量，整包跑几十分钟回答的是另一个问题。
+  # **跳过那一行不在这里打**——上面「按改动收窄」那一段已经逐包打过
+  # `跳过 <包>（…）`，两处都打会让 `grep '^跳过'` 数出两倍。
+  if [ "$NARROW" -eq 1 ]; then
+    narrow_plan "$pkg"
+    if [ "$NARROW_CHANGED" -eq 0 ]; then continue; fi
+  fi
+
   checked=$((checked + 1))
 
   # 这里**不传** --coverpkg、也不传 --integration：用默认调用。
@@ -1168,10 +1240,11 @@ for pkg in "${PKGS[@]}"; do
   # 照旧落到下面的「认不出输出」判失败。
   if [ "$NARROW" -eq 1 ] && printf '%s\n' "$out" | grep -qxF 'No results to report.'; then
     narrow_plan "$pkg"
-    # 只认「这一包真的有生产文件被收窄进来」的情形。NARROW_CHANGED 为 0 是
-    # 「这一包没有生产文件改动」（例如只改了 `_test.go`），那一轮跑的是整包，
-    # 整包一个变异体都没有照旧判失败——不能用生产文件总数把这条判据放宽成
-    # `NARROW_TOTAL > 0`。
+    # 走到这里时 NARROW_CHANGED 一定大于 0：只改了 `_test.go` 的包在上面就被
+    # 跳过了，进不到这个循环（#1229）。这条判断因此是重复的守卫，留着是因为
+    # 它区分的是「这一包真有生产文件参与收窄」——跳过那一段哪天坏了、让一个
+    # NARROW_CHANGED 为 0 的包漏进来，**不能**用生产文件总数把判据放宽成
+    # `NARROW_TOTAL > 0`，那样整包一个变异体都没有也会算通过。
     #
     # 还要求输出里没有真实的汇总行：这一句出现在正常汇总之外时，先命中绿分支
     # 会把真数字丢掉。
@@ -1256,17 +1329,52 @@ if [ -s "$SURVIVORS" ]; then
   echo
 fi
 
-if [ "$checked" -eq 0 ]; then
+# 一轮的结论按这个顺序判，顺序是有意的：
+#   ① 一个包都没选中（且没有跳过的包）→ 失败：这次什么都没检查。
+#   ② 有包参数没匹配到 → 失败。它必须排在「全部跳过」的通过之前：两者同时成立时
+#      （只改测试的清单加上一个写错的包名），屏幕上半部分已经说过「那些包这一轮
+#      没跑」，而「全部跳过」那条会 exit 0——说出去的话与退出码对不上，正是
+#      「跳过与通过长得一样」那一格（LESSONS 第 16 条）。包名写错是写参数的人
+#      犯的错，与这一轮跳过了几个包无关。
+#   ③ 选中的都跳过 → 通过，但明说这一轮没有量到任何变异。
+#   ④ 有包没跑成 → 失败。
+#   ⑤ 其余 → 通过。
+if [ "$checked" -eq 0 ] && [ "$narrow_skipped" -eq 0 ]; then
   echo "没有选中任何包（筛选条件：${filters[*]:-无}）——这次什么都没检查，不算通过。"
   exit 1
 fi
-if [ "$failed" -ne 0 ] || [ ${#unmatched_filters[@]} -gt 0 ]; then
-  if [ ${#unmatched_filters[@]} -gt 0 ]; then
-    echo "有包参数没匹配到任何包（${unmatched_filters[*]}）——那些包这一轮没跑。"
-  fi
+
+if [ ${#unmatched_filters[@]} -gt 0 ]; then
+  echo "有包参数没匹配到任何包（${unmatched_filters[*]}）——那些包这一轮没跑。"
   if [ "$failed" -ne 0 ]; then
     echo "有包的结果不可信或没跑成，见上面的 ⚠。"
   fi
   exit 1
 fi
-echo "全部跑成。"
+
+if [ "$checked" -eq 0 ]; then
+  # 选中的包全部跳过：这一轮**一个变异都没跑**。它算通过还是失败，
+  # 取决于跳过是不是真的成立——「只改了测试文件」不该挡住合并，
+  # #1229 就是为一堆这样的 PR 不在搬钱的包上白等一小时，所以退出 0。
+  # 但「跳过」在屏幕上与「跑完且通过」长得一样（LESSONS 第 16 条），
+  # 所以这两句必须打出来。
+  #
+  # 这条路径不是「改动清单没读到」的兜底：清单解析不出来时，脚本在选包那一步
+  # 就退出 1 了（「没有落在任何 PKGS 包里的 Go 文件」）。
+  echo "选中的 $narrow_skipped 个包都跳过了（这一轮没有生产文件可变异）——"
+  echo "这一轮没有量到任何变异，不是「跑了且通过」。要看这些包的测试强度，"
+  echo "不加 --changed-from / --changed-files 跑整包（脚本自己打 LARKAX_MUTATION_SCOPE=full）。"
+  exit 0
+fi
+
+if [ "$failed" -ne 0 ]; then
+  echo "有包的结果不可信或没跑成，见上面的 ⚠。"
+  exit 1
+fi
+if [ "$narrow_skipped" -gt 0 ]; then
+  # 收尾那一行是很多人唯一会读的一行。只写「全部跑成」而跳过了几个包，
+  # 读的人会以为它们也量过——跳过要跟着出现在这一行里。
+  echo "全部跑成（跳过了 $narrow_skipped 个包）。"
+else
+  echo "全部跑成。"
+fi
