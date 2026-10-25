@@ -82,7 +82,19 @@ _larkaxctl() {
 			*) _files; return ;;
 			esac
 			;;
+		"account update|--channel")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
 		"account update|--credential-env")
+			case "$cur" in
+			-*) ;;
+			*) _files; return ;;
+			esac
+			;;
+		"account update|--weight")
 			case "$cur" in
 			-*) ;;
 			*) _files; return ;;
@@ -2310,7 +2322,7 @@ _larkaxctl() {
 			"account add") compadd -- --channel --credential-env --env-file --format --quiet --verbose --weight ;;
 			"account list") compadd -- --channel --env-file --format --quiet --verbose ;;
 			"account remove") compadd -- --env-file --force --format --quiet --verbose ;;
-			"account update") compadd -- --credential-env --env-file --format --quiet --verbose ;;
+			"account update") compadd -- --channel --credential-env --env-file --format --quiet --verbose --weight ;;
 			"alias create") compadd -- --channel --env-file --format --model --overrides --quiet --upstream --verbose ;;
 			"alias delete") compadd -- --env-file --format --id --quiet --verbose ;;
 			"alias list") compadd -- --channel --env-file --format --model --quiet --verbose ;;

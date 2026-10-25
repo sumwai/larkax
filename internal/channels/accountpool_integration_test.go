@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,6 +260,273 @@ func TestCandidatesZeroWeightAccountNeverSelected(t *testing.T) {
 			t.Fatalf("第 %d 次选中 %+v，期望只有账号 %d", i+1, cands, liveID)
 		}
 	}
+}
+
+// ── 改权重 ──────────────────────────────────────────────────────────────
+
+// TestSetAccountWeightPausesAndResumesRouting 钉住「改权重真的改得动选路」。
+//
+// 断在**选中了谁**上，不断库里那一列：读回值只能证明写进去了，证明不了下一次
+// 请求会因此绕开这个账号——而那正是运维写 weight 0 时想要的结果。
+func TestSetAccountWeightPausesAndResumesRouting(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	pausedID, pausedName := attachPoolAccount(t.Context(), t, db, sealer, channelID, "paused-key", 1)
+	liveID, _ := attachPoolAccount(t.Context(), t, db, sealer, channelID, "live-key", 1)
+
+	admin := NewAdmin(db, nil, nil)
+	src := New(db, sealer)
+
+	pickAll := func(rounds int) map[int64]int {
+		t.Helper()
+		counts := map[int64]int{}
+		for i := 0; i < rounds; i++ {
+			cands, err := src.Candidates(context.Background(), model)
+			if err != nil {
+				t.Fatalf("第 %d 次 Candidates 出错: %v", i+1, err)
+			}
+			if len(cands) != 1 {
+				t.Fatalf("第 %d 次候选数 = %d，期望 1", i+1, len(cands))
+			}
+			counts[cands[0].AccountID]++
+		}
+		return counts
+	}
+
+	// 两边都是 1:1，先确认基线：两个账号都该被选中过。
+	before := pickAll(10)
+	if before[pausedID] == 0 || before[liveID] == 0 {
+		t.Fatalf("改权重之前两个账号就该各被选中过，计数 = %v", before)
+	}
+
+	if _, err := admin.SetAccountWeight(context.Background(), pausedName, channelID, 0); err != nil {
+		t.Fatalf("把权重改成 0 失败: %v", err)
+	}
+	paused := pickAll(20)
+	if paused[pausedID] != 0 {
+		t.Errorf("权重 0 之后账号 %d 仍被选中 %d 次，期望 0 次", pausedID, paused[pausedID])
+	}
+	if paused[liveID] != 20 {
+		t.Errorf("权重 0 之后另一个账号被选中 %d 次，期望全部 20 次", paused[liveID])
+	}
+
+	// 恢复：改回非 0 之后重新参与轮询。权重 1 与另一个账号相同，10 轮里该各占一半。
+	if _, err := admin.SetAccountWeight(context.Background(), pausedName, channelID, 1); err != nil {
+		t.Fatalf("把权重改回来失败: %v", err)
+	}
+	after := pickAll(10)
+	if after[pausedID] == 0 {
+		t.Errorf("权重改回来之后账号 %d 一次都没被选中，计数 = %v", pausedID, after)
+	}
+	if after[pausedID]+after[liveID] != 10 {
+		t.Errorf("恢复后选中次数合计 = %d，期望 10", after[pausedID]+after[liveID])
+	}
+}
+
+// TestSetAccountWeightTouchesOnlyThatChannel 钉住「权重挂在关联上」。
+//
+// 同一个账号挂在两条渠道上：改一条不能影响另一条。断在两条渠道各自还选不选得到
+// 这个账号上，同时读一眼另一条关联上的值——路由那一半证明「另一条没被改」，
+// 值那一半说明它停在原处而不是被顺手写成 1。
+func TestSetAccountWeightTouchesOnlyThatChannel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	pausedChannel := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	otherChannel := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	accountID, name := attachPoolAccount(t.Context(), t, db, sealer, pausedChannel, "shared-key", 1)
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO channel_accounts (channel_id, account_id, weight) VALUES ($1, $2, 1)`,
+		otherChannel, accountID); err != nil {
+		t.Fatalf("挂到第二条渠道上失败: %v", err)
+	}
+
+	admin := NewAdmin(db, nil, nil)
+	src := New(db, sealer)
+
+	if _, err := admin.SetAccountWeight(context.Background(), name, pausedChannel, 0); err != nil {
+		t.Fatalf("改权重失败: %v", err)
+	}
+
+	cands, err := src.Candidates(context.Background(), model)
+	if err != nil {
+		t.Fatalf("Candidates 出错: %v", err)
+	}
+	if n := countCandidatesFor(cands, pausedChannel); n != 0 {
+		t.Errorf("权重改成 0 的那条渠道仍出现在候选里 %d 次，期望 0", n)
+	}
+	if n := countCandidatesFor(cands, otherChannel); n != 1 {
+		t.Errorf("另一条渠道出现 %d 次，期望 1（它的权重不该被动到）", n)
+	}
+
+	attached, err := accountChannels(context.Background(), db, accountID)
+	if err != nil {
+		t.Fatalf("读账号的渠道失败: %v", err)
+	}
+	weights := map[int64]int{}
+	for _, ch := range attached {
+		weights[ch.ID] = ch.Weight
+	}
+	if weights[pausedChannel] != 0 || weights[otherChannel] != 1 {
+		t.Errorf("两条渠道上的权重 = %v，期望 %d:0、%d:1", weights, pausedChannel, otherChannel)
+	}
+}
+
+// TestSetAccountWeightRejectsUnattachedAccount 钉住「没挂在那条渠道上」的错误。
+//
+// 错误里要带回它实际挂着的渠道（id + 名字）：只说「没挂在这条上」，运维还得
+// 自己再查一遍，而那条查询正是这里刚做过的。同时确认拒绝不是「写了一半」：
+// 那条渠道上不该多出一条关联。
+func TestSetAccountWeightRejectsUnattachedAccount(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+
+	attachedChannel := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	otherChannel := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	accountID, name := attachPoolAccount(t.Context(), t, db, sealer, attachedChannel, "key", 1)
+	attachedName := secondChannelName(t, db, attachedChannel)
+
+	_, err := NewAdmin(db, nil, nil).SetAccountWeight(context.Background(), name, otherChannel, 2)
+	if !errors.Is(err, ErrAccountNotOnChannel) {
+		t.Fatalf("期望 ErrAccountNotOnChannel，得到 %v", err)
+	}
+	var notOn *AccountNotOnChannelError
+	if !errors.As(err, &notOn) {
+		t.Fatalf("错误链里没有 AccountNotOnChannelError：%v", err)
+	}
+	if len(notOn.Channels) != 1 || notOn.Channels[0].ID != attachedChannel {
+		t.Errorf("错误里带回的渠道 = %+v，期望只有 %d", notOn.Channels, attachedChannel)
+	}
+	for _, want := range []string{itoa(attachedChannel), attachedName} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("错误里没有 %q：%v", want, err)
+		}
+	}
+
+	var rows int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM channel_accounts WHERE channel_id = $1 AND account_id = $2`,
+		otherChannel, accountID).Scan(&rows); err != nil {
+		t.Fatalf("数关联行失败: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("被拒之后那条渠道上多出了 %d 条关联", rows)
+	}
+}
+
+// TestSetAccountWeightRejectsNegativeAndMissing 钉住权重与名字这两条取值判据。
+func TestSetAccountWeightRejectsNegativeAndMissing(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	accountID, name := attachPoolAccount(t.Context(), t, db, sealer, channelID, "key", 1)
+
+	admin := NewAdmin(db, nil, nil)
+	if _, err := admin.SetAccountWeight(context.Background(), name, channelID, -1); err == nil {
+		t.Fatal("负权重应当被拒")
+	}
+	// 被拒之后权重没变：写入是在判据之后那一条 UPDATE 里发生的。
+	if w := poolWeight(t, db, channelID, accountID); w != 1 {
+		t.Errorf("负权重被拒之后权重变成 %d，期望仍是 1", w)
+	}
+
+	_, err := admin.SetAccountWeight(context.Background(), "no-such-account-"+itoa(nextID()), channelID, 1)
+	if !errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("期望 ErrAccountNotFound，得到 %v", err)
+	}
+}
+
+// TestSetAccountWeightOnDeletedOrMissingChannel 钉住渠道那一侧的两档。
+//
+// 「没有这个 id」与「这个 id 已经删了」不是同一个下一步：一个要核对渠道，
+// 一个要 restore 或者换一条。
+func TestSetAccountWeightOnDeletedOrMissingChannel(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	_, name := attachPoolAccount(t.Context(), t, db, sealer, channelID, "key", 1)
+	admin := NewAdmin(db, nil, nil)
+
+	_, err := admin.SetAccountWeight(context.Background(), name, channelID+1_000_000, 1)
+	if !errors.Is(err, ErrChannelNotFound) {
+		t.Fatalf("不存在的渠道 id：期望 ErrChannelNotFound，得到 %v", err)
+	}
+
+	softDeleteRow(t, db, channelID)
+	_, err = admin.SetAccountWeight(context.Background(), name, channelID, 1)
+	if !errors.Is(err, ErrChannelDeleted) {
+		t.Fatalf("已杀的渠道：期望 ErrChannelDeleted，得到 %v", err)
+	}
+}
+
+// TestSetAccountWeightDetectsVanishedLink 钉住「读与写之间那一对关联没了」。
+//
+// 判据是写完之后有没有真的改到行：`UPDATE` 影响 0 行时照报成功，调用方会以为
+// 权重已经生效，而选路那边什么都没变。这里用一个 BEFORE UPDATE 触发器把每一次
+// 更新都跳过去（返回 NULL 即跳过该行），模拟「账号刚被 remove 掉」这个窗口。
+func TestSetAccountWeightDetectsVanishedLink(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	model := uniqueModel()
+	channelID := insertChannelWithoutAccounts(t.Context(), t, db, model)
+	accountID, name := attachPoolAccount(t.Context(), t, db, sealer, channelID, "key", 1)
+
+	// 用触发器而不是并发删行：那条路径争的是时序，而这里要钉的是「0 行怎么算」。
+	if _, err := db.ExecContext(context.Background(), `
+		CREATE OR REPLACE FUNCTION weight_skip_update() RETURNS trigger
+		LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+		CREATE TRIGGER weight_skip_update BEFORE UPDATE ON channel_accounts
+		FOR EACH ROW EXECUTE FUNCTION weight_skip_update();`); err != nil {
+		t.Fatalf("装触发器失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`DROP TRIGGER IF EXISTS weight_skip_update ON channel_accounts;
+			 DROP FUNCTION IF EXISTS weight_skip_update()`); err != nil {
+			t.Errorf("拆触发器失败（后面的用例会被它挡住）: %v", err)
+		}
+	})
+
+	_, err := NewAdmin(db, nil, nil).SetAccountWeight(context.Background(), name, channelID, 2)
+	if !errors.Is(err, ErrAccountNotOnChannel) {
+		t.Fatalf("一行都没改到时应报 ErrAccountNotOnChannel，得到 %v", err)
+	}
+	if w := poolWeight(t, db, channelID, accountID); w != 1 {
+		t.Errorf("权重 = %d，期望仍是 1（这一行没被改到）", w)
+	}
+}
+
+// poolWeight 读一对关联上的权重，供「被拒之后没动过」这类断言用。
+func poolWeight(t *testing.T, db *sql.DB, channelID, accountID int64) int {
+	t.Helper()
+	var weight int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT weight FROM channel_accounts WHERE channel_id = $1 AND account_id = $2`,
+		channelID, accountID).Scan(&weight); err != nil {
+		t.Fatalf("读关联权重失败: %v", err)
+	}
+	return weight
+}
+
+// secondChannelName 读一条渠道的名字。
+//
+// 名字在插入时是随机的，所以断言「错误里带回了名字」必须先把它读出来——用
+// 一个写死的期望值等于没断言。
+func secondChannelName(t *testing.T, db *sql.DB, channelID int64) string {
+	t.Helper()
+	var name string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT name FROM channels WHERE id = $1`, channelID).Scan(&name); err != nil {
+		t.Fatalf("读渠道名失败: %v", err)
+	}
+	return name
 }
 
 // ── 记账：账号粒度的健康结论 ────────────────────────────────────────────

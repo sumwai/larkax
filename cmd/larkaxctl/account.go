@@ -23,11 +23,13 @@ const accountShortUsage = `larkaxctl account 管理上游凭证账号。
   larkaxctl account add [<名称>] [--channel <渠道>] [--weight <权重>] [--credential-env <变量名>]
   larkaxctl account list [--channel <渠道>]
   larkaxctl account update <名称> [--credential-env <变量名>]
+  larkaxctl account update <名称> --channel <渠道> --weight <权重>
   larkaxctl account remove <名称> [--force]
 
 凭证默认从标准输入读；明文凭证不能写在命令行参数里。
 add 的 stdout 只有账号名；没给 <名称> 时生成 account- 加六位随机串。
 一条渠道可以挂零个或多个账号，零账号的渠道不参与选路。
+update 换凭证，或者改这个账号在某条渠道上的权重；权重 0 表示先别用它。
 remove 在账号还挂在多条渠道上时要加 --force。
 更细的边界：larkaxctl help account。
 `
@@ -44,6 +46,7 @@ const accountUsage = `larkaxctl account 管理上游凭证账号。
   larkaxctl account add [<名称>] [--channel <渠道>] [--weight <权重>] [--credential-env <变量名>]
   larkaxctl account list [--channel <渠道>]
   larkaxctl account update <名称> [--credential-env <变量名>]
+  larkaxctl account update <名称> --channel <渠道> --weight <权重>
   larkaxctl account remove <名称> [--force]
 
 **明文凭证只能从标准输入或环境变量读，不能写在命令行参数里。**命令行参数
@@ -67,10 +70,11 @@ add 不给 <名称> 时生成 account- 加六位随机 [a-z0-9]，撞名自动�
 所以必须与 --channel 一起给；同一个账号挂在两条渠道上时，两条渠道上的权重
 各算各的。没给 --weight 时是 1。
 
-权重在挂上去的那一刻写定，今天要改它只能先把账号摘下来重挂：account remove
-（挂在多条渠道上时要 --force，它会把账号从每一条渠道上一起摘掉）之后，再用
-account add --channel ... --weight N 挂回去——那是新的一行，凭证要重新给一遍。
-重挂会清空健康记录（连败次数、最近结论）。
+**暂停一个账号用权重 0，不要 remove 再 add**：remove 删的是账号本身，它的
+健康记录（连败次数、最近结论）跟着一起消失；改权重只动那一条关联，账号、
+凭证与它在别的渠道上的权重都不动。恢复就是把权重改回一个非 0 的数：
+
+  larkaxctl account update deepseek-backup --channel deepseek-official --weight 0
 
 一条渠道上多个账号时的选法：按权重轮询，跳过被上游拒绝过的账号与权重 0 的。
 被摘掉的账号在冷却期之后会再被试一次，成功就回到池子里；换掉凭证
@@ -82,9 +86,15 @@ list 不给 --channel 时列出全部账号；给了 --channel 就只列挂在�
 （那不需要任何密钥材料）与末四位提示。没有「挂在哪条渠道上」的账号也列出来
 ——它可能正准备挂上去。
 
-update 只换凭证：挂在同一条账号上的渠道一个都不用动，下一次请求就用到新 key。
+update 换凭证：挂在同一条账号上的渠道一个都不用动，下一次请求就用到新 key。
 账号名与关联都不变，updated_at 记下换 key 的时刻。换 key 会把这个账号的健康
 状态清回「没用过」，先前凭证被上游拒过、已经摘出池子的，改完立刻重新参与选路。
+
+update 改权重：要同时给 --channel（渠道 ID 或未删除渠道的名字）与 --weight。
+改的是那一条关联，同一个账号在别的渠道上的权重不受影响；健康状态不动——它是
+一次「先别用」，不是一次故障。账号没挂在那条渠道上时报参数错（退出码 2），并
+把它实际挂着的渠道列出来。两项都给时先改权重再换凭证：前者是唯一会因命令写错
+而失败的一步，先做它就不会留下「凭证已经换了、这一步才报错」的半截状态。
 
 remove 删掉账号本身，连同它在各条渠道上的关联。只挂在一条渠道上时直接删；
 挂在多于一条渠道上时要加 --force——删一行会让每一条渠道各少一个账号，
@@ -288,21 +298,38 @@ func runAccountUpdate(args []string) error {
 	if err := jsonUnsupported("account update"); err != nil {
 		return err
 	}
-	name, envName, err := parseAccountUpdate(args)
+	parsed, err := parseAccountUpdate(args)
 	if err != nil {
 		return usageErr(err)
 	}
-	plaintext, err := readAccountCredential(envName)
-	if err != nil {
-		return usageErr(err)
+	// 只改权重时不读标准输入：这条命令的缺省凭证来源是标准输入，而
+	// `... --weight 0` 后面根本没有人在等着粘一把 key。读了它就卡在那儿。
+	var plaintext string
+	if parsed.setCredential {
+		plaintext, err = readAccountCredential(parsed.credentialEnv)
+		if err != nil {
+			return usageErr(err)
+		}
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
+		// 先改权重：它是唯一会因为「命令写错」而失败的一步（账号没挂在那条
+		// 渠道上），先做它就不会留下「凭证已经换了、这一步才报参数错」的半截
+		// 状态。两项都给时它们仍然是两件事，没有跨表的原子性可言。
+		if parsed.weight != nil {
+			if err := updateAccountWeight(ctx, db, parsed); err != nil {
+				return err
+			}
+		}
+		if !parsed.setCredential {
+			return nil
+		}
+
 		sealer, err := masterKeySealer()
 		if err != nil {
 			return err
 		}
-		info, err := channels.NewAdmin(db, sealer, nil).UpdateAccount(ctx, name, plaintext)
+		info, err := channels.NewAdmin(db, sealer, nil).UpdateAccount(ctx, parsed.name, plaintext)
 		if err != nil {
 			return err
 		}
@@ -311,6 +338,35 @@ func runAccountUpdate(args []string) error {
 			info.Name, len(info.Channels))
 		return nil
 	})
+}
+
+// updateAccountWeight 把 --weight 写进「渠道 × 账号」那一条关联。
+//
+// 渠道引用在写入之前解析一次：认不出来时给的是渠道那一侧的错（名字多余一条、
+// 不存在），与 add 走同一条路。
+func updateAccountWeight(ctx context.Context, db *sql.DB, args accountUpdateArgs) error {
+	admin := channels.NewAdmin(db, nil, nil)
+	channelID, err := admin.ChannelIDByRef(ctx, args.channelRef)
+	if err != nil {
+		return err
+	}
+	channel, err := admin.SetAccountWeight(ctx, args.name, channelID, *args.weight)
+	if err != nil {
+		// 账号没挂在那条渠道上：补救动作是改命令（换一条渠道，或者换一个
+		// 账号），与 remove 少写 --force 同一档。
+		if errors.Is(err, channels.ErrAccountNotOnChannel) {
+			return usageErr(err)
+		}
+		return err
+	}
+	_, _ = fmt.Fprintf(humanStderr(), "已把账号 %s 在渠道 %d（%s）上的权重设为 %d。\n",
+		args.name, channel.ID, channel.Name, channel.Weight)
+	if channel.Weight == 0 {
+		_, _ = fmt.Fprintf(humanStderr(),
+			"权重 0 表示先别用：这条渠道的选路会跳过它，账号、凭证与健康记录都留着。"+
+				"要恢复就把权重改回非 0。\n")
+	}
+	return nil
 }
 
 // runAccountRemove 摘掉一个账号。
@@ -393,8 +449,32 @@ func accountChannelList(chs []channels.AccountChannel) string {
 	return strings.Join(parts, "、")
 }
 
-// parseAccountUpdate 解析 update 的参数：一个必填的账号名与可选的凭证来源。
-func parseAccountUpdate(args []string) (name, envName string, err error) {
+// accountUpdateArgs 是 `account update` 解析出来的两件事：换凭证、改权重。
+//
+// 它们各自可以缺席，但不会同时缺席：一个都不给时按老行为从标准输入读凭证
+// （见 setCredential）。
+type accountUpdateArgs struct {
+	name string
+	// credentialEnv 是 --credential-env 的值；空串表示从标准输入读。
+	credentialEnv string
+	// setCredential 为 false 表示这次不换凭证，只改权重。
+	setCredential bool
+	// channelRef 与 weight 一起给：权重挂在关联上，没有渠道就没有地方放。
+	channelRef string
+	weight     *int
+}
+
+// parseAccountUpdate 解析 update 的参数：一个必填的账号名，加上换凭证或改权重。
+//
+// 三种组合各走各的路：
+//   - 不给 --weight：老行为，换凭证，凭证从 --credential-env 或标准输入读；
+//   - 给 --weight：必须同时给 --channel（见下），**不读标准输入**；
+//   - 两个都给：两件事都做。
+//
+// --weight 用指针区分「没给」与「给了 0」：0 是合法值（先别用它）。给了
+// --channel 却不给 --weight 是参数错而不是空操作——那多半是把两条命令拼错了，
+// 悄悄放过它，人会以为权重已经改过了。
+func parseAccountUpdate(args []string) (accountUpdateArgs, error) {
 	var positional string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		positional, args = args[0], args[1:]
@@ -403,24 +483,55 @@ func parseAccountUpdate(args []string) (name, envName string, err error) {
 	fs := newFlagSet("account update", flag.ContinueOnError)
 	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
 	credentialEnv := fs.String("credential-env", "", "")
-	if err = fs.Parse(args); err != nil {
-		return "", "", err
+	channel := fs.String("channel", "", "")
+	weightFlag := fs.Int("weight", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return accountUpdateArgs{}, err
 	}
 	switch {
 	case fs.NArg() == 0:
 	case fs.NArg() == 1 && positional == "":
 		positional = fs.Arg(0)
 	default:
-		return "", "", fmt.Errorf("update 只收一个账号名，多出来的 %q 没有去处", fs.Arg(0))
+		return accountUpdateArgs{}, fmt.Errorf("update 只收一个账号名，多出来的 %q 没有去处", fs.Arg(0))
 	}
-	name = strings.TrimSpace(positional)
+	name := strings.TrimSpace(positional)
 	if name == "" {
-		return "", "", errors.New("缺少账号名：把它写成位置参数")
+		return accountUpdateArgs{}, errors.New("缺少账号名：把它写成位置参数")
 	}
-	if err = checkDisplayText("账号名", name); err != nil {
-		return "", "", err
+	if err := checkDisplayText("账号名", name); err != nil {
+		return accountUpdateArgs{}, err
 	}
-	return name, strings.TrimSpace(*credentialEnv), nil
+
+	// 显式给过的 flag 才进 seen：fs.Int 的零值分不出「--weight 0」与「没给」。
+	seen := make(map[string]bool, 3)
+	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+
+	out := accountUpdateArgs{
+		name:          name,
+		credentialEnv: strings.TrimSpace(*credentialEnv),
+		channelRef:    strings.TrimSpace(*channel),
+	}
+	if seen["weight"] {
+		if *weightFlag < 0 {
+			return accountUpdateArgs{}, fmt.Errorf("--weight 不能为负，得到 %d", *weightFlag)
+		}
+		// 权重挂在渠道与账号的关联上，没有渠道就没有地方放它。替调用方猜一条
+		// 渠道，猜错就是给错误的对象设了权重。
+		if out.channelRef == "" {
+			return accountUpdateArgs{}, errors.New(
+				"--weight 挂在渠道与账号的关联上：要同时给 --channel")
+		}
+		w := *weightFlag
+		out.weight = &w
+	} else if out.channelRef != "" {
+		return accountUpdateArgs{}, errors.New("--channel 只与 --weight 一起用：单独给它没有要改的东西")
+	}
+
+	// 不给 --weight 时保持老行为：换凭证，凭证从标准输入读。不设这一条的话，
+	// `account update <名称>` 会变成一次什么都没有做的成功。
+	out.setCredential = !seen["weight"] || seen["credential-env"]
+	return out, nil
 }
 
 // readAccountCredential 读明文凭证。

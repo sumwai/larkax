@@ -210,7 +210,9 @@ complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_s
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from add' -l weight -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from list' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from remove' -l force
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from update' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from update' -l credential-env -r
+complete -c larkaxctl -n '__fish_seen_subcommand_from account; and __fish_seen_subcommand_from update' -l weight -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias; and __fish_seen_subcommand_from create' -l channel -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias; and __fish_seen_subcommand_from create' -l model -r
 complete -c larkaxctl -n '__fish_seen_subcommand_from alias; and __fish_seen_subcommand_from create' -l overrides -r

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -142,6 +143,238 @@ func TestAccountHelpCoversRemoveAndWeight(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("accountActions 里没有 remove：%v", accountActions)
+	}
+}
+
+// TestParseAccountUpdate 钉住 update 的两条路：换凭证，或者改渠道×账号的权重。
+//
+// 三件必须分得开的事：给了 --weight 就**不读标准输入**（`... --weight 0` 后面
+// 没有人在粘 key）；--weight 与 --channel 必须成对出现；一个 flag 都不给时
+// 仍是老行为（换凭证，凭证从标准输入读）。
+func TestParseAccountUpdate(t *testing.T) {
+	zero, two := 0, 2
+	cases := []struct {
+		name          string
+		args          []string
+		wantName      string
+		wantChannel   string
+		wantWeight    *int
+		wantCred      bool
+		wantCredEnv   string
+		wantErrSubstr string
+	}{
+		{name: "只给名字：老行为换凭证", args: []string{"main"},
+			wantName: "main", wantCred: true},
+		{name: "换凭证并指定来源", args: []string{"main", "--credential-env", "DEEPSEEK_KEY"},
+			wantName: "main", wantCred: true, wantCredEnv: "DEEPSEEK_KEY"},
+		{name: "只改权重", args: []string{"main", "--channel", "7", "--weight", "0"},
+			wantName: "main", wantChannel: "7", wantWeight: &zero},
+		{name: "选项在前", args: []string{"--channel", "7", "--weight", "2", "main"},
+			wantName: "main", wantChannel: "7", wantWeight: &two},
+		{name: "两件事一起做", args: []string{"main", "--channel", "7", "--weight", "2", "--credential-env", "K"},
+			wantName: "main", wantChannel: "7", wantWeight: &two, wantCred: true, wantCredEnv: "K"},
+		{name: "权重没给渠道", args: []string{"main", "--weight", "2"},
+			wantErrSubstr: "--channel"},
+		{name: "权重为负", args: []string{"main", "--channel", "7", "--weight", "-1"},
+			wantErrSubstr: "不能为负"},
+		{name: "给了渠道却没给权重", args: []string{"main", "--channel", "7"},
+			wantErrSubstr: "只与 --weight 一起"},
+		{name: "两个名字", args: []string{"a", "b"},
+			wantErrSubstr: "只收一个账号名"},
+		{name: "没有名字", args: []string{"--channel", "7", "--weight", "1"},
+			wantErrSubstr: "缺少账号名"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAccountUpdate(tc.args)
+			if tc.wantErrSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Fatalf("错误 = %v，期望包含 %q", err, tc.wantErrSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("解析失败: %v", err)
+			}
+			if got.name != tc.wantName || got.channelRef != tc.wantChannel {
+				t.Errorf("name/channel = %q/%q，期望 %q/%q",
+					got.name, got.channelRef, tc.wantName, tc.wantChannel)
+			}
+			switch {
+			case tc.wantWeight == nil && got.weight != nil:
+				t.Errorf("没给 --weight 时应当传 nil，得到 %d", *got.weight)
+			case tc.wantWeight != nil && got.weight == nil:
+				t.Errorf("期望权重 %d，得到 nil", *tc.wantWeight)
+			case tc.wantWeight != nil && *got.weight != *tc.wantWeight:
+				t.Errorf("权重 = %d，期望 %d", *got.weight, *tc.wantWeight)
+			}
+			if got.setCredential != tc.wantCred {
+				t.Errorf("setCredential = %v，期望 %v（给了 --weight 就不该去读标准输入）",
+					got.setCredential, tc.wantCred)
+			}
+			if got.credentialEnv != tc.wantCredEnv {
+				t.Errorf("credentialEnv = %q，期望 %q", got.credentialEnv, tc.wantCredEnv)
+			}
+		})
+	}
+}
+
+// TestAccountUpdateWeight 钉住 `account update --channel X --weight N` 的落库。
+//
+// 权重挂在关联上，所以断言的是**关联表**那一行。改权重不该碰账号本身：
+// updated_at 与其它渠道上的权重都不动。
+func TestAccountUpdateWeight(t *testing.T) {
+	db := testDB(t)
+	setupEnv(t)
+	channelID := createTestChannel(t, uniqueName("channel"), uniqueName("model"))
+	otherChannelID := createTestChannel(t, uniqueName("channel"), uniqueName("model"))
+
+	withStdin(t, "sk-pool-key")
+	stdout, _ := captureStreams(t, func() {
+		if err := runAccountAdd([]string{"--channel", strconv.FormatInt(channelID, 10)}); err != nil {
+			t.Fatalf("account add 失败: %v", err)
+		}
+	})
+	name := strings.TrimSpace(stdout)
+	if name == "" {
+		t.Fatal("stdout 里没有账号名")
+	}
+
+	// 标准输入是空的：读了它就会报「标准输入里没有凭证」。这条断言钉的正是
+	// 「只改权重时不读标准输入」——没有它，`... --weight 0` 在终端里会卡住。
+	withStdin(t, "")
+	_, stderr := captureStreams(t, func() {
+		if err := runAccountUpdate([]string{
+			name, "--channel", strconv.FormatInt(channelID, 10), "--weight", "0",
+		}); err != nil {
+			t.Fatalf("只改权重时不该失败: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "权重设为 0") {
+		t.Errorf("stderr 没说改成了几：%q", stderr)
+	}
+	if !strings.Contains(stderr, "先别用") {
+		t.Errorf("stderr 没说权重 0 的意思：%q", stderr)
+	}
+
+	if weight, found := accountWeightOn(t, db, channelID, name); !found || weight != 0 {
+		t.Fatalf("权重 = %d（found=%v），期望 0", weight, found)
+	}
+
+	// 机器可读那一档要看得见这个 0。判据是**解回来的那个值是不是数字 0**：
+	// weight 用指针接，字段整个消失与写成 null 都落成 nil，两种都红；而
+	// 编成字符串 "0" 会在 Unmarshal 那一步红。
+	//
+	// 只切这一条命令的档，切完复原：同一轮里后面的命令里有写类命令，
+	// 它们在 json 档下会直接报错（见 jsonUnsupported）。
+	listed := func() string {
+		saved := outputFormat
+		outputFormat = formatJSON
+		defer func() { outputFormat = saved }()
+		out, _ := captureStreams(t, func() {
+			if err := runAccountList([]string{"--channel", strconv.FormatInt(channelID, 10)}); err != nil {
+				t.Fatalf("account list --format json 失败: %v", err)
+			}
+		})
+		return out
+	}()
+	assertOnlyJSON(t, listed)
+	var doc struct {
+		Accounts []struct {
+			Name     string `json:"name"`
+			Channels []struct {
+				ID     int64 `json:"id"`
+				Weight *int  `json:"weight"`
+			} `json:"channels"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal([]byte(listed), &doc); err != nil {
+		t.Fatalf("account list 的 JSON 解不回来: %v\n%s", err, listed)
+	}
+	seen := false
+	for _, acc := range doc.Accounts {
+		if acc.Name != name {
+			continue
+		}
+		for _, ch := range acc.Channels {
+			if ch.ID != channelID {
+				continue
+			}
+			seen = true
+			if ch.Weight == nil {
+				t.Fatal("这条关联的 weight 缺失或为 null，期望数字 0")
+			}
+			if *ch.Weight != 0 {
+				t.Errorf("weight = %d，期望 0", *ch.Weight)
+			}
+		}
+	}
+	if !seen {
+		t.Fatalf("JSON 里没有账号 %s 挂在渠道 %d 上的那一条", name, channelID)
+	}
+
+	// 改回非 0：关联上确实是 1。
+	withStdin(t, "")
+	if err := runCaptured(t, func() error {
+		return runAccountUpdate([]string{
+			name, "--channel", strconv.FormatInt(channelID, 10), "--weight", "1",
+		})
+	}); err != nil {
+		t.Fatalf("改回 1 失败: %v", err)
+	}
+	if weight, _ := accountWeightOn(t, db, channelID, name); weight != 1 {
+		t.Fatalf("改回之后权重 = %d，期望 1", weight)
+	}
+
+	// 另一条渠道上没有这个账号：改那边的权重是参数错，且不该凭空建出关联。
+	err := runCaptured(t, func() error {
+		return runAccountUpdate([]string{
+			name, "--channel", strconv.FormatInt(otherChannelID, 10), "--weight", "2",
+		})
+	})
+	if err == nil {
+		t.Fatal("账号没挂在那条渠道上时应当报错")
+	}
+	if !errors.Is(err, channels.ErrAccountNotOnChannel) {
+		t.Fatalf("期望 ErrAccountNotOnChannel，得到 %v", err)
+	}
+	// 字面量 2，与 docs/cli-reference.md 的退出码表对得上：补救动作是改命令。
+	if got := exitCode(err); got != 2 {
+		t.Errorf("退出码 = %d，期望 2（%v）", got, err)
+	}
+	if !strings.Contains(err.Error(), secondName(t, db, channelID)) {
+		t.Errorf("错误里没带回它实际挂着的渠道名：%v", err)
+	}
+	if _, found := accountWeightOn(t, db, otherChannelID, name); found {
+		t.Error("被拒之后那条渠道上多出了一条关联")
+	}
+}
+
+// TestAccountUpdateWeightRejectsBadArgs 钉住参数错的三条路。
+//
+// 三条都在连库之前就报出来，退出码走参数错那一档（2）：补救动作是改命令重发。
+func TestAccountUpdateWeightRejectsBadArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"权重没给渠道", []string{"main", "--weight", "2"}, "--channel"},
+		{"权重为负", []string{"main", "--channel", "7", "--weight", "-1"}, "不能为负"},
+		{"给了渠道没给权重", []string{"main", "--channel", "7"}, "只与 --weight 一起"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := runCaptured(t, func() error { return runAccountUpdate(tc.args) })
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("错误 = %v，期望包含 %q", err, tc.want)
+			}
+			if got := exitCode(err); got != exitUsage {
+				t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+			}
+		})
 	}
 }
 

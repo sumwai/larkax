@@ -467,8 +467,9 @@ go run ./cmd/larkaxctl --env-file .env.staging wallet create --user alice
 它只读 `LARKAX_DB_DSN`、`LARKAX_LOG_LEVEL` 与 `LARKAX_ENV`，缺 DSN 才失败。
 `LARKAX_ROLE` 决定不了任何一条运维命令的成败——命令不属于任何角色——所以
 `larkaxctl migrate up` 在没有配角色的机器上照样能跑。读这个变量的是这几组命令：
-`channel create` / `channel update`（写凭证）、`account add` / `account update`
-（建账号、换 key）、`secret rotate`、以及
+`channel create` / `channel update`（写凭证）、`account add`、`account update` 换凭证
+的那一次（`account update --channel … --weight N` 只改权重，不读主密钥）、
+`secret rotate`、以及
 `plugin delete` / `plugin kv set` / `plugin kv delete`（删插件、或动它的私有存储）
 ——它们自己读 `LARKAX_MASTER_KEYS`。两个入口见 `internal/config` 的 `Load` 与
 `LoadOps`。
