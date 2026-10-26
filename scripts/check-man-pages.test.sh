@@ -28,18 +28,10 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 SCRIPT="$PWD/scripts/check-man-pages.sh"
 tmp=$(mktemp -d)
+last_out="$tmp/last.txt"
+. "$PWD/scripts/gateselftest.sh"
 trap 'rm -rf "$tmp"' EXIT
 
-pass=0
-fail=0
-
-last_out="$tmp/last.txt"
-ok() { pass=$((pass + 1)); }
-bad() {
-  echo "✗ $1"
-  sed 's/^/    | /' "$last_out" | tail -8
-  fail=$((fail + 1))
-}
 
 # ── 生成器的桩 ────────────────────────────────────────────────────────────
 #
@@ -454,6 +446,4 @@ fi
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
-echo
-echo "通过 $pass，失败 $fail"
-[ "$fail" -eq 0 ] || exit 1
+report

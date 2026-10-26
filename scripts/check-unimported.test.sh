@@ -21,18 +21,10 @@ cd "$(dirname "$0")/.."
 SCRIPT="$PWD/scripts/check-unimported.sh"
 REAL_WHITELIST="$PWD/scripts/unimported-allowlist.txt"
 tmp=$(mktemp -d)
+last_out="$tmp/last.txt"
+. "$PWD/scripts/gateselftest.sh"
 trap 'rm -rf "$tmp"' EXIT
 
-pass=0
-fail=0
-
-last_out="$tmp/last.txt"
-ok() { pass=$((pass + 1)); }
-bad() {
-  echo "✗ $1"
-  sed 's/^/    | /' "$last_out" | tail -8
-  fail=$((fail + 1))
-}
 
 # 脚本里钉住的默认上限：自测不写死它，否则改一处要动两处。
 #
@@ -522,6 +514,4 @@ grep -q '仓库自己的包 6 个' "$last_out" ||
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
-echo
-echo "通过 $pass，失败 $fail"
-[ "$fail" -eq 0 ] || exit 1
+report

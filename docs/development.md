@@ -1522,6 +1522,14 @@ go vet -tags=contract ./internal/assembly/
 扫描器坏掉时的输出和「干净」一模一样，没有自测就无法证明它还在工作
 （见 [LESSONS.md](../LESSONS.md) 第 2、7 条）。
 
+这十一份自测共用 `scripts/gateselftest.sh` 里的断言框架：`ok`、`bad` 与收尾的
+`report`（打印「通过 N，失败 M」，失败数非零时退出 1）。**桩件与各测各的判据不在
+那里**——共享的只有「怎么记一条断言、怎么把失败打出来」。这个文件不被任何门禁
+调用，只是被 `source` 进去；改它要跑全部十一个自测。
+
+`check-mutation.test.sh` 是唯一没接进去的：它的结果分三档（通过 / 失败 / 没测成），
+`report` 的两档退出码表达不了。那三档是它自己的语义，不该被统一。
+
 标识符只用 ASCII 这条约定**没有手写脚本**：它由 `golangci-lint` 的 `asciicheck`
 判（配置在 `.golangci.yml`）。原来那道 `check-test-names.sh` 已经删掉——它只判
 `func` 声明里的函数名，而 `asciicheck` 判全部标识符（形参、局部变量、包级常量），

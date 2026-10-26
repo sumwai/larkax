@@ -22,18 +22,10 @@ cd "$(dirname "$0")/.."
 SCRIPT="$PWD/scripts/check-deadcode.sh"
 REAL_WHITELIST="$PWD/scripts/deadcode-allowlist.txt"
 tmp=$(mktemp -d)
+last_out="$tmp/last.txt"
+. "$PWD/scripts/gateselftest.sh"
 trap 'rm -rf "$tmp"' EXIT
 
-pass=0
-fail=0
-
-last_out="$tmp/last.txt"
-ok() { pass=$((pass + 1)); }
-bad() {
-  echo "✗ $1"
-  sed 's/^/    | /' "$last_out" | tail -8
-  fail=$((fail + 1))
-}
 
 # 脚本里钉住的版本：自测不写死它，否则改一处要动两处。
 PINNED=$(grep -m1 '^PINNED_TOOLS_VERSION=' "$SCRIPT" | cut -d'"' -f2)
@@ -347,6 +339,4 @@ grep -q '没找到 main 包' "$last_out" || bad "扫不到 main 包 —— 要�
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
-echo
-echo "通过 $pass，失败 $fail"
-[ "$fail" -eq 0 ] || exit 1
+report

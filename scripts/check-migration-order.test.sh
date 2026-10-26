@@ -20,16 +20,8 @@ SCRIPT="$PWD/scripts/check-migration-order.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-pass=0
-fail=0
 last_out="$tmp/last.txt"
-
-ok()  { pass=$((pass + 1)); }
-bad() {
-  echo "✗ $1"
-  sed 's/^/    | /' "$last_out" | tail -8
-  fail=$((fail + 1))
-}
+. "$PWD/scripts/gateselftest.sh"
 
 # run <夹具根> [base-ref]：退出码由调用者立刻取走。
 run() { ROOT="$1" bash "$SCRIPT" "${2:-base}" >"$last_out" 2>&1; }
@@ -129,6 +121,4 @@ grep -q 'readme.sql' "$last_out" || bad "文件名无号 —— 没点名 readme
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
 # 造违规要真的红，这是第 1、3 条的职责；这里再印一遍结论供人核对。
-echo
-echo "通过 $pass，失败 $fail"
-[ "$fail" -eq 0 ] || exit 1
+report
