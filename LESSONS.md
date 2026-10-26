@@ -70,3 +70,4 @@
 | [52](lessons/52-string-literal-concat-phantom-mutant.md) | 字符串字面量之间的 `+` 会生出一条编不过却被记成 KILLED 的变异体，并把分母改掉 | 读两轮变异数字、写跨行的报错文案时 | 活 |
 | [53](lessons/53-substring-assertion-satisfied-by-other-branch.md) | 用子串钉报错时，后面那条分支的报错也能满足它 | 读到「有用例却存活」的变异体、写错误文案断言时 | 活 |
 | [54](lessons/54-dead-code-gates-skip-constants.md) | 三道死代码门只管函数、方法与整包，导出常量没有调用点它们一起也报不出来 | 改 `internal/quota` 的单位常量、`internal/snapshot` 的占位常量，或怀疑「有实现、没有调用方」而三道门全绿时 | 活 |
+| [55](lessons/55-delegation-granularity-not-parallelism.md) | 多 agent 的活慢在颗粒度与收口，不在并行度；并发上限常常一次都没碰到 | 起 workflow、把一批活拆给多个子代理之前 | 活 |
