@@ -54,6 +54,41 @@ func testDB(t *testing.T) *sql.DB {
 	return testdb.Open(t)
 }
 
+// useEmbeddedMigrations 把 goose 指到内嵌的那份迁移上，并设好方言。
+//
+// 每个用例都要做这两步，而它们没有参数、没有分支——抄十遍只会让「某一处
+// 抄漏了」变成一条只在特定用例上复现的怪错。方言写死 postgres：这个包
+// 只跑在真库上，没有第二种。
+func useEmbeddedMigrations(t *testing.T) {
+	t.Helper()
+	goose.SetBaseFS(migrate.FS())
+	if err := migrate.SetDialect("postgres"); err != nil {
+		t.Fatalf("设置方言失败: %v", err)
+	}
+}
+
+// upToLatest 把库推到最新，失败即判红。
+func upToLatest(t *testing.T, ctx context.Context, db *sql.DB) func() {
+	t.Helper()
+	return func() {
+		t.Helper()
+		if err := goose.UpContext(ctx, db, "."); err != nil {
+			t.Fatalf("前进到最新失败: %v", err)
+		}
+	}
+}
+
+// downTo 回滚到指定版本，失败即判红。
+func downTo(t *testing.T, ctx context.Context, db *sql.DB, target int64) func() {
+	t.Helper()
+	return func() {
+		t.Helper()
+		if err := goose.DownToContext(ctx, db, ".", target); err != nil {
+			t.Fatalf("回滚到 %d 失败: %v", target, err)
+		}
+	}
+}
+
 // TestStreamFreezeStepDefaultMigrationOnlyTouchesTheOldDefault 钉住这条迁移的
 // 两侧守卫。
 //
@@ -76,10 +111,7 @@ func TestStreamFreezeStepDefaultMigrationOnlyTouchesTheOldDefault(t *testing.T) 
 	// <= 目标」为止，所以目标写在本迁移下面那一版上。
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
+	useEmbeddedMigrations(t)
 
 	value := func(key string) string {
 		t.Helper()
@@ -102,18 +134,8 @@ func TestStreamFreezeStepDefaultMigrationOnlyTouchesTheOldDefault(t *testing.T) 
 			t.Fatalf("把 %s 改成 %q 失败: %v", key, raw, err)
 		}
 	}
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	// 第 5 步要临时改另一个键，先把它的原值记下来，收尾一起还原。
 	originalOther := value(otherIntKey)
@@ -214,22 +236,9 @@ func TestChannelHealthRollupModelMigration(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	useEmbeddedMigrations(t)
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 	columns := func() map[string]bool {
 		t.Helper()
 		rows, err := db.QueryContext(ctx, `
@@ -450,22 +459,9 @@ func TestUsageEventsPlanReservedMigration(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	useEmbeddedMigrations(t)
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	// usage_events 的分区：两个预建的月份与兜底分区。它们由 00001 建好，
 	// 本迁移不该改变这张清单。
@@ -619,22 +615,9 @@ func TestInboundModelAliasesMigration(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	useEmbeddedMigrations(t)
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	exists := func() bool {
 		t.Helper()
@@ -748,22 +731,9 @@ func TestChannelsModelsGINMigration(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	useEmbeddedMigrations(t)
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	// indexState 返回索引的访问方法、所在表与第一列；索引不存在时 ok 为 false。
 	// 三样一起取，是为了让「存在但形状不对」也能被同一条断言报出来。
@@ -857,24 +827,11 @@ func TestPaymentOrdersGatewayTxnUniqueMigration(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
+	useEmbeddedMigrations(t)
+	up := upToLatest(t, ctx, db)
 	// down 退到本迁移的前一条。号再往后加时，它会把后面那些迁移一并撤掉；
 	// 收尾那次 up 会把库推回最新，所以用例仍然成立。
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	down := downTo(t, ctx, db, previous)
 
 	// 收尾：先清掉本用例插的行，再把库推回最新。中途红掉时若留着重复行，
 	// 收尾那一步重建唯一索引会失败，本包别的用例就被留在旧结构上了。
@@ -1005,23 +962,10 @@ func TestPlanCarryoverMigrationRoundtrip(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
+	useEmbeddedMigrations(t)
 
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾必须
 	// 把版本推回最新。
@@ -1128,23 +1072,10 @@ func TestAccountBelowFloorMigrationRoundtrip(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
+	useEmbeddedMigrations(t)
 
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾必须
 	// 把版本推回最新。
@@ -1246,23 +1177,10 @@ func TestAccountsEntityMigration(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
+	useEmbeddedMigrations(t)
 
-	up := func() {
-		t.Helper()
-		if err := goose.UpContext(ctx, db, "."); err != nil {
-			t.Fatalf("前进到最新失败: %v", err)
-		}
-	}
-	down := func() {
-		t.Helper()
-		if err := goose.DownToContext(ctx, db, ".", previous); err != nil {
-			t.Fatalf("回滚到 %d 失败: %v", previous, err)
-		}
-	}
+	up := upToLatest(t, ctx, db)
+	down := downTo(t, ctx, db, previous)
 
 	// 用例中途红掉会把库停在回滚态，本包之后的所有用例都会跟着红——收尾
 	// 必须把版本推回最新，并清掉夹具。
@@ -1529,10 +1447,7 @@ func TestPlanSaleMigrationRoundtrip(t *testing.T) {
 	}
 	previous := version - 1
 
-	goose.SetBaseFS(migrate.FS())
-	if err := migrate.SetDialect("postgres"); err != nil {
-		t.Fatalf("设置方言失败: %v", err)
-	}
+	useEmbeddedMigrations(t)
 
 	up := func() error { return goose.UpContext(ctx, db, ".") }
 	down := func() error { return goose.DownToContext(ctx, db, ".", previous) }

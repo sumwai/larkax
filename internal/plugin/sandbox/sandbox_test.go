@@ -306,14 +306,14 @@ export default {
 
 // 会拒绝的出参是「正常解组就一定报错」的目标：用它来区分
 // 「根本没进解组」与「进了解组但恰好没写东西」。
-type 会拒绝的出参 struct {
-	解组次数 int
-	文本   string
+type rejectedPayload struct {
+	unmarshalCount int
+	text           string
 }
 
-func (s *会拒绝的出参) UnmarshalJSON(b []byte) error {
-	s.解组次数++
-	s.文本 = string(b)
+func (s *rejectedPayload) UnmarshalJSON(b []byte) error {
+	s.unmarshalCount++
+	s.text = string(b)
 	return errors.New("严格出参不接受 " + string(b))
 }
 
@@ -340,13 +340,13 @@ export default {
 	defer rt.Close()
 
 	for _, 用例 := range []struct {
-		名称   string
+		name string
 		hook string
 	}{
 		{"undefined", "onRequest"},
 		{"null", "onRoute"},
 	} {
-		t.Run(用例.名称, func(t *testing.T) {
+		t.Run(用例.name, func(t *testing.T) {
 			out := map[string]any{"旧": 1}
 			if f := rt.Call(context.Background(), 用例.hook, map[string]any{"a": 1}, &out); f != nil {
 				t.Fatalf("%s: 什么都不返回不该是失败: %v", 用例.hook, f)
@@ -355,13 +355,13 @@ export default {
 				t.Errorf("%s: 出参被改动了: %v", 用例.hook, out)
 			}
 
-			var 严格 会拒绝的出参
-			if f := rt.Call(context.Background(), 用例.hook, map[string]any{"a": 1}, &严格); f != nil {
+			var strict rejectedPayload
+			if f := rt.Call(context.Background(), 用例.hook, map[string]any{"a": 1}, &strict); f != nil {
 				t.Errorf("%s: 什么都没返回时不该进解组、更不该报失败: %v", 用例.hook, f)
 			}
-			if 严格.解组次数 != 0 {
+			if strict.unmarshalCount != 0 {
 				t.Errorf("%s: 解组被调用了 %d 次，文本 %q：什么都没返回不该走解组",
-					用例.hook, 严格.解组次数, 严格.文本)
+					用例.hook, strict.unmarshalCount, strict.text)
 			}
 		})
 	}
@@ -411,12 +411,12 @@ export default {
 	}
 	// 出参按契约在失败时不可读，所以再用插件自己的计数器确认 toJSON 没跑：
 	// 解码会执行 toJSON，而它是插件代码。
-	var 计数 map[string]any
-	if f := rt.Call(context.Background(), "onUsage", map[string]any{"a": 1}, &计数); f != nil {
+	var count map[string]any
+	if f := rt.Call(context.Background(), "onUsage", map[string]any{"a": 1}, &count); f != nil {
 		t.Fatalf("onUsage 不该失败: %v", f)
 	}
-	if 计数["解码次数"] != float64(0) {
-		t.Errorf("失败之后 toJSON 被跑了 %v 次，想要 0", 计数["解码次数"])
+	if count["解码次数"] != float64(0) {
+		t.Errorf("失败之后 toJSON 被跑了 %v 次，想要 0", count["解码次数"])
 	}
 }
 
@@ -650,7 +650,7 @@ export default { onRequest() { return { 结果: 结果 }; } };
 		if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out); f != nil {
 			t.Fatalf("import(%s): 调用不该失败: %v", spec, f)
 		}
-		if 结果, _ := out["结果"].(string); 结果 != "被拒: TypeError" {
+		if result, _ := out["结果"].(string); result != "被拒: TypeError" {
 			t.Errorf("import(%s) 的结果 = %v，想要「被拒: TypeError」（宿主没给 Importer）", spec, out["结果"])
 		}
 		rt.Close()
@@ -833,7 +833,7 @@ export default {
 		t.Fatalf("__larkax 的键 = %v，想要 [log]", ns)
 	}
 
-	敏感词 := []string{"key", "secret", "token", "cred", "password", "passwd", "auth"}
+	sensitiveWord := []string{"key", "secret", "token", "cred", "password", "passwd", "auth"}
 	seen := make([]string, 0, 8)
 	for _, list := range []any{out["ns"], out["members"], out["names"]} {
 		for _, n := range list.([]any) {
@@ -842,7 +842,7 @@ export default {
 	}
 	for _, n := range seen {
 		low := strings.ToLower(n)
-		for _, w := range 敏感词 {
+		for _, w := range sensitiveWord {
 			if strings.Contains(low, w) {
 				t.Errorf("插件看到了形如密钥的名字 %q（命中 %q）", n, w)
 			}
@@ -956,18 +956,18 @@ func TestNonObjectMetaIsAnError(t *testing.T) {
 // Compile 就不会在这个窗口内返回了。
 // Meta里的死循环报的是超时而不是形状错。
 func TestInfiniteLoopInMetaReportsTimeoutNotShapeError(t *testing.T) {
-	type 结果 struct {
+	type result struct {
 		m   *Module
 		err error
 	}
-	done := make(chan 结果, 1)
-	开始 := time.Now()
+	done := make(chan result, 1)
+	start := time.Now()
 	go func() {
 		m, err := Compile("p", `
 export const meta = { key: "k", toJSON() { while (true) {} } };
 export default { onRequest() { return {}; } };
 `)
-		done <- 结果{m: m, err: err}
+		done <- result{m: m, err: err}
 	}()
 
 	select {
@@ -981,11 +981,11 @@ export default { onRequest() { return {}; } };
 		// 这里断言**文案**而不是分类：被中断的错误本身就包着那个超时 cause，
 		// 所以「分类还在不在」穿得过外层那层包装，只有文案能区分它说的是
 		// 「meta 的形状不对」还是「超时」。
-		if 文本 := r.err.Error(); strings.Contains(文本, "meta 不是一个对象") {
+		if text := r.err.Error(); strings.Contains(text, "meta 不是一个对象") {
 			t.Errorf("文案说的是 meta 的形状，而真正的原因是超时: %v", r.err)
 		}
-		if 花了 := time.Since(开始); 花了 < inspectTimeout {
-			t.Errorf("耗时 %v 早于 %v，这条走的不是超时路径", 花了, inspectTimeout)
+		if elapsed := time.Since(start); elapsed < inspectTimeout {
+			t.Errorf("耗时 %v 早于 %v，这条走的不是超时路径", elapsed, inspectTimeout)
 		}
 	case <-time.After(inspectTimeout + 2*time.Second):
 		t.Fatal("Compile 没有在窗口内返回：读 meta 那一段没有界了")

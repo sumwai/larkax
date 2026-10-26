@@ -38,7 +38,7 @@ export default {
 		t.Fatal(err)
 	}
 
-	原文 := make(chan error, 4)
+	original := make(chan error, 4)
 	host := Host{
 		Capabilities: map[string]any{
 			"查": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
@@ -46,7 +46,7 @@ export default {
 				return moejs.Undefined(), fmt.Errorf("查询失败: %w", errors.New(mustNotLeakMark))
 			}),
 		},
-		OnError: func(name string, err error) { 原文 <- err },
+		OnError: func(name string, err error) { original <- err },
 	}
 	rt, err := m.NewRuntime(context.Background(), host, []string{"查"}, Limits{})
 	if err != nil {
@@ -58,17 +58,17 @@ export default {
 	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out); f != nil {
 		t.Fatalf("插件 catch 了，Call 不该失败: %v", f)
 	}
-	看到 := fmt.Sprint(out["看到"])
-	if strings.Contains(看到, mustNotLeakMark) {
-		t.Errorf("插件看到了宿主错误的原文: %q", 看到)
+	saw := fmt.Sprint(out["看到"])
+	if strings.Contains(saw, mustNotLeakMark) {
+		t.Errorf("插件看到了宿主错误的原文: %q", saw)
 	}
 	// 分类码必须还在：插件要能据此分支，否则消毒就等于把信息全丢了。
-	if !strings.Contains(看到, CodeUnclassified) {
-		t.Errorf("插件应看到分类码 %s，实际 %q", CodeUnclassified, 看到)
+	if !strings.Contains(saw, CodeUnclassified) {
+		t.Errorf("插件应看到分类码 %s，实际 %q", CodeUnclassified, saw)
 	}
 	// 而原文必须留在宿主这一侧——不然排查就没有依据了。
 	select {
-	case err := <-原文:
+	case err := <-original:
 		if !strings.Contains(err.Error(), mustNotLeakMark) {
 			t.Errorf("宿主日志里应当有原文，实际 %v", err)
 		}
@@ -95,7 +95,7 @@ export default {
 		t.Fatal(err)
 	}
 
-	原文 := make(chan error, 4)
+	original := make(chan error, 4)
 	host := Host{
 		Capabilities: map[string]any{
 			"查": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
@@ -106,7 +106,7 @@ export default {
 				}
 			}),
 		},
-		OnError: func(name string, err error) { 原文 <- err },
+		OnError: func(name string, err error) { original <- err },
 	}
 	rt, err := m.NewRuntime(context.Background(), host, []string{"查"}, Limits{})
 	if err != nil {
@@ -118,15 +118,15 @@ export default {
 	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out); f != nil {
 		t.Fatalf("插件 catch 了，Call 不该失败: %v", f)
 	}
-	看到 := fmt.Sprint(out["看到"])
-	if strings.Contains(看到, mustNotLeakMark) {
-		t.Errorf("插件看到了宿主错误的原文: %q", 看到)
+	saw := fmt.Sprint(out["看到"])
+	if strings.Contains(saw, mustNotLeakMark) {
+		t.Errorf("插件看到了宿主错误的原文: %q", saw)
 	}
-	if !strings.Contains(看到, CodeUnavailable) || !strings.Contains(看到, "读取插件 KV 失败") {
-		t.Errorf("插件应看到 %s 与它的固定文案，实际 %q", CodeUnavailable, 看到)
+	if !strings.Contains(saw, CodeUnavailable) || !strings.Contains(saw, "读取插件 KV 失败") {
+		t.Errorf("插件应看到 %s 与它的固定文案，实际 %q", CodeUnavailable, saw)
 	}
 	select {
-	case err := <-原文:
+	case err := <-original:
 		if !strings.Contains(err.Error(), mustNotLeakMark) {
 			t.Errorf("宿主日志里应当有原文，实际 %v", err)
 		}
@@ -161,9 +161,9 @@ export default {
 	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out); f != nil {
 		t.Fatalf("插件 catch 了，Call 不该失败: %v", f)
 	}
-	看到 := fmt.Sprint(out["看到"])
-	if !strings.Contains(看到, CodeMisconfigured) || !strings.Contains(看到, "不是一个函数") {
-		t.Errorf("插件应看到 %s 与它的说明，实际 %q", CodeMisconfigured, 看到)
+	saw := fmt.Sprint(out["看到"])
+	if !strings.Contains(saw, CodeMisconfigured) || !strings.Contains(saw, "不是一个函数") {
+		t.Errorf("插件应看到 %s 与它的说明，实际 %q", CodeMisconfigured, saw)
 	}
 }
 
@@ -189,7 +189,7 @@ export default {
 	if err != nil {
 		t.Fatal(err)
 	}
-	原文 := make(chan error, 4)
+	original := make(chan error, 4)
 	host := Host{
 		Capabilities: map[string]any{
 			"慢": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
@@ -201,7 +201,7 @@ export default {
 				return moejs.Undefined(), nil
 			}),
 		},
-		OnError: func(name string, err error) { 原文 <- err },
+		OnError: func(name string, err error) { original <- err },
 	}
 	rt, err := m.NewRuntime(context.Background(), host, []string{"慢", "之后的语句"}, Limits{CallTimeout: 40 * time.Millisecond})
 	if err != nil {
@@ -217,7 +217,7 @@ export default {
 		t.Errorf("Kind = %v，想要 ErrCallTimeout", f.Kind)
 	}
 	select {
-	case err := <-原文:
+	case err := <-original:
 		// 拒绝的理由是**预算用尽**（ErrCallTimeout），不是客户端断开——
 		// 两者都会让宿主函数在进门处被挡下，而处置完全不同。
 		if !errors.Is(err, ErrCallTimeout) {

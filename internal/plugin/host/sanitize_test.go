@@ -31,7 +31,7 @@ func invoke(fn func(context.Context, []moejs.Value) (moejs.Value, error), args [
 // assertClassified 检查一个错误：分类码正确、原文不在 Error() 里、文案非空。
 //
 // 原文传 nil 表示这个错误没有 Cause（校验失败那一类），此时跳过 errors.Is。
-func assertClassified(t *testing.T, err error, code string, 原文 error) {
+func assertClassified(t *testing.T, err error, code string, original error) {
 	t.Helper()
 	if err == nil {
 		t.Fatal("期望报错，实际没有")
@@ -50,17 +50,17 @@ func assertClassified(t *testing.T, err error, code string, 原文 error) {
 		t.Error("固定文案不能为空：插件至少要能看出这是哪一类问题")
 	}
 	// 分类不是把信息丢掉：上层要按原始错误决定重试与记账。
-	if 原文 != nil && !errors.Is(err, 原文) {
-		t.Errorf("分类之后 errors.Is 断了：%v 不再包住 %v", err, 原文)
+	if original != nil && !errors.Is(err, original) {
+		t.Errorf("分类之后 errors.Is 断了：%v 不再包住 %v", err, original)
 	}
 }
 
 // KV 的三个函数在依赖失败时都要分类，而不是把存储层的话原样转给插件。
 // KV依赖错误不回显原文。
 func TestKVDependencyErrorTextIsNotEchoed(t *testing.T) {
-	原文 := errors.New(hostRawMark)
+	original := errors.New(hostRawMark)
 	store := newFakeKV()
-	store.err = 原文
+	store.err = original
 	env := kvEnv(store, "p", 7)
 
 	cases := []struct {
@@ -74,7 +74,7 @@ func TestKVDependencyErrorTextIsNotEchoed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertClassified(t, invoke(kvFunc(t, env, tc.name), tc.args),
-				sandbox.CodeUnavailable, 原文)
+				sandbox.CodeUnavailable, original)
 		})
 	}
 }
@@ -83,8 +83,8 @@ func TestKVDependencyErrorTextIsNotEchoed(t *testing.T) {
 // 但依赖失败的原因与处置是同一个。
 // Calendar依赖错误不回显原文。
 func TestCalendarDependencyErrorTextIsNotEchoed(t *testing.T) {
-	原文 := errors.New(hostRawMark)
-	cal := &fakeCalendar{err: 原文, peakErr: 原文}
+	original := errors.New(hostRawMark)
+	cal := &fakeCalendar{err: original, peakErr: original}
 	env := calEnv(cal)
 
 	cases := []struct {
@@ -101,7 +101,7 @@ func TestCalendarDependencyErrorTextIsNotEchoed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assertClassified(t, invoke(capability(t, Standard(env), capCalendar).Funcs[tc.name], tc.args),
-				sandbox.CodeUnavailable, 原文)
+				sandbox.CodeUnavailable, original)
 		})
 	}
 }

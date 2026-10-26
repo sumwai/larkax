@@ -14,8 +14,8 @@ SCRIPT="$PWD/scripts/check-redlines.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-pass=0
-fail=0
+last_out=""
+. "$PWD/scripts/gateselftest.sh"
 
 # 样本文件名默认用 .env：赋值类模式**只在配置与脚本文件上生效**
 #（见 check-redlines.sh 里的 ASSIGN_FILES），用 sample.txt 会让它整组失效。
@@ -30,9 +30,9 @@ expect_hit() {
   ( cd "$dir" && git init -q && git add -A >/dev/null 2>&1 )
   if ( cd "$dir" && bash "$SCRIPT" >/dev/null 2>&1 ); then
     echo "✗ $name —— 应命中却报通过"
-    fail=$((fail + 1))
+    GST_FAIL=$((GST_FAIL + 1))
   else
-    pass=$((pass + 1))
+    GST_PASS=$((GST_PASS + 1))
   fi
 }
 
@@ -44,10 +44,10 @@ expect_clean() {
   printf '%s\n' "$content" > "$dir/$file"
   ( cd "$dir" && git init -q && git add -A >/dev/null 2>&1 )
   if ( cd "$dir" && bash "$SCRIPT" >/dev/null 2>&1 ); then
-    pass=$((pass + 1))
+    GST_PASS=$((GST_PASS + 1))
   else
     echo "✗ $name —— 应放行却报命中"
-    fail=$((fail + 1))
+    GST_FAIL=$((GST_FAIL + 1))
   fi
 }
 
@@ -157,14 +157,12 @@ printf '%s\n' 'password=correct-horse-battery-staple' > "$uncovered_dir/new_file
 ( cd "$uncovered_dir" && git init -q )
 if ( cd "$uncovered_dir" && bash "$SCRIPT" --all >/dev/null 2>&1 ); then
   echo "✗ --all 漏掉了尚未 add 的文件"
-  fail=$((fail + 1))
+  GST_FAIL=$((GST_FAIL + 1))
 else
-  pass=$((pass + 1))
+  GST_PASS=$((GST_PASS + 1))
 fi
 
 
 # ── 结果 ──────────────────────────────────────────────────────────────────
 
-echo
-echo "通过 $pass，失败 $fail"
-[ "$fail" -eq 0 ] || exit 1
+report

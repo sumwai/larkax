@@ -24,20 +24,20 @@ import (
 // 而不是精确的调度延迟。
 // 死循环被调用超时拉回来。
 func TestInfiniteLoopIsCutOffByCallTimeout(t *testing.T) {
-	const 超时 = 40 * time.Millisecond
+	const timeout = 40 * time.Millisecond
 	m, err := Compile("p", `export default { onRequest() { while (true) {} } };`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{CallTimeout: 超时})
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{CallTimeout: timeout})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close()
 
-	开始 := time.Now()
+	start := time.Now()
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
-	花了 := time.Since(开始)
+	elapsed := time.Since(start)
 
 	if f == nil {
 		t.Fatal("死循环应当返回失败")
@@ -49,11 +49,11 @@ func TestInfiniteLoopIsCutOffByCallTimeout(t *testing.T) {
 		t.Errorf("失败信息应带上插件与 hook，实际 Plugin=%q Hook=%q", f.Plugin, f.Hook)
 	}
 	// 关键：不能早于时限返回（那说明不是超时路径），也不能晚太多（那说明拉不回来）。
-	if 花了 < 超时 {
-		t.Errorf("耗时 %v 早于超时 %v，这条走的不是超时路径", 花了, 超时)
+	if elapsed < timeout {
+		t.Errorf("耗时 %v 早于超时 %v，这条走的不是超时路径", elapsed, timeout)
 	}
-	if 花了 > 超时*2+time.Second {
-		t.Errorf("耗时 %v 远超超时 %v，中断没能及时生效", 花了, 超时)
+	if elapsed > timeout*2+time.Second {
+		t.Errorf("耗时 %v 远超超时 %v，中断没能及时生效", elapsed, timeout)
 	}
 	if !rt.Unusable() {
 		t.Error("超时之后 runtime 应当是不可用的")
@@ -114,9 +114,9 @@ export default {
 	defer rt.Close()
 
 	var out map[string]any
-	开始 := time.Now()
+	start := time.Now()
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out)
-	花了 := time.Since(开始)
+	elapsed := time.Since(start)
 
 	if f == nil {
 		t.Fatalf("内存超限应当返回失败，实际出参 = %v（说明 catch 把它吃掉了）", out)
@@ -128,12 +128,12 @@ export default {
 	if !errors.Is(f, moejs.ErrMemoryLimit) {
 		t.Errorf("errors.Is(f, moejs.ErrMemoryLimit) = false，Cause = %v", f.Cause)
 	}
-	if _, 抓到了 := out["抓到了"]; 抓到了 {
+	if _, caught := out["抓到了"]; caught {
 		t.Errorf("脚本的 catch 吃掉了内存错误: %v", out)
 	}
 	// 时间上不能拖到调用超时：内存超限是分配时就发现，不是等超时。
-	if 花了 >= 5*time.Second {
-		t.Errorf("耗时 %v 说明它是被 CallTimeout 拉回来的，不是内存超限", 花了)
+	if elapsed >= 5*time.Second {
+		t.Errorf("耗时 %v 说明它是被 CallTimeout 拉回来的，不是内存超限", elapsed)
 	}
 	if !rt.Unusable() {
 		t.Error("内存超限之后 runtime 应当是不可用的")
@@ -145,7 +145,7 @@ export default {
 // 而且耗时远小于调用预算。
 // 内存上限的错误信息带上上限值。
 func TestMemoryLimitErrorCarriesTheLimitValue(t *testing.T) {
-	const 上限 = 1 << 20
+	const limit = 1 << 20
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -157,15 +157,15 @@ export default {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{MemoryBytes: 上限, CallTimeout: 5 * time.Second})
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{MemoryBytes: limit, CallTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close()
 
-	开始 := time.Now()
+	start := time.Now()
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
-	花了 := time.Since(开始)
+	elapsed := time.Since(start)
 	if f == nil {
 		t.Fatal("内存超限应当返回失败")
 	}
@@ -175,15 +175,15 @@ export default {
 	if f.Cause == nil {
 		t.Fatal("Cause 不该为空")
 	}
-	文本 := f.Cause.Error()
-	if !strings.Contains(文本, "memory limit exceeded") {
-		t.Errorf("Cause 应说明是内存超限，实际 %q", 文本)
+	text := f.Cause.Error()
+	if !strings.Contains(text, "memory limit exceeded") {
+		t.Errorf("Cause 应说明是内存超限，实际 %q", text)
 	}
-	if !strings.Contains(文本, "1048576") {
-		t.Errorf("Cause 应带上上限值 1048576，实际 %q", 文本)
+	if !strings.Contains(text, "1048576") {
+		t.Errorf("Cause 应带上上限值 1048576，实际 %q", text)
 	}
-	if 花了 > time.Second {
-		t.Errorf("耗时 %v，说明它是被 CallTimeout 拉回来的而不是内存超限", 花了)
+	if elapsed > time.Second {
+		t.Errorf("耗时 %v，说明它是被 CallTimeout 拉回来的而不是内存超限", elapsed)
 	}
 }
 
@@ -202,20 +202,20 @@ export default {
 	if err != nil {
 		t.Fatal(err)
 	}
-	大入参 := map[string]any{"内容": string(make([]byte, 200))}
-	payload, err := json.Marshal(大入参)
+	bigArg := map[string]any{"内容": string(make([]byte, 200))}
+	payload, err := json.Marshal(bigArg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	上限 := len(payload) - 1 // 比实际差一个字节，确保越界
+	limit := len(payload) - 1 // 比实际差一个字节，确保越界
 
-	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{MaxInputBytes: 上限})
+	rt, err := m.NewRuntime(context.Background(), Host{}, nil, Limits{MaxInputBytes: limit})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close()
 
-	f := rt.Call(context.Background(), "onRequest", 大入参, nil)
+	f := rt.Call(context.Background(), "onRequest", bigArg, nil)
 	if f == nil {
 		t.Fatal("入参超限应当返回失败")
 	}
@@ -245,8 +245,8 @@ func TestInputByteLimitBoundaryIsStrictlyGreater(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	入参 := map[string]string{"k": "v"}
-	payload, err := json.Marshal(入参)
+	arg := map[string]string{"k": "v"}
+	payload, err := json.Marshal(arg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestInputByteLimitBoundaryIsStrictlyGreater(t *testing.T) {
 	}
 	defer rt.Close()
 	var out map[string]any
-	if f := rt.Call(context.Background(), "onRequest", 入参, &out); f != nil {
+	if f := rt.Call(context.Background(), "onRequest", arg, &out); f != nil {
 		t.Errorf("恰好等于上限应当放行，实际 %v", f)
 	}
 	if out["字段数"] != float64(1) {
@@ -269,7 +269,7 @@ func TestInputByteLimitBoundaryIsStrictlyGreater(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt2.Close()
-	f := rt2.Call(context.Background(), "onRequest", 入参, nil)
+	f := rt2.Call(context.Background(), "onRequest", arg, nil)
 	if f == nil || !errors.Is(f, ErrTooLarge) {
 		t.Errorf("少一个字节就应当拒绝，实际 %v", f)
 	}
@@ -332,8 +332,8 @@ func TestOutputOverLimitReturnsErrTooLargeWithoutWritingOutput(t *testing.T) {
 	if rt.Unusable() {
 		t.Error("字节超限不该把 runtime 弄成不可用")
 	}
-	var 第二次 map[string]any
-	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &第二次); f == nil || !errors.Is(f, ErrTooLarge) {
+	var second map[string]any
+	if f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &second); f == nil || !errors.Is(f, ErrTooLarge) {
 		t.Errorf("第二次调用应当同样报 ErrTooLarge（runtime 仍可用），实际 %v", f)
 	}
 }
@@ -362,8 +362,8 @@ func TestOutputOverLimitReturnsErrTooLargeWithoutWritingOutput(t *testing.T) {
 // 宿主函数阻塞时Interrupt无效。
 func TestInterruptDoesNotStopBlockedHostFunc(t *testing.T) {
 	const (
-		宿主耗时 = 200 * time.Millisecond
-		调用超时 = 50 * time.Millisecond
+		hostElapsed = 200 * time.Millisecond
+		callTimeout = 50 * time.Millisecond
 	)
 	m, err := Compile("p", `
 export default {
@@ -377,33 +377,33 @@ export default {
 	if err != nil {
 		t.Fatal(err)
 	}
-	慢函数结束 := make(chan struct{})
-	之后被调用 := make(chan struct{}, 1)
+	slowFnFinished := make(chan struct{})
+	calledAfterwards := make(chan struct{}, 1)
 	host := Host{Capabilities: map[string]any{
 		"慢": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
 			// 这段**故意**不看 ctx：它在模拟一个卡住的宿主函数。
 			// 看 ctx 的版本由另外两条测试覆盖。
-			time.Sleep(宿主耗时)
-			close(慢函数结束)
+			time.Sleep(hostElapsed)
+			close(slowFnFinished)
 			return moejs.Undefined(), nil
 		}),
 		"之后的语句": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
 			select {
-			case 之后被调用 <- struct{}{}:
+			case calledAfterwards <- struct{}{}:
 			default:
 			}
 			return moejs.Undefined(), nil
 		}),
 	}}
-	rt, err := m.NewRuntime(context.Background(), host, []string{"慢", "之后的语句"}, Limits{CallTimeout: 调用超时})
+	rt, err := m.NewRuntime(context.Background(), host, []string{"慢", "之后的语句"}, Limits{CallTimeout: callTimeout})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close()
 
-	开始 := time.Now()
+	start := time.Now()
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
-	返回用时 := time.Since(开始)
+	returnedAfter := time.Since(start)
 
 	if f == nil || !errors.Is(f, ErrCallTimeout) {
 		t.Fatalf("应当按调用超时返回，实际 %v", f)
@@ -412,15 +412,15 @@ export default {
 		t.Error("宿主函数卡住导致的超时之后，runtime 应当是不可用的")
 	}
 	// Call 是在超时附近返回的：它不等宿主函数。
-	if 返回用时 > 调用超时*2+time.Second {
-		t.Errorf("Call 返回用了 %v，远超超时 %v", 返回用时, 调用超时)
+	if returnedAfter > callTimeout*2+time.Second {
+		t.Errorf("Call 返回用了 %v，远超超时 %v", returnedAfter, callTimeout)
 	}
 
 	// 关键断言一：宿主函数跑满了自己那 200ms，**没有被 Interrupt 打断**。
 	select {
-	case <-慢函数结束:
-		if 花了 := time.Since(开始); 花了 < 宿主耗时 {
-			t.Errorf("宿主函数在 %v 就结束了，早于它自己的 %v——它被打断了？", 花了, 宿主耗时)
+	case <-slowFnFinished:
+		if elapsed := time.Since(start); elapsed < hostElapsed {
+			t.Errorf("宿主函数在 %v 就结束了，早于它自己的 %v——它被打断了？", elapsed, hostElapsed)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("宿主函数两秒内没结束")
@@ -431,7 +431,7 @@ export default {
 	// 这一条是「宿主函数自带 deadline」的价值所在。延时到超时之后，
 	// 插件那句 `globalThis.__larkax.之后的语句()` 照旧会执行到宿主这一侧，
 	// 但 wrapFunc 先看 ctx 就返回错误——实现本体一次都没被进入。
-	if len(之后被调用) != 0 {
+	if len(calledAfterwards) != 0 {
 		t.Error("超时之后宿主函数的实现本体仍被进入了：插件在超时后还能做实事")
 	}
 }
@@ -441,7 +441,7 @@ export default {
 // 见下一条测试。这里让请求 ctx 带上 deadline，宿主函数便能在预算内返回。
 // 宿主函数尊重请求ctx时能及时返回。
 func TestHostFuncRespectingRequestCtxReturnsInTime(t *testing.T) {
-	const 宿主耗时 = 200 * time.Millisecond
+	const hostElapsed = 200 * time.Millisecond
 	m, err := Compile("p", `
 export default {
   onRequest() {
@@ -459,7 +459,7 @@ export default {
 			select {
 			case <-ctx.Done():
 				return moejs.Undefined(), context.Cause(ctx)
-			case <-time.After(宿主耗时):
+			case <-time.After(hostElapsed):
 				return moejs.Undefined(), nil
 			}
 		}),
@@ -467,18 +467,18 @@ export default {
 
 	// 请求 ctx 带上 50ms 的预算；Call 用的是另一个从不取消的 ctx，
 	// 这样「谁先返回」只取决于宿主函数，不会与 Call 自己的 ctx.Done() 抢。
-	请求ctx, 停请求 := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer 停请求()
-	rt, err := m.NewRuntime(请求ctx, host, []string{"慢"}, Limits{CallTimeout: 5 * time.Second})
+	requestCtx, stopRequest := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stopRequest()
+	rt, err := m.NewRuntime(requestCtx, host, []string{"慢"}, Limits{CallTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close()
 
 	var out map[string]any
-	开始 := time.Now()
+	start := time.Now()
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, &out)
-	花了 := time.Since(开始)
+	elapsed := time.Since(start)
 
 	// 插件自己 catch 住了，所以 Call 本身不算失败——这正是「宿主函数自己返回」
 	// 的形态：插件有机会收拾，而不是被硬中断。
@@ -488,8 +488,8 @@ export default {
 	if out["慢"] == "正常返回" {
 		t.Error("宿主函数不该跑满 200ms")
 	}
-	if 花了 >= 宿主耗时 {
-		t.Errorf("Call 用了 %v，宿主函数没有自己提前返回", 花了)
+	if elapsed >= hostElapsed {
+		t.Errorf("Call 用了 %v，宿主函数没有自己提前返回", elapsed)
 	}
 }
 
@@ -502,39 +502,39 @@ export default {
 // ctx——那时没有任何一道防线，一次慢查询能把请求挂到上游超时。
 // CallTimeout进入宿主函数的ctx。
 func TestCallTimeoutReachesHostFuncCtx(t *testing.T) {
-	const 调用超时 = 30 * time.Millisecond
+	const callTimeout = 30 * time.Millisecond
 	m, err := Compile("p", `export default { onRequest() { globalThis.__larkax.看(); return {}; } };`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	type 观察 struct {
-		有deadline bool
-		ctx结束     bool
+	type observed struct {
+		hasDeadline bool
+		ctxDone     bool
 	}
-	结果 := make(chan 观察, 1)
+	result := make(chan observed, 1)
 	host := Host{Capabilities: map[string]any{
 		"看": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
-			var o 观察
-			_, o.有deadline = ctx.Deadline()
+			var o observed
+			_, o.hasDeadline = ctx.Deadline()
 			select {
 			case <-ctx.Done():
-				o.ctx结束 = true
+				o.ctxDone = true
 			case <-time.After(150 * time.Millisecond):
 			}
-			结果 <- o
+			result <- o
 			return moejs.Undefined(), nil
 		}),
 	}}
 	// 请求 ctx 没有 deadline，只有 CallTimeout。
-	rt, err := m.NewRuntime(context.Background(), host, []string{"看"}, Limits{CallTimeout: 调用超时})
+	rt, err := m.NewRuntime(context.Background(), host, []string{"看"}, Limits{CallTimeout: callTimeout})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rt.Close()
 
-	开始 := time.Now()
+	start := time.Now()
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
-	返回用时 := time.Since(开始)
+	returnedAfter := time.Since(start)
 
 	// **这条测试不钉 Call 的结局，只钉宿主函数拿到的 ctx。**
 	//
@@ -549,20 +549,20 @@ func TestCallTimeoutReachesHostFuncCtx(t *testing.T) {
 		t.Fatalf("失败时只该是调用超时，实际 %v", f)
 	}
 	// 无论哪种结局，都不该远超预算：宿主函数不该跑满它自己那 150ms。
-	if 返回用时 > 100*time.Millisecond {
-		t.Errorf("Call 用了 %v，超过调用超时 %v 太多", 返回用时, 调用超时)
+	if returnedAfter > 100*time.Millisecond {
+		t.Errorf("Call 用了 %v，超过调用超时 %v 太多", returnedAfter, callTimeout)
 	}
 	select {
-	case o := <-结果:
+	case o := <-result:
 		// **宿主函数的 ctx 必须带上调用超时。** 这一条是本包的核心保证：
 		// 宿主阻塞时 Interrupt 无效（见上面那条），所以宿主函数唯一能靠的
 		// 就是自己的 ctx 会结束。若这里拿到的是「永不结束的 ctx」，
 		// 「每个宿主函数自带 deadline」就退化成调用方的义务——
 		// 而调用方传 context.Background() 是最常见的写法。
-		if !o.有deadline {
+		if !o.hasDeadline {
 			t.Error("宿主函数的 ctx 没有 deadline：调用超时没有传下去，宿主只能靠 Interrupt，而它对阻塞的宿主无效")
 		}
-		if !o.ctx结束 {
+		if !o.ctxDone {
 			t.Error("宿主函数的 ctx 没有结束：它拿不到「该收手了」的信号")
 		}
 	case <-time.After(2 * time.Second):
@@ -578,7 +578,7 @@ func TestClientCancelReturnsErrClientCanceled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, 取消请求 := context.WithCancel(context.Background())
+	ctx, cancelRequest := context.WithCancel(context.Background())
 	// 调用超时给得很宽，确保它不会先于取消触发。
 	rt, err := m.NewRuntime(ctx, Host{}, nil, Limits{CallTimeout: 30 * time.Second})
 	if err != nil {
@@ -586,10 +586,10 @@ func TestClientCancelReturnsErrClientCanceled(t *testing.T) {
 	}
 	defer rt.Close()
 
-	go func() { time.Sleep(50 * time.Millisecond); 取消请求() }()
-	开始 := time.Now()
+	go func() { time.Sleep(50 * time.Millisecond); cancelRequest() }()
+	start := time.Now()
 	f := rt.Call(ctx, "onRequest", map[string]any{"a": 1}, nil)
-	花了 := time.Since(开始)
+	elapsed := time.Since(start)
 
 	if f == nil {
 		t.Fatal("取消应当返回失败")
@@ -604,8 +604,8 @@ func TestClientCancelReturnsErrClientCanceled(t *testing.T) {
 		t.Errorf("Cause 应当是 context.Canceled，实际 %v", f.Cause)
 	}
 	// 是「取消」把它拉回来的，不是超时（超时是 30s）。
-	if 花了 > 5*time.Second {
-		t.Errorf("耗时 %v 说明是别的原因返回的", 花了)
+	if elapsed > 5*time.Second {
+		t.Errorf("耗时 %v 说明是别的原因返回的", elapsed)
 	}
 	if !rt.Unusable() {
 		t.Error("取消之后 runtime 应当是不可用的")
@@ -632,12 +632,12 @@ export default {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, 取消请求 := context.WithCancel(context.Background())
-	取消请求()
-	var 调到 atomic.Int64
+	ctx, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+	var invoked atomic.Int64
 	host := Host{Capabilities: map[string]any{
 		"不该被调到": HostFunc(func(c context.Context, args []moejs.Value) (moejs.Value, error) {
-			调到.Add(1)
+			invoked.Add(1)
 			return moejs.Undefined(), nil
 		}),
 	}}
@@ -649,7 +649,7 @@ export default {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("错误 = %v，想要包住 context.Canceled", err)
 	}
-	if got := 调到.Load(); got != 0 {
+	if got := invoked.Load(); got != 0 {
 		t.Errorf("ctx 已取消，宿主函数却被调了 %d 次", got)
 	}
 }
@@ -668,8 +668,8 @@ func TestZeroAndNegativeLimitsFallBackToDefaults(t *testing.T) {
 		}
 	}
 	// 显式设的值不能被改掉。
-	显式 := Limits{CallTimeout: 7 * time.Second, MemoryBytes: 1 << 20, MaxInputBytes: 5, MaxOutputBytes: 6}
-	if got := 显式.normalize(); got != 显式 {
+	explicit := Limits{CallTimeout: 7 * time.Second, MemoryBytes: 1 << 20, MaxInputBytes: 5, MaxOutputBytes: 6}
+	if got := explicit.normalize(); got != explicit {
 		t.Errorf("normalize 改动了显式设的值: %+v", got)
 	}
 	// 只设一项时，其余三项补默认。
@@ -724,17 +724,17 @@ func TestInjectCtxIsNeverNil(t *testing.T) {
 	}
 	// 「非 nil 会覆盖」那一半同样要钉：用一个可区分的 ctx，
 	// 断言槽里装的就是它，而不是原来那个 DefaultBackground。
-	注入ctx := context.WithValue(context.Background(), 注入标记{}, "注入")
-	if err := rs.inject(注入ctx, Host{}, nil); err != nil {
+	injectedCtx := context.WithValue(context.Background(), injectedMarker{}, "注入")
+	if err := rs.inject(injectedCtx, Host{}, nil); err != nil {
 		t.Fatalf("inject 不该失败: %v", err)
 	}
-	if rs.injectCtx != 注入ctx {
+	if rs.injectCtx != injectedCtx {
 		t.Error("inject 收到非 nil ctx 之后没有覆盖 injectCtx")
 	}
 }
 
 // 注入标记是上面那条用例里 WithValue 的键，只用来让 ctx 可区分。
-type 注入标记 struct{}
+type injectedMarker struct{}
 
 // 注入时的父 ctx 还活着、而这次调用的 ctx 是另一个时，
 // 合并出来的调用 ctx 必须还是活的。
@@ -751,24 +751,24 @@ func TestAliveParentCtxKeepsCallCtxAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	父ctx, 停父 := context.WithCancel(context.Background())
-	defer 停父()
+	parentCtx, stopParent := context.WithCancel(context.Background())
+	defer stopParent()
 
-	var 进入 atomic.Int64
-	看到 := make(chan error, 1)
+	var entered atomic.Int64
+	saw := make(chan error, 1)
 	host := Host{Capabilities: map[string]any{
 		"看": HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
-			进入.Add(1)
+			entered.Add(1)
 			// 非阻塞发送：万一实现被进入不止一次，第二次不能把宿主调用
 			// 卡在这里——卡住的宿主函数收不到 Interrupt，用例会白等满超时。
 			select {
-			case 看到 <- context.Cause(ctx):
+			case saw <- context.Cause(ctx):
 			default:
 			}
 			return moejs.Undefined(), nil
 		}),
 	}}
-	rt, err := m.NewRuntime(父ctx, host, []string{"看"}, Limits{CallTimeout: 5 * time.Second})
+	rt, err := m.NewRuntime(parentCtx, host, []string{"看"}, Limits{CallTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,14 +778,14 @@ func TestAliveParentCtxKeepsCallCtxAlive(t *testing.T) {
 	f := rt.Call(context.Background(), "onRequest", map[string]any{"a": 1}, nil)
 
 	// 先看宿主函数有没有被进入：变异版无论被中断在哪一步，这个计数都是 0。
-	if got := 进入.Load(); got != 1 {
+	if got := entered.Load(); got != 1 {
 		t.Fatalf("宿主函数被进入 %d 次，想要 1：父 ctx 活着时这次调用的 ctx 不该被取消", got)
 	}
 	if f != nil {
 		t.Fatalf("调用不该失败: %v", f)
 	}
 	select {
-	case cause := <-看到:
+	case cause := <-saw:
 		if cause != nil {
 			t.Errorf("宿主函数拿到的 ctx 已经有 cause（%v），想要没有", cause)
 		}

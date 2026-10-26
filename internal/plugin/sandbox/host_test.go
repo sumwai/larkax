@@ -286,19 +286,19 @@ export default {
 // 宿主函数在ctx已取消时不进入实现。
 func TestHostFuncWithCanceledCtxNeverEntersImpl(t *testing.T) {
 	// 宿主函数若被进入，这个计数从另一条路径被写，所以用 atomic。
-	var 进入 atomic.Int64
-	原文 := make(chan error, 4)
+	var entered atomic.Int64
+	original := make(chan error, 4)
 
-	已取消, 取消 := context.WithCancel(context.Background())
-	取消()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	rs := newRuntime("p", Limits{})
-	probe := wrapFunc(rs, 已取消, "probe",
+	probe := wrapFunc(rs, canceled, "probe",
 		HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
-			进入.Add(1)
+			entered.Add(1)
 			return moejs.Undefined(), nil
 		}),
-		func(name string, err error) { 原文 <- err })
+		func(name string, err error) { original <- err })
 
 	_, err := probe(nil, moejs.Undefined(), nil)
 	if err == nil {
@@ -308,14 +308,14 @@ func TestHostFuncWithCanceledCtxNeverEntersImpl(t *testing.T) {
 	if !errors.As(err, &ce) || ce.Code != CodeCanceled {
 		t.Errorf("错误 = %v，想要 %s 那一类", err, CodeCanceled)
 	}
-	if n := 进入.Load(); n != 0 {
+	if n := entered.Load(); n != 0 {
 		t.Errorf("宿主函数被进入了 %d 次，想要 0", n)
 	}
 	// 原文进了宿主日志——插件侧看不见它，排查只能靠这一份。
 	select {
-	case 原始错误 := <-原文:
-		if !errors.Is(原始错误, context.Canceled) {
-			t.Errorf("宿主日志里的原文 = %v，想要 context.Canceled", 原始错误)
+	case originalErr := <-original:
+		if !errors.Is(originalErr, context.Canceled) {
+			t.Errorf("宿主日志里的原文 = %v，想要 context.Canceled", originalErr)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("宿主函数被拒绝时没有把原因报给 OnError")
@@ -325,13 +325,13 @@ func TestHostFuncWithCanceledCtxNeverEntersImpl(t *testing.T) {
 	rs2 := newRuntime("p", Limits{})
 	probe2 := wrapFunc(rs2, context.Background(), "probe",
 		HostFunc(func(ctx context.Context, args []moejs.Value) (moejs.Value, error) {
-			进入.Add(1)
+			entered.Add(1)
 			return moejs.Undefined(), nil
 		}), nil)
 	if _, err := probe2(nil, moejs.Undefined(), nil); err != nil {
 		t.Fatalf("ctx 正常时不该报错: %v", err)
 	}
-	if n := 进入.Load(); n != 1 {
+	if n := entered.Load(); n != 1 {
 		t.Errorf("ctx 正常时宿主函数应被进入 1 次，实际共 %d 次", n)
 	}
 }
@@ -345,16 +345,16 @@ func TestHostFuncSeesCtxCanceledMidCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, 取消 := context.WithCancel(context.Background())
-	看到取消 := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	sawCancel := make(chan error, 1)
 	host := Host{Capabilities: map[string]any{
 		"等": HostFunc(func(c context.Context, args []moejs.Value) (moejs.Value, error) {
 			select {
 			case <-c.Done():
-				看到取消 <- context.Cause(c)
+				sawCancel <- context.Cause(c)
 				return moejs.Undefined(), context.Cause(c)
 			case <-time.After(2 * time.Second):
-				看到取消 <- errors.New("等超时了")
+				sawCancel <- errors.New("等超时了")
 				return moejs.Undefined(), nil
 			}
 		}),
@@ -364,7 +364,7 @@ func TestHostFuncSeesCtxCanceledMidCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.Close()
-	go func() { time.Sleep(50 * time.Millisecond); 取消() }()
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 
 	f := rt.Call(ctx, "onRequest", map[string]any{"a": 1}, nil)
 	if f == nil {
@@ -374,7 +374,7 @@ func TestHostFuncSeesCtxCanceledMidCall(t *testing.T) {
 		t.Errorf("Kind = %v，想要 ErrClientCanceled", f.Kind)
 	}
 	select {
-	case err := <-看到取消:
+	case err := <-sawCancel:
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("宿主函数看到的 cause = %v，想要 context.Canceled", err)
 		}
@@ -443,12 +443,12 @@ export default {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var 第一次 map[string]any
-	if f := rt1.Call(context.Background(), "onRequest", map[string]any{"tag": "第一个请求"}, &第一次); f != nil {
+	var first map[string]any
+	if f := rt1.Call(context.Background(), "onRequest", map[string]any{"tag": "第一个请求"}, &first); f != nil {
 		t.Fatal(f)
 	}
-	if 第一次["tag"] != "第一个请求" {
-		t.Fatalf("第一个 runtime 的 onRequest 没拿到入参: %v", 第一次)
+	if first["tag"] != "第一个请求" {
+		t.Fatalf("第一个 runtime 的 onRequest 没拿到入参: %v", first)
 	}
 	rt1.Close()
 
@@ -457,12 +457,12 @@ export default {
 		t.Fatal(err)
 	}
 	defer rt2.Close()
-	var 第二次 map[string]any
-	if f := rt2.Call(context.Background(), "onUsage", map[string]any{"a": 1}, &第二次); f != nil {
+	var second map[string]any
+	if f := rt2.Call(context.Background(), "onUsage", map[string]any{"a": 1}, &second); f != nil {
 		t.Fatal(f)
 	}
-	if 第二次["上次的"] != "无" {
-		t.Errorf("新 runtime 读到了上一个 runtime 的数据: %v", 第二次)
+	if second["上次的"] != "无" {
+		t.Errorf("新 runtime 读到了上一个 runtime 的数据: %v", second)
 	}
 }
 
@@ -567,7 +567,7 @@ export default definePlugin({
 				return
 			}
 			defer rt.Close()
-			for 第几次 := 0; 第几次 < 3; 第几次++ {
+			for whichAttempt := 0; whichAttempt < 3; whichAttempt++ {
 				var out map[string]any
 				f := rt.Call(context.Background(), "onRequest", map[string]any{"model": want}, &out)
 				if f != nil {
@@ -575,7 +575,7 @@ export default definePlugin({
 					return
 				}
 				if out["model"] != want || out["上次"] != want {
-					errs <- fmt.Errorf("goroutine %d 第 %d 次: %v", i, 第几次, out)
+					errs <- fmt.Errorf("goroutine %d 第 %d 次: %v", i, whichAttempt, out)
 					return
 				}
 			}
