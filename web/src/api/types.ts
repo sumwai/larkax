@@ -226,7 +226,16 @@ export interface ModelDetailData {
   capabilities: ModelCapabilities
   modalities_input: string[]
   modalities_output: string[]
-  reasoning_options?: unknown[] | null
+  /**
+   * 推理项只有两态：`[]` 表示没有可选项，非空数组表示有哪几项。
+   *
+   * 没有 `null` 态——列是 `NOT NULL DEFAULT '[]'`（`internal/migrate/sql/00001_init.sql`）。
+   * 库里即便出现字面量 JSON `null`（异常数据），响应里也是 `[]`：那是把异常值抹平，不是第三种状态。
+   *
+   * 键总是出现：结构体字段没有 `omitempty`，`newModelDetailJSON` 把 nil 换成空切片。
+   * 判据见 `internal/consoleapi/handlers_model_detail.go`。
+   */
+  reasoning_options: unknown[]
   canonical_model_id: string
   knowledge_cutoff: string | null
   release_date: string | null
