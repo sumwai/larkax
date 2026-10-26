@@ -257,6 +257,10 @@ func TestSaveWritesUsageEvent(t *testing.T) {
 // 等价变异（gremlins CONDITIONALS_BOUNDARY，durationMS 开头 `d <= 0` 的 `<=`
 // 改成 `<`）：d 恰好为 0 时两支返回的都是 0——`0 / Millisecond` 是 0，
 // `0 % Millisecond` 也是 0，于是取整那一支不会加 1，行为逐点相同。
+//
+// 负数是这条等价的前提，不是漏掉的一格：Duration 由调用侧量成「结束时刻减去
+// 开始时刻」（同一个进程里的两个读取，单调时钟不会倒退），零值表示没测到。
+// 所以走到这里的 d 只有非负两档；`<` 与 `<=` 只在 d 为负时才会分开。
 func TestSaveWritesUsageEventDuration(t *testing.T) {
 	cases := []struct {
 		name string
