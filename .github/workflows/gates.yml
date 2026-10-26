@@ -8,7 +8,8 @@ name: 门禁
 #
 # 这里曾经只在 ci.yml 里，于是 release.yml 自称「发布前的最后一道门」，实际
 # 只重跑了 `go test` 与集成测试门禁：`gofmt`、`go vet`、`golangci-lint`、
-# 分层自查、红线扫描、三道死代码门、函数名门禁、索引一致性门禁、契约测试
+# 分层自查、红线扫描、三道死代码门、函数名门禁（现已并入 lint 的 asciicheck）、
+# 索引一致性门禁、契约测试
 # **一道都没跑**。它比常规 CI 弱，而它是唯一挡在发布前面的一道。
 #
 # 抽成可复用工作流之后，「有哪些门」只有这一处；`release.yml` 里那句
@@ -518,31 +519,13 @@ jobs:
       # 约定说的是「标识符」，不是「测试函数名」，而留几个已知的中文标识符在
       # 仓库里、门又照不到它们，正是这个项目不接受的那种「悬着」。
       #
-      # 判据不能只看退出码。这道门通过时是**沉默**的，而「一个文件都没扫到」
-      # 与「干净」在输出里长得一样（LESSONS 第 16 条）。所以这里要它自己给出的
-      # 正向证据——扫了多少个文件、找到多少条声明——与上面 deadmethods 那一步
-      # 同一个形状。
-      - name: 函数名门禁
-        run: |
-          set +e
-          out=$(bash scripts/check-test-names.sh 2>&1)
-          rc=$?
-          set -e
-          printf '%s\n' "$out"
-
-          if ! printf '%s\n' "$out" | grep -qE '^扫描器跑了 [1-9][0-9]* 个 \.go 文件 / [1-9][0-9]* 个 func 声明$'; then
-            echo "::error::这道门没有给出「扫了多少」的正向证据，不能当作通过。"
-            exit 1
-          fi
-
-          if [ "$rc" -ne 0 ]; then
-            exit "$rc"
-          fi
-
-      # 与其它扫描器同理：判据写反时它的输出与「干净」一模一样，
-      # 所以自测不是可选的（LESSONS 第 2、16、23 条）。
-      - name: 函数名门禁自测
-        run: bash scripts/check-test-names.test.sh
+      # 标识符只用 ASCII 这条约定由 golangci-lint 的 asciicheck 判，已并入上面
+      # 那个「lint」步骤——不再有单独的函数名门禁脚本。它原先只判 `func` 声明里
+      # 的函数名（548 行脚本 + 327 行自测），而 asciicheck 判全部标识符：
+      # 形参、局部变量、包级常量都在内，覆盖比原来只宽不窄。
+      #
+      # 这里不再有「正向证据」那一步：golangci-lint 自己的 `N issues` 汇总行就是
+      # 证据，`--max-issues-per-linter: 0` 保证它不会截断。
 
       - name: 扫描器自测
         run: bash scripts/check-redlines.test.sh

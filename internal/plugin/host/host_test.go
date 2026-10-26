@@ -1067,17 +1067,17 @@ func TestLogBoundsContainerPreallocation(t *testing.T) {
 	// 于是按普通对象转，容器是 map。
 	obj := jsEval(t, `({k: new Float64Array(1000000)})`)
 
-	var 前, 后 runtime.MemStats
-	runtime.ReadMemStats(&前)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
 	if _, err := fn(context.Background(), js("info", "m", obj)); err != nil {
 		t.Fatalf("log 出错: %v", err)
 	}
-	runtime.ReadMemStats(&后)
-	分配 := 后.TotalAlloc - 前.TotalAlloc
-	t.Logf("一次 log 调用在宿主侧新分配 %d 字节", 分配)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("一次 log 调用在宿主侧新分配 %d 字节", allocated)
 
-	if 分配 > 64<<20 {
-		t.Errorf("一次 log 调用新分配了 %d 字节，超过 64 MiB：容器按插件的规模预分配了", 分配)
+	if allocated > 64<<20 {
+		t.Errorf("一次 log 调用新分配了 %d 字节，超过 64 MiB：容器按插件的规模预分配了", allocated)
 	}
 	// 上面那个上限不能靠「什么都没转」满足：键还是要收到上限为止。
 	got, ok := logEntries(t, &buf)[0]["k"].(map[string]any)

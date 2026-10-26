@@ -1498,7 +1498,6 @@ bash scripts/check-layering.sh      # 分层约定：谁 import 谁
 bash scripts/check-deadcode.sh      # 不可达符号：可达的包内部有没有没人调的函数
 bash scripts/check-unimported.sh    # 整包没人 import：包本身有没有接上
 bash scripts/check-deadmethods.sh   # 导出方法有没有调用点（上面两道门都照不到）
-bash scripts/check-test-names.sh    # Go 顶层函数声明的名字必须是 ASCII
 bash scripts/check-lessons-index.sh # LESSONS.md 的索引与 lessons/ 下的正文对得上
 bash scripts/check-docs-index.sh    # docs/README.md 的分组表、development.md 的 TOC 与正文对得上
 bash scripts/check-man-pages.sh     # man/man1 下的手册与命令注册表、cli-reference.md 对得上
@@ -1517,11 +1516,16 @@ go vet -tags=contract ./internal/assembly/
 
 **改了哪个脚本就跑它自己的自测**：`scripts/check-redlines.test.sh`、
 `check-deadcode.test.sh`、`check-unimported.test.sh`、`check-deadmethods.test.sh`、
-`check-test-names.test.sh`、`check-layering.test.sh`、`check-mutation.test.sh`、
+`check-layering.test.sh`、`check-mutation.test.sh`、
 `check-mutation-table.test.sh`、`check-migration-order.test.sh`、`check-lessons-index.test.sh`、
 `check-docs-index.test.sh`、`check-man-pages.test.sh`。
 扫描器坏掉时的输出和「干净」一模一样，没有自测就无法证明它还在工作
 （见 [LESSONS.md](../LESSONS.md) 第 2、7 条）。
+
+标识符只用 ASCII 这条约定**没有手写脚本**：它由 `golangci-lint` 的 `asciicheck`
+判（配置在 `.golangci.yml`）。原来那道 `check-test-names.sh` 已经删掉——它只判
+`func` 声明里的函数名，而 `asciicheck` 判全部标识符（形参、局部变量、包级常量），
+覆盖更全。
 
 ### 每道门在挡什么
 
@@ -1617,18 +1621,19 @@ MANPATH="$PWD/man" man larkaxctl-channel
 生成器非零退出、一页都没写出来、写出空页或没有 `.TH` 的页、剥完 roff 转义后
 还有不认识的转义、紧贴扫描器自己出错时判「没跑成」（退出码 2），不报通过。
 
-`scripts/check-test-names.sh` 管的是「标识符保持英文」这条约定：**Go 顶层
-`func` 声明的名字**只许由 `[A-Za-z0-9_]` 组成。判的是**名字那个标识符**，
-不是「整行含中文」——后者会把中文在函数体、字符串或形参名上的行全部误报
-（实测全仓 5 处命中，5 处都是误报）。三种声明形态都认：普通函数、方法
-（跳过接收者）、泛型函数（名字截到 `[` 之前）。退出码分三档：0 通过、
-1 命中、2 **没跑成**（一个文件都没扫到、一条 `func` 都没有、或者解析不出名字）
-——第 2 档与第 1 档分开，是因为「没跑成」在输出里和「干净」长得一样
-（见 [LESSONS.md](../LESSONS.md) 第 16 条）。
+「标识符保持英文」这条约定由 `asciicheck` 判（`golangci-lint` 的一个检查器，
+配置在 `.golangci.yml`）：**全部标识符**只许由 ASCII 组成，包括函数名、方法名、
+形参名、局部变量名与包级 `const` / `var` / `type` 名。非 Go 文件不判。
 
-它的**已知边界**写在脚本头注释里，各有自测钉着：函数体内的局部变量、形参、
-包级 `const` / `var` / `type` 名不判；非 Go 文件不判。这条约定的动机是
-`go test -run` 的正则与 CI 失败行里的可读性，那些名字不出现在这两处。
+判据从「`func` 声明的名字」放宽成「全部标识符」是有意的：约定（见
+[`AGENTS.md`](../AGENTS.md) 的「代码约定」一节）说的是「标识符」，不是
+「函数名」。原来那道手写门禁只盯 `func` 那一行，其余标识符不在判据里，
+而这类约定一旦有门照不到的角落，下一个用中文命名局部变量的人就漏过去了。
+落地时全仓有 50 处中文标识符，全在测试文件里，已一并改成英文——原来的
+中文描述留在函数体上方的注释里，与「标识符用英文、描述用中文」一致。
+
+这条约定为什么存在：`go test -run` 的正则要写中文，而它在不同终端与日志管道里的
+编码不一定一致；CI 的失败行是要被人读的，标识符是那一行里最显眼的部分。
 
 ### golangci-lint
 
@@ -1722,7 +1727,7 @@ CI 包含：`gofmt` 检查、`go vet`、`golangci-lint`、单测（含 `-race`�
 不可达符号门禁
 及其自测（`check-deadcode.sh`）、整包没人 import 的门禁及其自测
 （`check-unimported.sh`）、导出方法调用点门禁及其自测（`check-deadmethods.sh`）、
-测试函数名门禁及其自测（`check-test-names.sh`）、索引与正文一致性门禁及其自测
+索引与正文一致性门禁及其自测
 （`check-lessons-index.sh`）、文档索引与正文一致性门禁及其自测
 （`check-docs-index.sh`）、手册同步门禁及其自测（`check-man-pages.sh`）、
 非 UTC 时区下的时刻门禁（`TZ=Asia/Shanghai` 再跑一遍

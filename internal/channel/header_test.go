@@ -14,7 +14,7 @@ import (
 // 它宽一格就放过一个能注入的头，窄一格就把合法的头拒了，
 // 而两处共用意味着这两种错会同时出现在两条路径上。
 func TestValidHeaderValue(t *testing.T) {
-	合法 := []struct {
+	validCases := []struct {
 		name  string
 		value string
 	}{
@@ -26,7 +26,7 @@ func TestValidHeaderValue(t *testing.T) {
 		{"obs-text", "\x80\xff"},
 		{"含冒号的普通值", "a: b"},
 	}
-	for _, tc := range 合法 {
+	for _, tc := range validCases {
 		t.Run("合法/"+tc.name, func(t *testing.T) {
 			if !ValidHeaderValue(tc.value) {
 				t.Errorf("%q 是合法的 field-value，却被拒了", tc.value)
@@ -34,7 +34,7 @@ func TestValidHeaderValue(t *testing.T) {
 		})
 	}
 
-	非法 := []struct {
+	invalidCases := []struct {
 		name  string
 		value string
 	}{
@@ -47,7 +47,7 @@ func TestValidHeaderValue(t *testing.T) {
 		{"换行注入", "值\r\nX-Injected: evil"},
 		{"裸换行注入", "值\nX-Injected: evil"},
 	}
-	for _, tc := range 非法 {
+	for _, tc := range invalidCases {
 		t.Run("非法/"+tc.name, func(t *testing.T) {
 			if ValidHeaderValue(tc.value) {
 				t.Errorf("%q 带控制字符，却被放行了", tc.value)
