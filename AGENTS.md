@@ -2,8 +2,10 @@
 
 本文件记录 larkax 的长期约定：**这个仓库是什么样**——代码与文档要求、红线，以及其余文档在哪。
 
-**接手开发任务前先读 [`.claude/skills/larkax-workflow/SKILL.md`](.claude/skills/larkax-workflow/SKILL.md)**——
-角色分工、派活与回报协议、评审与测试怎么派、issue → PR → 合并的流程都在那里，本文件不重复。
+**本机的 agent 协作协议不在这个仓库里。** 角色分工、派活与回报协议、评审怎么收敛，
+都在工作目录下一个已 gitignore 的本机目录里，不随仓库发布。它们属于某个人的工作方式，
+不属于项目资产；公开仓库里的约定只认本文件一处。协作者克隆这个仓库时拿不到那套协议，
+也不需要——`AGENTS.md` 与 `docs/` 足以支撑单独工作。
 
 开发中遇到的问题与解决方案按条拆在 [`lessons/`](lessons/)，根目录的 [LESSONS.md](LESSONS.md) 是索引。
 **开始任何工作前先读索引**，按「什么时候读」那一列找到与手上的活相关的条目，再点编号进正文——
@@ -149,7 +151,6 @@ PR 描述按 [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md
 
 | 要找什么 | 在哪 |
 |---|---|
-| 开发流程、角色分工与边界、派活与回报协议、评审看什么、测试角色 | [.claude/skills/larkax-workflow/SKILL.md](.claude/skills/larkax-workflow/SKILL.md) |
 | 本地开发环境搭建、跑通一次请求 | [docs/development.md](docs/development.md) |
 | lint 与门禁命令、每道门挡什么、变异测试怎么跑怎么读、各包现状 | [docs/development.md](docs/development.md) |
 | CI 跑哪些门、契约测试怎么加一条、有哪些已知偏差 | [docs/development.md](docs/development.md) → [contract/README.md](contract/README.md) |
