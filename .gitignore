@@ -29,11 +29,9 @@
 .DS_Store
 Thumbs.db
 
-# 本地工具的运行状态。`.claude/` 下只有 skill 与 subagent 定义是项目资产，要进仓库；
-# 其余（会话残留、锁文件、个人设置）不进——它们与项目无关，也不该被外部读到。
-.claude/*
-!.claude/skills
-!.claude/agents
+# 本机的 agent 协议与角色定义。它们属于这个人的工作方式，不属于项目资产：
+# 仓库的约定只认 AGENTS.md 一处。
+.claude/
 
 # Local runtime state
 /tmp/

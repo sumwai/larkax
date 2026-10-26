@@ -48,10 +48,7 @@
   领域词（`systemone` 的 `Decider`、账本的「本轮对账」与「本轮跳过的行」、插件的
   「会话」）；词表在这里假阳性泛滥，而**一份没人认真看的报告等于没有门**——
   与 `docs/development.md` 的「golangci-lint」一节要求 `golangci-lint` 只开有价值
-  检查器是同一个道理。所以这一条**是 review 的活**
-  （见 [`.claude/agents/reviewer.md`](../.claude/agents/reviewer.md) 的判据表里
-  「设计上下文」那一行），
-  不写成扫描器。
+  检查器是同一个道理。所以这一条**是 review 的活**，不写成扫描器。
 
 **预防**
 
