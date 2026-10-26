@@ -9,6 +9,11 @@ name: 变异测试
 # 那一天：动了搬钱代码的 PR 会照报「变异通过」，而那个包连分母都没进，界面上
 # 也看不出来（它只对「在前缀里、但没有 PKGS 条目覆盖」的目录告警）。
 #
+# 选包那一步**每轮**都打一行范围总数（PKGS 条数、自动轮前缀条数、覆盖的 PKGS
+# 条目数、不在范围的条数），数字由 `scripts/check-mutation.sh --list-packages
+# --summary` 从两份清单现算：只打「这一轮选中了谁」时，读日志的人看不出清单里
+# 还有多少条根本不在自动轮的范围里。
+#
 # 其余改动不自动跑：一轮变异以小时计，而 `scripts/check-mutation.sh` 的 PKGS
 # 有三十多个包。让每个 PR 都自动跑全清单会把公开仓库的 runner 队列占住，而
 # 大多数改动与钱无关，跑出来的数字也不会让结论更可信。要量别的包时用
@@ -92,7 +97,25 @@ jobs:
             echo "::error::读不出 PKGS 清单（--list-packages 一条都没打出来），选包不能靠猜。"
             exit 1
           fi
-          echo "PKGS 清单 ${#ALL_PKGS[@]} 条。"
+          # 范围边界**每轮**都打一行，包括「这一轮不跑」的那些：只打「选中的是谁」
+          # 时，读日志的人看不出清单里还有多少条根本不在自动轮的范围里。四个数由
+          # 脚本从两份清单现算（`--list-packages --summary`），这里不写死、也不
+          # 另抄一份 MONEY_PKGS。
+          if ! scope_line=$(bash scripts/check-mutation.sh --list-packages --summary); then
+            echo "::error::读不出自动轮的范围总数（--list-packages --summary 没打出那一行）。"
+            echo "::error::范围说不清时，「这一轮没跑」与「不需要跑」就分不开——停下来，先修脚本。"
+            exit 1
+          fi
+          # 只认**一行**：这个开关在脚本里认不出时并不报错（`--list-packages` 会退回
+          # 打整份清单，退出码仍是 0），那样这一行会变成四十行包名，看起来像「范围」
+          # 却什么都没说。所以在这里核形状——它不是「通过」，是「说得清」。
+          scope_lines=$(printf '%s\n' "$scope_line" | grep -c .)
+          if [ "$scope_lines" -ne 1 ]; then
+            echo "::error::--list-packages --summary 应只打一行范围总数，实际打了 $scope_lines 行。"
+            echo "::error::先确认 scripts/check-mutation.sh 认识这个开关，再让这一轮跑。"
+            exit 1
+          fi
+          echo "$scope_line"
 
           selected=()
           dropped=()
@@ -216,7 +239,7 @@ jobs:
                 echo "所以本轮没有可跑的变异包。要量它们，先把覆盖它们的包加进 PKGS——"
                 echo "否则这里会一直显示 skipped，而「改了计费代码」与「不需要跑」看起来一样。"
               else
-                echo "改动不涉及自动触发的范围（见脚本里的 MONEY_PKGS：账本、计费、金额、结算额、单价、额度包结转）。"
+                echo "改动不涉及自动触发的范围（见脚本里的 MONEY_PKGS：账本、计费、金额、结算额、单价、额度包结转、收款编排与手续费）。"
               fi
               echo
               echo "下面的变异 job 显示为 **skipped**——这不是「跑了且通过」。"
