@@ -974,7 +974,7 @@ func (s *Store) Release(ctx context.Context, req pipeline.Request, failure *pipe
 	if err != nil {
 		return fmt.Errorf("查预留记录失败: %w", err)
 	}
-	if status != "pending" {
+	if status != BillingStatusPending {
 		// 已经结算或已释放，重复调用是幂等的。
 		return nil
 	}

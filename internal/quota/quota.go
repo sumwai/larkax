@@ -48,6 +48,12 @@ func (k Kind) valid() bool {
 //
 // 这里只列已知的三种。写进来的单位不在其中也合法（上游的口径五花八门），
 // 它只是与别人都不可比而已。空字符串表示未知。
+//
+// 三个值里只有 UnitTokens 有代码读它（见 internal/channels 的 selfAccount：
+// 只有按 token 计的渠道能用上游报的 token 数去减）。另两个是**取值约定**，
+// 供写入侧与迁移共用同一个拼法——`channel_quota_state.unit` 的 COMMENT 里
+// 写的也是这三个词。没有调用点不等于可以改：库里已经写进去的值按旧拼法存着，
+// 改了之后新写入的那一批就与它对不上，而两边各自都能跑。
 const (
 	// UnitTokens 是剩余 token 数（按 token 计的套餐）。
 	UnitTokens = "tokens"

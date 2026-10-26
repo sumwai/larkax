@@ -22,9 +22,12 @@ const (
 )
 
 // 占位的取值类型，落进 fieldType。
+//
+// 这一组里没有 "blob"：二进制数据走 blobPlaceholder，它把块的类型留在
+// 自己那个键名下（`type: "image"`），而不是折进 fieldType。那边之所以
+// 不折，见 blobPlaceholder 的注释——块类型的序列本身就是形状。
 const (
 	typeText    = "text"
-	typeBlob    = "blob"
 	typeString  = "string"
 	typeNumber  = "number"
 	typeBool    = "bool"
