@@ -1350,7 +1350,9 @@ fi
 #           (c)，(b) 就分不清「检查通过」与「检查压根没看数据」（LESSONS 第 2、7 条）。
 #           负控另配两道前置：副本里真的换上了坏前缀、且副本的裸 `--list-packages`
 #           与原件逐字相同——分别挡「替换没生效」与「替换改到了 PKGS」两种假绿；
-#        d) `internal/plans` 在清单里——今天分叉的那一格，钉住它。
+#        d) `internal/plans` 与 `internal/payment` 在清单里——前者是已经分叉过的
+#           那一格，后者是它的同类（下单、面值核对、手续费都在 payment 里），
+#           两个都钉住。
 money_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
   LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --money 2>&1)
 money_rc=$?
@@ -1363,6 +1365,9 @@ if [ -z "$malformed" ]; then ok; else
 fi
 if printf '%s\n' "$money_out" | grep -qx 'internal/plans/'; then ok; else
   bad "--money —— 清单里缺了 internal/plans：结转算式在那里，缺了就又会「改了钱却不量」"
+fi
+if printf '%s\n' "$money_out" | grep -qx 'internal/payment/'; then ok; else
+  bad "--money —— 清单里缺了 internal/payment：下单、面值核对、手续费都在那里，缺了就又会「改了钱却不量」"
 fi
 
 # check_money_prefixes <脚本>：对 `--money` 的每一行核 (b)。全部有覆盖返回 0；
@@ -1417,6 +1422,116 @@ neg_out=$(check_money_prefixes "$neg_script")
 neg_rc=$?
 if [ "$neg_rc" -ne 0 ] && printf '%s' "$neg_out" | grep -q 'internal/no-such-money-pkg/'; then ok; else
   bad "--money 负控 —— 前缀不在 PKGS 里时结构断言应报出它并失败，实际 rc=$neg_rc 输出=<$neg_out>"
+fi
+
+# 27c. `--list-packages --summary`：自动轮的范围边界每轮都要打一行，四个数由两份
+#      清单现算。判据三条：
+#        a) 只读清单就能跑成：缺 gremlins、缺 DSN、锁文件建不出来时照样退出 0，
+#           也不拿锁——选包那一步跑在起数据库之前；
+#        b) 打出来的数与清单对得上：总数 = `--list-packages` 的条数，前缀数 =
+#           `--money` 的条数，覆盖数 = 把 PKGS 每条拿去对前缀（这里按前缀自己算
+#           一遍，**不从被测脚本取期望值**），其余 = 总数 - 覆盖数；
+#        c) 负控：副本里删掉一条 MONEY_PKGS 前缀，四个数必须跟着变（前缀 -1、
+#           覆盖 -1、不在范围 +1、总数不变）。数字被写死时 (b) 会照样绿而这一条
+#           红——(b) 单独挡不住「数字恰好对上了今天的清单」。
+summary_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$SCRIPT" --list-packages --summary 2>&1)
+summary_rc=$?
+if [ "$summary_rc" -eq 0 ] && [ -n "$summary_out" ]; then ok; else
+  bad "--summary —— 应不依赖 gremlins/DSN/锁就跑成并打出那一行，实际 rc=$summary_rc 输出=<$summary_out>"
+fi
+if printf '%s\n' "$summary_out" | grep -q '已拿到锁'; then
+  bad "--summary —— 不该拿锁"
+else
+  ok
+fi
+
+# summary_field <输出> <标签前面的那个词>：从那一行里取标签后面的数。
+summary_field() {
+  printf '%s\n' "$1" | sed -n "s/.*$2 \\([0-9][0-9]*\\) 条.*/\\1/p"
+}
+
+# expected_scope <脚本>：按两份清单自己算 (总数 / 前缀数 / 覆盖数 / 不在范围数)，
+# 放在 EXP_TOTAL / EXP_MONEY / EXP_COVERED / EXP_REST 里。
+#
+# 覆盖规则与脚本里的前缀过滤同形：前缀覆盖它自己与整棵子树。两份清单都从
+# `--list-packages` 读——被测脚本与这里算的是同一份数据，但走的是不同路径，
+# 期望值不从被判定的那行输出里取。
+expected_scope() {
+  local script="$1" p pre
+  local -a scope_pkgs scope_money
+  mapfile -t scope_pkgs < <(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+    LOCK_FILE="$tmp/notadir/lock" bash "$script" --list-packages 2>/dev/null)
+  mapfile -t scope_money < <(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+    LOCK_FILE="$tmp/notadir/lock" bash "$script" --list-packages --money 2>/dev/null)
+  EXP_TOTAL=${#scope_pkgs[@]}
+  EXP_MONEY=${#scope_money[@]}
+  EXP_COVERED=0
+  for p in "${scope_pkgs[@]}"; do
+    for pre in "${scope_money[@]}"; do
+      case "$p" in
+        "${pre%/}" | "${pre%/}"/*) EXP_COVERED=$((EXP_COVERED + 1)); break ;;
+      esac
+    done
+  done
+  EXP_REST=$((EXP_TOTAL - EXP_COVERED))
+}
+
+expected_scope "$SCRIPT"
+got_total=$(summary_field "$summary_out" 'PKGS')
+got_money=$(summary_field "$summary_out" '自动轮前缀')
+got_covered=$(summary_field "$summary_out" '覆盖 PKGS 条目')
+got_rest=$(summary_field "$summary_out" '其余')
+if [ -n "$got_total" ] && [ -n "$got_money" ] && [ -n "$got_covered" ] && [ -n "$got_rest" ]; then ok; else
+  bad "--summary —— 那一行里认不出四个数（PKGS / 自动轮前缀 / 覆盖 PKGS 条目 / 其余），实际输出=<$summary_out>"
+fi
+if [ "$got_total" = "$EXP_TOTAL" ]; then ok; else
+  bad "--summary —— PKGS 条数应为 $EXP_TOTAL（--list-packages 的行数），实际 <$got_total>"
+fi
+if [ "$got_money" = "$EXP_MONEY" ]; then ok; else
+  bad "--summary —— 自动轮前缀条数应为 $EXP_MONEY（--money 的行数），实际 <$got_money>"
+fi
+if [ "$got_covered" = "$EXP_COVERED" ]; then ok; else
+  bad "--summary —— 覆盖的 PKGS 条目应为 $EXP_COVERED（按前缀对每条算），实际 <$got_covered>"
+fi
+if [ "$got_rest" = "$EXP_REST" ]; then ok; else
+  bad "--summary —— 不在范围的条数应为 $EXP_REST（总数 - 覆盖数），实际 <$got_rest>"
+fi
+
+# 负控：副本里删掉 MONEY_PKGS 的一条（internal/payment），四个数必须跟着变。
+# 两道前置各挡一种假绿：替换真的生效了、且替换只动了 MONEY_PKGS 没动 PKGS。
+neg_summary_script="$tmp/check-mutation-neg-summary.sh"
+awk '
+  /^MONEY_PKGS=\(/ { inmoney = 1 }
+  inmoney && /^  internal\/payment$/ { next }
+  inmoney && /^\)$/ { inmoney = 0 }
+  { print }
+' "$SCRIPT" > "$neg_summary_script"
+if GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$neg_summary_script" --list-packages --money 2>/dev/null |
+  grep -qx 'internal/payment/'; then
+  bad "--summary 负控 —— 副本里没删掉 internal/payment，下面的负控不成立"
+else
+  ok
+fi
+neg_summary_bare=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$neg_summary_script" --list-packages 2>&1)
+if [ "$neg_summary_bare" = "$list_out" ]; then ok; else
+  bad "--summary 负控 —— 副本的 --list-packages 与原件不一致：删的是 PKGS，不只是 MONEY_PKGS"
+fi
+neg_summary_out=$(GREMLINS="gremlins-not-installed-$$" LARKAX_DB_DSN="" \
+  LOCK_FILE="$tmp/notadir/lock" bash "$neg_summary_script" --list-packages --summary 2>&1)
+neg_total=$(summary_field "$neg_summary_out" 'PKGS')
+neg_money=$(summary_field "$neg_summary_out" '自动轮前缀')
+neg_covered=$(summary_field "$neg_summary_out" '覆盖 PKGS 条目')
+neg_rest=$(summary_field "$neg_summary_out" '其余')
+if [ "$neg_total" = "$EXP_TOTAL" ] &&
+  [ -n "$neg_money" ] && [ "$neg_money" -eq $((EXP_MONEY - 1)) ] &&
+  [ -n "$neg_covered" ] && [ "$neg_covered" -eq $((EXP_COVERED - 1)) ] &&
+  [ -n "$neg_rest" ] && [ "$neg_rest" -eq $((EXP_REST + 1)) ]; then
+  ok
+else
+  bad "--summary 负控 —— 删掉一条前缀后四个数应变成 $EXP_TOTAL / $((EXP_MONEY - 1)) / $((EXP_COVERED - 1)) / $((EXP_REST + 1))，实际 <$neg_summary_out>"
 fi
 
 # ── 按改动收窄（#883）────────────────────────────────────────────────────

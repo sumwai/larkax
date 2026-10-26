@@ -110,6 +110,8 @@
 #                                              # 打印后缀匹配的 PKGS 条目（CI 手工触发用）
 #   scripts/check-mutation.sh --list-packages --money
 #                                              # 打印「搬钱的包」目录前缀（CI 自动轮的触发范围）
+#   scripts/check-mutation.sh --list-packages --summary
+#                                              # 打印自动轮的范围总数（CI 每轮打一行）
 #
 # `--match` 回答的是「这个改动目录该由哪一条 PKGS 来量」：取**最近的、在 PKGS 里的
 # 祖先**（按 `/` 边界，目录本身在清单里也算）。包路径是递归的，所以
@@ -213,9 +215,10 @@
 #   3  拿不到锁：另一个实例正在跑（或锁文件不可用），本次未执行
 # 1 与 3 分开是因为处置不同：前者要去看代码或环境，后者等一会儿重跑就行。
 #
-# `--list-packages --match <目录>`、`--list-packages --suffix <片段>` 与
-# `--list-packages --money` 是查询而非跑变异：打到条目并退出 0，一条都没有则
-# 什么都不打印、退出 1。它们同样不拿锁、不要求 gremlins 与 DSN。
+# `--list-packages --match <目录>`、`--list-packages --suffix <片段>`、
+# `--list-packages --money` 与 `--list-packages --summary` 是查询而非跑变异：
+# 打到条目并退出 0，一条都没有则什么都不打印、退出 1。它们同样不拿锁、
+# 不要求 gremlins 与 DSN。
 #
 # **它不判「efficacy 够不够」。** 存活变异要逐条人看——等价变异与
 # 不可达分支都该放过，而脚本分不出来。这里只保证跑出来的数字可信。
@@ -335,13 +338,16 @@ PKGS=(
 # ── 搬钱的包 ──────────────────────────────────────────────────────────────
 #
 # **PR 自动轮的触发范围只写在这里。** 工作流拿 `--list-packages --money` 读它，
-# 不自己再列一遍前缀：两处各写一份就会分叉——`internal/plans` 在 `PKGS` 里、却不在
-# 工作流的前缀里，动了结转算式的 PR 照报「变异通过」，而那个包连分母都没进，也不
-# 告警（告警只覆盖「在前缀里、但没有 PKGS 条目」的目录）。
+# 不自己再列一遍前缀：两处各写一份就会分叉——`internal/plans` 与 `internal/payment`
+# 都曾在 `PKGS` 里、却不在工作流的前缀里，动了结转算式或手续费的 PR 照报「变异通过」，
+# 而那个包连分母都没进，也不告警（告警只覆盖「在前缀里、但没有 PKGS 条目」的目录）。
+# 每一个「在 PKGS 里、但没人问过它动不动钱」的包，都是一次同样的静默跳过。
 #
 # 条目是目录，输出时带上结尾 `/`，供工作流直接做 `case "$f" in "$pre"*)`。
 # **每一条都必须能在 `PKGS` 里找到覆盖它的条目**——自测里有结构断言核这件事；
 # 反过来（PKGS 里某个搬钱的包漏在这里）判不了，那要人看：这个包动的是不是钱。
+# `--list-packages --summary` 每轮把范围边界打成一行，是为了让「漏在这里」这件事
+# 在读日志时至少看得见范围有多大，而不是只看见这一轮选中了谁。
 #
 # 范围是「搬钱」而不是「所有会算数的包」：一轮变异以小时计，塞进来的包越多，
 # 每个 PR 排队越久，而多数改动与钱无关。
@@ -352,6 +358,7 @@ MONEY_PKGS=(
   internal/pipeline
   internal/pricing
   internal/plans
+  internal/payment
 )
 
 # nearest_pkg <目录>：最近的、在 PKGS 里的祖先（按 `/` 边界，目录本身也算），
@@ -411,6 +418,32 @@ if [ "${1:-}" = "--list-packages" ]; then
   if [ "${2:-}" = "--money" ]; then
     [ "${#MONEY_PKGS[@]}" -gt 0 ] || exit 1
     for p in "${MONEY_PKGS[@]}"; do printf '%s/\n' "$p"; done
+    exit 0
+  fi
+  # --summary：把自动轮的范围边界打成一行，工作流每轮都打。四个数全部**现算**：
+  # PKGS 有几条、MONEY_PKGS 有几条、PKGS 里有几条落在某个前缀下、剩下几条不在
+  # 任何前缀下。由调用方写死一份就是第三份清单，清单一改那一行就开始说谎。
+  #
+  # 「覆盖」按前缀算它自己与整棵子树：`internal/billing` 一处前缀同时覆盖
+  # `internal/billing` 与 `internal/billing/expr`，`internal/ledger` 同理覆盖
+  # `internal/ledger/store`。所以覆盖数**不等于**两份清单条数之差——相减会把这两条
+  # 说成「不在自动轮范围」，而改动落在它们身上时选包那一步是选得中它们的。
+  #
+  # 数的单位是**清单条目**，不是目录：父子对在 PKGS 里各占一条、各算一次，
+  # 按目录去重会让总数变小，加一条父子包时这一行就对不上清单了。
+  if [ "${2:-}" = "--summary" ]; then
+    total=${#PKGS[@]}
+    money=${#MONEY_PKGS[@]}
+    covered=0
+    for p in "${PKGS[@]}"; do
+      for pre in "${MONEY_PKGS[@]}"; do
+        case "$p" in
+          "$pre" | "$pre"/*) covered=$((covered + 1)); break ;;
+        esac
+      done
+    done
+    printf '范围：PKGS %d 条，自动轮前缀 %d 条，覆盖 PKGS 条目 %d 条，其余 %d 条不在自动轮范围\n' \
+      "$total" "$money" "$covered" "$((total - covered))"
     exit 0
   fi
   printf '%s\n' "${PKGS[@]}"
