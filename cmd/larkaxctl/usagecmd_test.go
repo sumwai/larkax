@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger/store"
 )
 
@@ -447,9 +448,9 @@ func TestUsageRequestsShowsPricingRuleID(t *testing.T) {
 
 	// ── 机器可读那一档 ──
 	//
-	// 夹具都在切到 json 之前建好：写类的命令在那一档会被拒（见 format.go 的
+	// 夹具都在切到 json 之前建好：写类的命令在那一档会被拒（见 cli 包的 format.go 的
 	// jsonUnsupported）。这一条只用读类命令，但这条纪律照样守着。
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	r := runOnce(t, runUsage, append([]string{"requests"}, window...))
 	if r.err != nil {
@@ -508,7 +509,7 @@ func TestUsageRequestsRuleColumnAgreesAcrossFormats(t *testing.T) {
 
 	table := runUsageRequestsOut(t, window...)
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runUsage, append([]string{"requests"}, window...))
 	if r.err != nil {
 		t.Fatalf("usage requests -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
@@ -660,9 +661,9 @@ func TestUsageJSONShapes(t *testing.T) {
 	insertBillingRequest(t, db, pendingReq, userID, model,
 		time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC), "pending")
 
-	// 夹具都在切到 json 之前建好：写类的命令在那一档会被拒（见 format.go 的
+	// 夹具都在切到 json 之前建好：写类的命令在那一档会被拒（见 cli 包的 format.go 的
 	// jsonUnsupported）。这一组只用读类命令，但这条纪律照样守着。
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	r := runOnce(t, runUsage, []string{"events", "--user", itoa64(userID),
 		"--from", usageWindowOctFrom.Format(time.RFC3339),
@@ -695,7 +696,7 @@ func TestUsageJSONShapes(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &events); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
 	}
-	if events.Status != jsonOK || events.Summary.Total != 1 || len(events.Events) != 1 {
+	if events.Status != cli.JSONOK || events.Summary.Total != 1 || len(events.Events) != 1 {
 		t.Fatalf("形状不对：status=%q total=%d 行数=%d\n%s",
 			events.Status, events.Summary.Total, len(events.Events), r.stdout)
 	}
@@ -798,8 +799,8 @@ func TestUsageRejectsBadFlags(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("这一次应当报错，却成功返回了：stdout=%q", r.stdout)
 			}
-			if got := exitCode(r.err); got != exitUsage {
-				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 			}
 			if !strings.Contains(r.err.Error(), tc.want) {
 				t.Errorf("错误里没有 %q：%v", tc.want, r.err)
@@ -912,8 +913,8 @@ func TestUsageRequestsShowsPlanReserved(t *testing.T) {
 	}
 
 	// ── 机器可读档 ──
-	// 夹具都在切到 json 之前建好（见 format.go 的 jsonUnsupported）。
-	withFormat(t, formatJSON)
+	// 夹具都在切到 json 之前建好（见 cli 包的 format.go 的 jsonUnsupported）。
+	withFormat(t, cli.FormatJSON)
 
 	r := runOnce(t, runUsage, append([]string{"requests"}, window...))
 	if r.err != nil {
@@ -1010,8 +1011,8 @@ func TestUsageRequestsFiltersByStatusAndModel(t *testing.T) {
 	insertBillingRequest(t, db, uniqueName("req"), userID, m1, startedAt.Add(2*time.Minute), "pending")
 	insertBillingRequest(t, db, uniqueName("req"), userID, m2, startedAt.Add(3*time.Minute), "failed")
 
-	// 夹具都在切到 json 之前建好（见 format.go 的 jsonUnsupported）。
-	withFormat(t, formatJSON)
+	// 夹具都在切到 json 之前建好（见 cli 包的 format.go 的 jsonUnsupported）。
+	withFormat(t, cli.FormatJSON)
 
 	_, all := usageRequestsJSON(t, window...)
 	if len(all) != 4 {
@@ -1066,7 +1067,7 @@ func TestUsageRequestsSinceWindow(t *testing.T) {
 	insertBillingRequest(t, db, oldest, userID, uniqueName("model"),
 		now.Add(-3*24*time.Hour), "pending")
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	summary, rows := usageRequestsJSON(t, "--user", itoa64(userID), "--since", "15m")
 	if got := requestIDs(rows, nil); len(got) != 1 || got[0] != recent {
@@ -1128,7 +1129,7 @@ func TestUsageRequestsSummaryCarriesFilters(t *testing.T) {
 	insertBillingRequest(t, db, uniqueName("req"), userID, model,
 		time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC), "pending")
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	window := []string{"--user", itoa64(userID),
 		"--from", usageWindowOctFrom.Format(time.RFC3339),
@@ -1174,7 +1175,7 @@ func TestUsageFiltersSummaryOmitsUnsetFilters(t *testing.T) {
 // 「解析出来的条件有没有填进 store.BillingRequestFilter」是纯接线：把 --status
 // 丢在这一层时，命令照常成功、只是把整张表打出来，屏幕上看不出它没筛。
 func TestUsageRequestsSelectionCarriesStoreFilters(t *testing.T) {
-	fs := newFlagSet("usage requests", flag.ContinueOnError)
+	fs := cli.NewFlagSet("usage requests", flag.ContinueOnError)
 	flags := newUsageRequestFlags(fs)
 	if err := fs.Parse([]string{"--status", "failed", "--model", "placeholder-model",
 		"--from", "2026-10-01", "--to", "2026-11-01", "--limit", "7"}); err != nil {
@@ -1216,7 +1217,7 @@ func TestUsageRequestsResolveSinceStartsInThePast(t *testing.T) {
 	usageNow = func() time.Time { return now }
 	t.Cleanup(func() { usageNow = saved })
 
-	fs := newFlagSet("usage requests", flag.ContinueOnError)
+	fs := cli.NewFlagSet("usage requests", flag.ContinueOnError)
 	flags := newUsageRequestFlags(fs)
 	if err := fs.Parse([]string{"--since", "15m"}); err != nil {
 		t.Fatalf("解析参数失败: %v", err)
@@ -1261,8 +1262,8 @@ func TestUsageRequestsRejectsBadFilters(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("这一次应当报错，却成功返回了：stdout=%q", r.stdout)
 			}
-			if got := exitCode(r.err); got != exitUsage {
-				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(r.err.Error(), want) {
@@ -1277,8 +1278,8 @@ func TestUsageRequestsRejectsBadFilters(t *testing.T) {
 		if r.err == nil {
 			t.Fatalf("未知状态应当报错，却成功返回了：stdout=%q", r.stdout)
 		}
-		if got := exitCode(r.err); got != exitUsage {
-			t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+		if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+			t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 		}
 		if !strings.Contains(r.err.Error(), `"bogus"`) {
 			t.Errorf("错误里没有点出写错的那个取值：%v", r.err)
@@ -1305,8 +1306,8 @@ func TestUsageEventsRejectsRequestOnlyFlags(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("usage events 不该认 %s，却成功返回了：stdout=%q", arg, r.stdout)
 			}
-			if got := exitCode(r.err); got != exitUsage {
-				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 			}
 			if !strings.Contains(r.err.Error(), "flag provided but not defined") {
 				t.Errorf("错误不是「这条命令没有这个参数」：%v", r.err)

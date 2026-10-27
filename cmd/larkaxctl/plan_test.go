@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/money"
 	"github.com/sumwai/larkax/internal/plans"
@@ -43,7 +44,7 @@ func TestPlanKeySetRejectsMissingOrConflictingSelection(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if exitCode(err) != exitUsage {
+			if cli.ExitCode(err) != cli.ExitUsage {
 				t.Errorf("应当报参数错（退出码 2），得到 %v", err)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
@@ -72,7 +73,7 @@ func TestPlanOrderSetRejectsBadOrder(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if exitCode(err) != exitUsage {
+			if cli.ExitCode(err) != cli.ExitUsage {
 				t.Errorf("应当报参数错（退出码 2），得到 %v", err)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
@@ -289,9 +290,9 @@ func TestPlanListJSON(t *testing.T) {
 		t.Fatalf("建包失败: %q", stderr)
 	}
 
-	saved := outputFormat
-	outputFormat = formatJSON
-	defer func() { outputFormat = saved }()
+	saved := cli.OutputFormat
+	cli.OutputFormat = cli.FormatJSON
+	defer func() { cli.OutputFormat = saved }()
 
 	var err error
 	stdout, _ := captureStreams(t, func() { err = runPlan([]string{"list"}) })
@@ -312,8 +313,8 @@ func TestPlanListJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("输出不是 JSON: %v\n%s", err, stdout)
 	}
-	if doc.Status != jsonOK {
-		t.Errorf("status = %q，期望 %q", doc.Status, jsonOK)
+	if doc.Status != cli.JSONOK {
+		t.Errorf("status = %q，期望 %q", doc.Status, cli.JSONOK)
 	}
 	var found bool
 	for _, p := range doc.Plans {
@@ -411,8 +412,8 @@ func TestPlanGrantRejectsConflictingExpiryFlags(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if exitCode(err) != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", exitCode(err), exitUsage)
+			if cli.ExitCode(err) != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", cli.ExitCode(err), cli.ExitUsage)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误 = %q，里面没有 %q", err.Error(), tc.want)

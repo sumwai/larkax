@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -17,32 +17,32 @@ import (
 // 在另一处落到 3 月 2 日，而两条命令都只说「已设置」。远期上限同理——两个
 // 名字就是两份口径的开始。
 
-// expiryNow 返回换算用的「现在」。它是包级变量，用例可以换成固定时刻，
+// ExpiryNow 返回换算用的「现在」。它是包级变量，用例可以换成固定时刻，
 // 好让 --ttl 在整条命令路径上也能与注入的那个 now 逐秒对拍（用法同 outputFormat）。
-var expiryNow = time.Now
+var ExpiryNow = time.Now
 
-// errExpiryNotGiven 表示三个过期旗标一个都没给。调用方据此区分「不设过期」
+// ErrExpiryNotGiven 表示三个过期旗标一个都没给。调用方据此区分「不设过期」
 // 与「设了一个不合法的时间」。
-var errExpiryNotGiven = errors.New("没有给过期时间")
+var ErrExpiryNotGiven = errors.New("没有给过期时间")
 
-// expiryFlags 是「到什么时候为止」的三种写法在命令行上的值。
-type expiryFlags struct {
-	expiresAt string
-	ttl       string
-	forever   bool
+// ExpiryFlags 是「到什么时候为止」的三种写法在命令行上的值。
+type ExpiryFlags struct {
+	ExpiresAt string
+	TTL       string
+	Forever   bool
 }
 
-// resolveExpiry 在 --expires-at / --ttl / --forever 里收出唯一的那个绝对时刻。
+// ResolveExpiry 在 --expires-at / --ttl / --forever 里收出唯一的那个绝对时刻。
 //
 // 三个旗标最多给一个：它们说的是同一件事；同时给两个时，后一个会在没有任何
 // 提示的情况下赢。parseAbsolute 是 --expires-at 的解析口径，由调用方决定——
 // apikey 与 plan 要求它必须在将来，consent 只认 RFC3339，未来与否由写入层判。
-func resolveExpiry(seen map[string]bool, f expiryFlags, now time.Time,
+func ResolveExpiry(seen map[string]bool, f ExpiryFlags, now time.Time,
 	parseAbsolute func(string) (time.Time, error),
 ) (time.Time, error) {
-	expiresGiven := flagGiven(seen, "expires-at")
-	ttlGiven := flagGiven(seen, "ttl")
-	foreverGiven := f.forever
+	expiresGiven := FlagGiven(seen, "expires-at")
+	ttlGiven := FlagGiven(seen, "ttl")
+	foreverGiven := f.Forever
 
 	names := make([]string, 0, 3)
 	if expiresGiven {
@@ -61,13 +61,13 @@ func resolveExpiry(seen map[string]bool, f expiryFlags, now time.Time,
 
 	switch {
 	case expiresGiven:
-		return parseAbsolute(f.expiresAt)
+		return parseAbsolute(f.ExpiresAt)
 	case ttlGiven:
-		return ttlExpiry(now, f.ttl)
+		return TTLExpiry(now, f.TTL)
 	case foreverGiven:
 		return expiry.Forever(), nil
 	default:
-		return time.Time{}, errExpiryNotGiven
+		return time.Time{}, ErrExpiryNotGiven
 	}
 }
 
@@ -76,22 +76,22 @@ func resolveExpiry(seen map[string]bool, f expiryFlags, now time.Time,
 // 报错时把实际写的那个名字引回来：写 --clear-expires-at 的人看到一句
 // 「--forever 与 … 不能同时给」时，得先自己想起这两个是同一个旗标。
 func foreverFlagName(seen map[string]bool) string {
-	if flagGiven(seen, "forever") {
+	if FlagGiven(seen, "forever") {
 		return "--forever"
 	}
 	return "--clear-expires-at"
 }
 
-// optionalExpiry 收一条「可以不给」的过期时间：三个旗标都没给时 given 为 false。
+// OptionalExpiry 收一条「可以不给」的过期时间：三个旗标都没给时 given 为 false。
 //
 // apikey create 用它：不设过期是合法的，而设了一个不合法的时间要报错。
 // 「没给」用第二个返回值说出来，而不是拿 nil 指针 + nil 错误表示——后者是
 // 两件事挤在一个值里，调用方漏判一次就成了「悄悄不设过期」。
-func optionalExpiry(seen map[string]bool, f expiryFlags, now time.Time,
+func OptionalExpiry(seen map[string]bool, f ExpiryFlags, now time.Time,
 	parseAbsolute func(string) (time.Time, error),
 ) (time.Time, bool, error) {
-	at, err := resolveExpiry(seen, f, now, parseAbsolute)
-	if errors.Is(err, errExpiryNotGiven) {
+	at, err := ResolveExpiry(seen, f, now, parseAbsolute)
+	if errors.Is(err, ErrExpiryNotGiven) {
 		return time.Time{}, false, nil
 	}
 	if err != nil {
@@ -100,7 +100,7 @@ func optionalExpiry(seen map[string]bool, f expiryFlags, now time.Time,
 	return at, true, nil
 }
 
-// ttlExpiry 把 --ttl 的相对时长换算成绝对时刻。
+// TTLExpiry 把 --ttl 的相对时长换算成绝对时刻。
 //
 // 单位是 h（小时）、d（天）、m（个日历月）、y（个日历年）。基准是 now，
 // 按 UTC 做日历运算：h 与 d 是精确时长（一天按 24 小时算），m 与 y 落到
@@ -109,7 +109,7 @@ func optionalExpiry(seen map[string]bool, f expiryFlags, now time.Time,
 // 目标月没有那一天时夹到月末：1 月 31 日加一个月是 2 月 28 日（闰年 29 日），
 // 2 月 29 日加一年是次年 2 月 28 日。这条规则钉在 TestTTLExpiry 里——换成
 // 别的算法时，月末与闰日那几格必须红。
-func ttlExpiry(now time.Time, ttl string) (time.Time, error) {
+func TTLExpiry(now time.Time, ttl string) (time.Time, error) {
 	amount, unit, err := parseTTL(ttl)
 	if err != nil {
 		return time.Time{}, err

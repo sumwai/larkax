@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channels"
 )
 
@@ -399,7 +400,7 @@ func TestChannelUpstreamModelsJSON(t *testing.T) {
 
 	// 渠道建好之后再切到 json 档：channel create 是写类命令，本来就拒绝
 	// --format json，而那个拒绝与这里要测的读侧无关。
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	idArg := strconv.FormatInt(id, 10)
 	out, _ := captureStreams(t, func() {
@@ -464,8 +465,8 @@ func TestChannelSyncModelsUpstreamErrorKeepsExistingList(t *testing.T) {
 	if err == nil {
 		t.Fatal("上游 500 时应当失败")
 	}
-	if exitCode(err) != exitFailure {
-		t.Errorf("上游故障的退出码应当是 %d，得到 %d", exitFailure, exitCode(err))
+	if cli.ExitCode(err) != cli.ExitFailure {
+		t.Errorf("上游故障的退出码应当是 %d，得到 %d", cli.ExitFailure, cli.ExitCode(err))
 	}
 	if got, want := storedUpstreamModels(t, db, id), []string{"example-model-a"}; !equalStrings(got, want) {
 		t.Errorf("上游失败之后的清单 = %v，期望原样保留 %v", got, want)
@@ -489,8 +490,8 @@ func TestChannelSyncModelsRejectsBadFlags(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("期望报错且含 %q，得到 %v", tc.want, err)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -508,8 +509,8 @@ func TestChannelSyncModelsUnknownChannel(t *testing.T) {
 	if !errors.Is(err, channels.ErrChannelNotFound) {
 		t.Errorf("错误链里应当有 ErrChannelNotFound：%v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("渠道不存在的退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("渠道不存在的退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 

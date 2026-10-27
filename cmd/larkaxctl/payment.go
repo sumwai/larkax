@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
@@ -125,8 +126,8 @@ var walletPaymentActions = []string{"create", "status"}
 // runWalletPayment 处理 wallet 下的 payment 子命令。
 func runWalletPayment(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, walletPaymentShortUsage)
-		return usageErr(errors.New("wallet payment 需要子命令"))
+		cli.PrintUsage(os.Stderr, walletPaymentShortUsage)
+		return cli.UsageErr(errors.New("wallet payment 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -136,49 +137,49 @@ func runWalletPayment(args []string) error {
 	case "status":
 		return runPaymentStatus(rest)
 	case "help":
-		printUsage(os.Stdout, walletPaymentHelp.long)
+		cli.PrintUsage(os.Stdout, walletPaymentHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, walletPaymentHelp.short)
+		cli.PrintUsage(os.Stdout, walletPaymentHelp.short)
 		return nil
 	default:
-		printUsage(os.Stderr, walletPaymentShortUsage)
-		return usageErr(fmt.Errorf("未知的 wallet payment 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, walletPaymentShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 wallet payment 子命令 %q", action))
 	}
 }
 
 // runPaymentCreate 在通道侧建单并落一张本地支付单。
 func runPaymentCreate(args []string) error {
-	if err := jsonUnsupported("wallet payment create"); err != nil {
+	if err := cli.JSONUnsupported("wallet payment create"); err != nil {
 		return err
 	}
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletPaymentUsage)
+		cli.PrintUsage(os.Stdout, walletPaymentUsage)
 		return nil
 	}
 
-	fs := newFlagSet("wallet payment create", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletPaymentShortUsage) }
+	fs := cli.NewFlagSet("wallet payment create", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletPaymentShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	plan := fs.String("plan", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	notifyURL := fs.String("notify-url", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"create 不接受位置参数，得到 %q：用户、金额与订单号都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
-	orderNo, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+	orderNo, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError(
 		"它是商户单号，同时是幂等键——通道按它认回这张单子，重跑靠它认出「已经下过单」"))
 	if refErr != nil {
 		return refErr
@@ -196,7 +197,7 @@ func runPaymentCreate(args []string) error {
 			return amountErr
 		}
 	} else if planKey == "" {
-		return usageErr(errors.New("缺少 --amount：不买额度包时必须给金额"))
+		return cli.UsageErr(errors.New("缺少 --amount：不买额度包时必须给金额"))
 	}
 	explicitAsset, assetErr := parseAssetFlag(fs, *asset)
 	if assetErr != nil {
@@ -275,7 +276,7 @@ func runPaymentCreate(args []string) error {
 		case *dryRun:
 			verdict = "将下单。"
 		}
-		printPayment(humanStdout(), paymentReceipt{
+		printPayment(cli.HumanStdout(), paymentReceipt{
 			Verdict: verdict,
 			Order:   result.Order,
 			User:    owner,
@@ -287,26 +288,26 @@ func runPaymentCreate(args []string) error {
 
 // runPaymentStatus 读一张支付单的现状。
 func runPaymentStatus(args []string) error {
-	if err := jsonUnsupported("wallet payment status"); err != nil {
+	if err := cli.JSONUnsupported("wallet payment status"); err != nil {
 		return err
 	}
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletPaymentUsage)
+		cli.PrintUsage(os.Stdout, walletPaymentUsage)
 		return nil
 	}
 
-	fs := newFlagSet("wallet payment status", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletPaymentShortUsage) }
+	fs := cli.NewFlagSet("wallet payment status", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletPaymentShortUsage) }
 	orderNo := fs.String("order", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"status 不接受位置参数，得到 %q：订单号用 --order 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*orderNo) == "" {
-		return usageErr(errors.New("缺少 --order：要查的是哪一张支付单"))
+		return cli.UsageErr(errors.New("缺少 --order：要查的是哪一张支付单"))
 	}
 
 	return withDB(walletTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -334,7 +335,7 @@ func runPaymentStatus(args []string) error {
 			return queryErr
 		}
 
-		printPayment(humanStdout(), paymentReceipt{
+		printPayment(cli.HumanStdout(), paymentReceipt{
 			Verdict:       fmt.Sprintf("支付单 %s 的现状。", row.OrderNo),
 			Order:         row,
 			User:          owner,
@@ -374,11 +375,11 @@ type paymentReceipt struct {
 // 与提现回显同一类（一栏一行）：金额、状态与单据号是人工对账时要逐项核的东西，
 // 挤成一行反而难读。
 func printPayment(w io.Writer, r paymentReceipt, dryRun bool) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintln(w, r.Verdict)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("订单号", r.Order.OrderNo)
 	row("用户", r.User.Username)

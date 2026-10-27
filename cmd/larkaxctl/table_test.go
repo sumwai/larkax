@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 )
 
@@ -46,7 +47,7 @@ func TestDisplayWidth(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := displayWidth(tc.in); got != tc.want {
+			if got := cli.DisplayWidth(tc.in); got != tc.want {
 				t.Errorf("displayWidth(%q) = %d，期望 %d", tc.in, got, tc.want)
 			}
 		})
@@ -131,7 +132,7 @@ func assertColumnStarts(t *testing.T, out string, rows [][]string, want []int) {
 // 「采集源 ID」= 3 个汉字（6 列）+ 空格（1 列）+「ID」（2 列）= 9 列，加两列栏间距。
 func TestTableWriterAlignsByDisplayWidth(t *testing.T) {
 	var buf bytes.Buffer
-	tw := newTableWriter(&buf)
+	tw := cli.NewTableWriter(&buf)
 	_, _ = fmt.Fprintln(tw, "ID\t7")
 	_, _ = fmt.Fprintln(tw, "采集源 ID\t7")
 	_, _ = fmt.Fprintln(tw, "状态\tenabled")
@@ -157,7 +158,7 @@ func TestTableWriterAlignsByDisplayWidth(t *testing.T) {
 // 的列起点分得开，按显示宽度补才对得上。
 func TestTableWriterLabelEdgeCases(t *testing.T) {
 	var buf bytes.Buffer
-	tw := newTableWriter(&buf)
+	tw := cli.NewTableWriter(&buf)
 	_, _ = fmt.Fprintln(tw, "\t空标签")
 	_, _ = fmt.Fprintln(tw, "x\t单字符")
 	_, _ = fmt.Fprintln(tw, "模型\t全中文")
@@ -266,7 +267,7 @@ func TestModelListColumnsLineUp(t *testing.T) {
 // 这里钉的是表格自身在零行、一行时的行为，免得它把空表打成一个空行。
 func TestTableWriterKeepsEmptyAndShortLists(t *testing.T) {
 	var buf bytes.Buffer
-	tw := newTableWriter(&buf)
+	tw := cli.NewTableWriter(&buf)
 	_, _ = fmt.Fprintln(tw, "ID\t名称")
 	if err := tw.Flush(); err != nil {
 		t.Fatalf("Flush 失败: %v", err)
@@ -276,7 +277,7 @@ func TestTableWriterKeepsEmptyAndShortLists(t *testing.T) {
 	}
 
 	buf.Reset()
-	tw = newTableWriter(&buf)
+	tw = cli.NewTableWriter(&buf)
 	if err := tw.Flush(); err != nil {
 		t.Fatalf("Flush 失败: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestTableWriterKeepsEmptyAndShortLists(t *testing.T) {
 // 表会在第一行到齐时就定型，后面更宽的标签再也撑不开它。
 func TestTableWriterFlushesOneTableAtATime(t *testing.T) {
 	var buf bytes.Buffer
-	tw := newTableWriter(&buf)
+	tw := cli.NewTableWriter(&buf)
 	_, _ = fmt.Fprintln(tw, "长标签\t1")
 	_, _ = fmt.Fprintln(tw, "短\t2")
 	if got := buf.String(); got != "" {

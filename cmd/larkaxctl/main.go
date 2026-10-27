@@ -29,6 +29,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/migrate"
@@ -46,7 +47,7 @@ func main() {
 	if err == nil {
 		return
 	}
-	if code := exitWithFailure(err); code != exitOK {
+	if code := exitWithFailure(err); code != cli.ExitOK {
 		os.Exit(code)
 	}
 }
@@ -68,13 +69,13 @@ func main() {
 //     照旧非零，调度器按它分派。
 //   - 其余的在 stderr 上打一行 `larkaxctl: <错误>`，退出码由 exitCode 分类。
 func exitWithFailure(err error) int {
-	if helpRequested(err) {
-		return exitOK
+	if cli.HelpRequested(err) {
+		return cli.ExitOK
 	}
-	if !reportedOnly(err) {
+	if !cli.ReportedOnly(err) {
 		fmt.Fprintf(os.Stderr, "larkaxctl: %v\n", err)
 	}
-	return exitCode(err)
+	return cli.ExitCode(err)
 }
 
 // command 是顶层命令空间里的一个条目。
@@ -105,43 +106,6 @@ type helpText struct {
 	short string
 	// long 是长版：短版 + 其余关键边界，末尾指向 docs/cli-reference.md。
 	long string
-}
-
-// printUsage 打一份帮助文本，是**帮助文本的唯一出口**。
-//
-// 收成一处之前，帮助散在几十处（各命令 help 分支里的 fmt.Print、各 fs.Usage
-// 闭包里的 fmt.Fprint），于是「打哪一版、打在哪条流上」得挨处看一遍才知道，
-// 而两处写法不一致在页面上看不出来。现在只剩两条规则：
-//
-//   - **打哪一版**看这一次要的是哪一版：`larkaxctl help <命令>` 与
-//     `<命令> help` 给长版，`-h` / `--help` 与参数写错时给短版。
-//
-//   - **打在哪条流**：`help <命令>` 与 `<命令> help`（要来的长版）走 stdout——
-//     它是这一次运行的结果，要能进管道（`larkaxctl help channel | less`）。
-//     `-h` / `--help` 与参数写错时分两种情况：**叶子**把用法打在 stderr 上
-//     （`wallet credit -h`、`channel list -h` 历来如此，199 条路径里 162 条），
-//     **有下级的组**多数打在 stdout 上（41 条里 32 条），因为那一份是「接下来
-//     还有哪些子命令」的导览，会被人往下翻。跟着错误打的那一份一律走 stderr：
-//     那时 stdout 上可能正要落一份 JSON（`--format json`），把用法页混进去下游
-//     的 jq 就解析不了；而且它本来就是那条错误的附注。
-//
-//     **两种流并存是既有事实，不是本函数引入的**：这里只负责「打哪一版」，
-//     打哪条流由调用点按上面的实际做法传 os.Stdout / os.Stderr。要统一得先
-//     逐个命令定方向，那是另一件事。
-//
-// w 收 os.Stdout / os.Stderr 本身，不是 humanStdout()：`-q` 压的是「给人看」那一
-// 档的输出，而帮助是使用者主动要的，不该被它压掉。
-//
-// 上色在这一处做，不在那几十个调用点各做一遍：只给**结构**上色（段标题与组标题
-// 加粗、命令名与选项名加粗、说明与指针行置灰），规则见 style.go 的 paintHelp。
-// `--format json` 是个例外——它压掉上色：那一档是给管道下游的纯文本，混进控制码
-// 只会让下游多剥一层壳。`-q` 不在例外里：帮助照打、照上色。
-func printUsage(w io.Writer, text string) {
-	p := newPalette(w)
-	if jsonOutput() {
-		p = palette{}
-	}
-	_, _ = fmt.Fprint(w, p.paintHelp(text))
 }
 
 // commandGroup 是根帮助页上的一个业务领域分组。
@@ -395,35 +359,35 @@ func run() error {
 	if envFile != "" {
 		if envErr := config.UseEnvFile(envFile); envErr != nil {
 			// 归到参数错：文件路径是命令行给的，找不到它要改的是命令。
-			return usageErr(envErr)
+			return cli.UsageErr(envErr)
 		}
 	}
 
-	format, args, err := takeFormatFlag(args)
+	format, args, err := cli.TakeFormatFlag(args)
 	if err != nil {
 		return err
 	}
-	outputFormat = format
+	cli.OutputFormat = format
 
 	// 两个开关也扫全表，理由与上面两个相同。它们之间的先后不影响结果。
-	verboseOutput, args, err = takeVerboseFlag(args)
+	cli.VerboseOutput, args, err = cli.TakeVerboseFlag(args)
 	if err != nil {
 		return err
 	}
-	quietOutput, args, err = takeQuietFlag(args)
+	cli.QuietOutput, args, err = cli.TakeQuietFlag(args)
 	if err != nil {
 		return err
 	}
 	// 两个一起给是**参数错**，不是「后者赢」：它们要的是相反的东西，而按顺序
 	// 取一个的表现是「我明明加了 -v，怎么什么都没多打」——那种错要人查半天。
-	if verboseOutput && quietOutput {
-		return usageErr(errors.New(
+	if cli.VerboseOutput && cli.QuietOutput {
+		return cli.UsageErr(errors.New(
 			"--verbose 与 --quiet 不能同时给：一个要每一项的细节，一个要一声不吭"))
 	}
 
 	if len(args) == 0 {
-		printUsage(os.Stderr, usage)
-		return usageErr(errors.New("缺少子命令"))
+		cli.PrintUsage(os.Stderr, usage)
+		return cli.UsageErr(errors.New("缺少子命令"))
 	}
 	return dispatch(args)
 }
@@ -441,15 +405,15 @@ func dispatch(args []string) error {
 		// 根帮助页的末行指的就是这个写法——**指针指向的必须真的能用**，否则
 		// 它比不写更坏：人照着敲一次，得到的是刚才那一页。
 		if len(rest) == 0 {
-			printUsage(os.Stdout, usage)
+			cli.PrintUsage(os.Stdout, usage)
 			return nil
 		}
 		c, ok := lookupCommand(rest[0])
 		if !ok {
-			printUsage(os.Stderr, usage)
-			return usageErr(fmt.Errorf("未知子命令 %q", rest[0]))
+			cli.PrintUsage(os.Stderr, usage)
+			return cli.UsageErr(fmt.Errorf("未知子命令 %q", rest[0]))
 		}
-		printUsage(os.Stdout, c.help.long)
+		cli.PrintUsage(os.Stdout, c.help.long)
 		return nil
 	case "-V", "--version":
 		name, rest = "version", nil
@@ -457,8 +421,8 @@ func dispatch(args []string) error {
 
 	c, ok := lookupCommand(name)
 	if !ok {
-		printUsage(os.Stderr, usage)
-		return usageErr(fmt.Errorf("未知子命令 %q", name))
+		cli.PrintUsage(os.Stderr, usage)
+		return cli.UsageErr(fmt.Errorf("未知子命令 %q", name))
 	}
 	// `<命令> help` 与 `larkaxctl help <命令>` 是同一条路，在这里一次收掉。
 	//
@@ -467,7 +431,7 @@ func dispatch(args []string) error {
 	// 有的不认」这种要敲下去才发现的不一致。-h / --help 不走这里——它是参数，
 	// 要与同一条命令的其它参数一起看（`channel list --help` 说 `list`）。
 	if len(rest) > 0 && rest[0] == "help" {
-		printUsage(os.Stdout, c.help.long)
+		cli.PrintUsage(os.Stdout, c.help.long)
 		return nil
 	}
 	return c.run(rest)
@@ -483,18 +447,18 @@ func runVersion(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help":
-			printUsage(os.Stdout, versionShortUsage)
+			cli.PrintUsage(os.Stdout, versionShortUsage)
 			return nil
 		}
-		return usageErr(fmt.Errorf("version 不接受参数，得到 %q", args[0]))
+		return cli.UsageErr(fmt.Errorf("version 不接受参数，得到 %q", args[0]))
 	}
 
-	if jsonOutput() {
-		doc := jsonDoc(jsonOK)
+	if cli.JSONOutput() {
+		doc := cli.JSONDoc(cli.JSONOK)
 		doc["version"] = version
-		return emitJSON(os.Stdout, doc, nil)
+		return cli.EmitJSON(os.Stdout, doc, nil)
 	}
-	_, _ = fmt.Fprintln(humanStdout(), version)
+	_, _ = fmt.Fprintln(cli.HumanStdout(), version)
 	return nil
 }
 
@@ -540,7 +504,7 @@ func takeEnvFileFlag(args []string) (string, []string, error) {
 
 		if !hasValue {
 			if i+1 >= len(args) {
-				return "", nil, usageErr(fmt.Errorf("%s 后面要跟文件路径", name))
+				return "", nil, cli.UsageErr(fmt.Errorf("%s 后面要跟文件路径", name))
 			}
 			i++
 			value = args[i]
@@ -549,7 +513,7 @@ func takeEnvFileFlag(args []string) (string, []string, error) {
 			// 空路径不当作「没给」：`--env-file=` 与 `--env-file ""` 都是
 			// 明确给了、但给错了。当成没给的话，它会安静地用自动找到的那一份，
 			// 而那与使用者的意图正好相反。
-			return "", nil, usageErr(fmt.Errorf("%s 的路径不能为空", name))
+			return "", nil, cli.UsageErr(fmt.Errorf("%s 的路径不能为空", name))
 		}
 		envFile = value
 	}
@@ -571,17 +535,17 @@ func takeEnvFileFlag(args []string) (string, []string, error) {
 // 它原先是一个顶层命令（larkaxctl reconcile），#475 把它收进账本域。那条旧
 // 路径留着（见 legacyCommands），接的就是这个函数。
 func runReconcile(args []string) error {
-	if err := jsonUnsupported("ledger reconcile"); err != nil {
+	if err := cli.JSONUnsupported("ledger reconcile"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("ledger reconcile", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
+	fs := cli.NewFlagSet("ledger reconcile", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, ledgerShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"ledger reconcile 不接受位置参数，得到 %q：开关与口径在 settings 表里", fs.Arg(0)))
 	}
 
@@ -594,7 +558,7 @@ func runReconcile(args []string) error {
 	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
 	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
 	// 不同的退出码，而脚本对它们的处置是不一样的。
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -617,7 +581,7 @@ func runReconcile(args []string) error {
 	// err 一并交给打印函数：它决定这一轮的汇总行是「跑完了」还是「没跑完」。
 	// 只看报告分不出这两种情况——中途失败时 CheckedWallets 也是 0、Findings
 	// 也是空的，与「跑完了、范围内确实没有钱包」逐字相同。
-	printReconcileReport(humanStdout(), report, err)
+	printReconcileReport(cli.HumanStdout(), report, err)
 	if err != nil {
 		return err
 	}
@@ -633,7 +597,7 @@ func runReconcile(args []string) error {
 // reportedErr：main 不再补打那一行，只留退出码给调度器。
 func reconcileFindingsErr(report *store.Report) error {
 	if len(report.Findings) > 0 {
-		return reportedErr(fmt.Errorf(
+		return cli.ReportedErr(fmt.Errorf(
 			"发现 %d 条不一致（见上面的清单与 run_id=%d）", len(report.Findings), report.RunID))
 	}
 	return nil
@@ -775,7 +739,7 @@ func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) erro
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -786,12 +750,12 @@ func withDB(timeout time.Duration, fn func(context.Context, *sql.DB) error) erro
 
 // allowMissingFlagNames 是 migrate up 的开关 --allow-missing 认的写法。
 //
-// 单横线的长写法一并认，理由与全局开关相同（见 globals.go 的 takeBoolFlag）。
+// 单横线的长写法一并认，理由与全局开关相同（见 cli 包的 globals.go 的 takeBoolFlag）。
 var allowMissingFlagNames = []string{"--allow-missing", "-allow-missing"}
 
 // takeAllowMissingFlag 从 migrate 的参数里摘出 --allow-missing。
 func takeAllowMissingFlag(args []string) (bool, bool, []string, error) {
-	return takeBoolFlag(args, allowMissingFlagNames, "--allow-missing")
+	return cli.TakeBoolFlag(args, allowMissingFlagNames, "--allow-missing")
 }
 
 // migrateActions 是 migrate 的动作清单，补全从这里取。
@@ -806,16 +770,16 @@ func runMigrate(args []string) error {
 		return flagErr
 	}
 
-	fs := newFlagSet("migrate", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, migrateShortUsage) }
+	fs := cli.NewFlagSet("migrate", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, migrateShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return usageErr(errors.New("migrate 需要子命令"))
+		return cli.UsageErr(errors.New("migrate 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -831,10 +795,10 @@ func runMigrate(args []string) error {
 	switch action {
 	case "create", "up", "down", "status", "version", "down-to", "up-to":
 	default:
-		return usageErr(fmt.Errorf("未知的 migrate 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 migrate 子命令 %q", action))
 	}
 	if allowMissingSet && action != "up" {
-		return usageErr(fmt.Errorf("--allow-missing 只用于 migrate up：%s 不接受它", action))
+		return cli.UsageErr(fmt.Errorf("--allow-missing 只用于 migrate up：%s 不接受它", action))
 	}
 
 	// 上面两条过了之后、取值校验与任何副作用之前，收掉「只要帮助」：下面每一档
@@ -852,7 +816,7 @@ func runMigrate(args []string) error {
 	//
 	// 只认「子命令后面只有一个 -h/--help」：`migrate create help` 里的 help 是
 	// 迁移文件名，仍然是位置参数。
-	if helpOnly(rest) {
+	if cli.HelpOnly(rest) {
 		fs.Usage()
 		return nil
 	}
@@ -861,14 +825,14 @@ func runMigrate(args []string) error {
 	switch action {
 	case "create":
 		if len(rest) < 1 {
-			return usageErr(errors.New("用法：larkaxctl migrate create <名称>"))
+			return cli.UsageErr(errors.New("用法：larkaxctl migrate create <名称>"))
 		}
 	case "up", "down", "status", "version":
 		// 这四条不吃取值。
 	case "down-to", "up-to":
 		ver, verErr := parseVersion(action, rest)
 		if verErr != nil {
-			return usageErr(verErr)
+			return cli.UsageErr(verErr)
 		}
 		target = ver
 	}
@@ -877,7 +841,7 @@ func runMigrate(args []string) error {
 	// （goose.RunContext 往 stdout 直接写「goose: no migrations to run」这类
 	// 行），要接 JSON 得先把它那份 logger 收住，那是另一件事。在那之前，
 	// `migrate up -o json` 报参数错，而不是打一半 goose 的日志再打一半 JSON。
-	if jsonErr := jsonUnsupported("migrate " + action); jsonErr != nil {
+	if jsonErr := cli.JSONUnsupported("migrate " + action); jsonErr != nil {
 		return jsonErr
 	}
 
@@ -890,7 +854,7 @@ func runMigrate(args []string) error {
 		if err := goose.RunContext(context.Background(), "create", nil, migrationsDir, rest[0], "sql"); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已生成到 %s/\n", migrationsDir)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已生成到 %s/\n", migrationsDir)
 		return nil
 	}
 
@@ -910,7 +874,7 @@ func runMigrate(args []string) error {
 	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
 	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
 	// 不同的退出码，而脚本对它们的处置是不一样的。
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -985,7 +949,7 @@ func gooseUpAllowMissing(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("读取待补应用的乱序迁移失败: %w", err)
 	}
 	if len(missing) > 0 {
-		_, _ = fmt.Fprintf(humanStderr(), "将补应用 %d 条编号更小、此前漏掉的迁移：%s\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "将补应用 %d 条编号更小、此前漏掉的迁移：%s\n",
 			len(missing), strings.Join(missing, "、"))
 	}
 	if err := goose.UpContext(ctx, db, ".", goose.WithAllowMissing()); err != nil {

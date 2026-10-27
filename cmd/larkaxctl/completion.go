@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/plans"
@@ -78,23 +79,23 @@ func init() { completionCommandRun = runCompletion }
 // runCompletion 打印一个 shell 的补全脚本。
 func runCompletion(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, completionShortUsage)
-		return usageErr(errors.New("completion 需要 shell 名"))
+		cli.PrintUsage(os.Stderr, completionShortUsage)
+		return cli.UsageErr(errors.New("completion 需要 shell 名"))
 	}
 	switch args[0] {
 	case "-h", "--help":
-		printUsage(os.Stdout, completionShortUsage)
+		cli.PrintUsage(os.Stdout, completionShortUsage)
 		return nil
 	}
 
 	shell := args[0]
 	if !slices.Contains(completionShells, shell) {
-		printUsage(os.Stderr, completionShortUsage)
-		return usageErr(fmt.Errorf("未知的 shell %q（可选：%s）",
+		cli.PrintUsage(os.Stderr, completionShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 shell %q（可选：%s）",
 			shell, strings.Join(completionShells, "、")))
 	}
 	if len(args) > 1 {
-		return usageErr(fmt.Errorf("completion %s 不接受多余参数，得到 %q", shell, args[1]))
+		return cli.UsageErr(fmt.Errorf("completion %s 不接受多余参数，得到 %q", shell, args[1]))
 	}
 
 	data := buildCompletionData()
@@ -120,7 +121,7 @@ type completionData struct {
 	words map[string][]string
 	// flags 以命令路径为键，值是该路径注册过的选项（名字，以及它吃不吃取值；
 	// 含旧名与别名）。吃不吃取值只有 fish 用得上，见 fishCompletionScript。
-	flags map[string][]collectedFlag
+	flags map[string][]cli.CollectedFlag
 	// enums 以「命令路径|--选项名」为键，值是那个选项的合法取值。
 	enums map[string][]string
 	// globalEnums 以选项名（如 `--format`）为键，值是全局选项的合法取值。
@@ -230,7 +231,7 @@ func buildCompletionData() completionData {
 // 生效。取值同样取自校验那一侧已有的来源，不抄字面量。
 func completionGlobalEnumValues() map[string][]string {
 	return map[string][]string{
-		"--format": formatNames(),
+		"--format": cli.FormatNames(),
 	}
 }
 
@@ -251,7 +252,7 @@ var globalValueFlags = []string{"--env-file"}
 //
 // 键的形状与 completionEnumValues 相同（`<命令路径>|--<选项名>`），生成器据此在
 // 取值位上把补全交回给 shell（bash 靠末尾的 `-o default`，zsh 自己调 `_files`）。
-// 哪些选项吃取值只从注册时记下的 takesValue 派生（见 flagset.go 的 record），
+// 哪些选项吃取值只从注册时记下的 takesValue 派生（见 cli 包的 flagset.go 的 record），
 // 不另抄清单：手写第二份表的下一站就是两份分岔（LESSONS.md 第 29 条）。
 //
 // 已接枚举的位置不在这里：它们的取值由 completionEnumValues 补，生成物里不能
@@ -307,51 +308,34 @@ func completionPaths(commands []completionCommand) [][]string {
 	return paths
 }
 
-// 收集 flag 名期间用的几个包级状态（见 flagset.go 的 record）。
-var (
-	collectingCommandFlags bool
-	currentCommandPath     string
-	collectedFlags         map[string][]collectedFlag
-)
-
-// collectedFlag 是收集到的一个选项：名字，以及它注册时判出来的「吃不吃取值」。
-type collectedFlag struct {
-	name       string
-	takesValue bool
-}
-
 // collectCommandFlags 把每条命令路径按 `<路径> -h` 走一遍，记下它注册的选项。
 //
-// `-h` 让 flag 在解析阶段返回 ErrHelp，命令走不到连库与写库；万一有哪条路径
-// 在解析之前就要连库，openDB 在收集期间直接失败（见 db.go），
-// 不会真的碰到数据库。输出一律丢掉：这里要的只是 flag 注册这件副作用。
-func collectCommandFlags(paths [][]string) map[string][]collectedFlag {
-	collectedFlags = make(map[string][]collectedFlag, len(paths))
-	collectingCommandFlags = true
-
+// 收集本身（置位、复位、把结果交出来）在 cli 包的 CollectFlags 里；这里只提供
+// 「怎么按路径 dispatch」这一件事，因为分派表住在命令注册表这一侧。
+//
+// 输出与全局输出档在遍历期间临时换掉：`-o json` 会让写类命令在解析参数之前
+// 就返回，那样它们的 flag 集根本不会注册，所以收集期间一律按默认档走。
+func collectCommandFlags(paths [][]string) map[string][]cli.CollectedFlag {
 	savedOut, savedErr := os.Stdout, os.Stderr
-	savedFormat, savedVerbose, savedQuiet := outputFormat, verboseOutput, quietOutput
+	savedFormat, savedVerbose, savedQuiet := cli.OutputFormat, cli.VerboseOutput, cli.QuietOutput
 	devNull, openErr := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if openErr == nil {
 		os.Stdout, os.Stderr = devNull, devNull
 	}
-	// 收集期间按默认档走：`-o json` 会让写类命令在解析参数之前就返回，
-	// 那样它们的 flag 集根本不会注册。
-	outputFormat, verboseOutput, quietOutput = formatTable, false, false
+	cli.OutputFormat, cli.VerboseOutput, cli.QuietOutput = cli.FormatTable, false, false
 
-	for _, path := range paths {
-		currentCommandPath = strings.Join(path, " ")
+	defer func() {
+		cli.OutputFormat, cli.VerboseOutput, cli.QuietOutput = savedFormat, savedVerbose, savedQuiet
+		os.Stdout, os.Stderr = savedOut, savedErr
+		if devNull != nil {
+			_ = devNull.Close()
+		}
+	}()
+
+	return cli.CollectFlags(paths, func(path []string) {
 		// 错误一律忽略：不认 `-h` 的那几条路径本来就不会注册 flag 集。
 		_ = dispatch(append(append([]string{}, path...), "-h"))
-	}
-
-	outputFormat, verboseOutput, quietOutput = savedFormat, savedVerbose, savedQuiet
-	os.Stdout, os.Stderr = savedOut, savedErr
-	if devNull != nil {
-		_ = devNull.Close()
-	}
-	collectingCommandFlags = false
-	return collectedFlags
+	})
 }
 
 // completionOptionNames 返回一条命令路径要补全的长选项：它自己注册的那些，
@@ -389,11 +373,11 @@ func ownOptions(data completionData, path string) []completionFlag {
 	index := map[string]bool{}
 	out := make([]completionFlag, 0, len(data.flags[path]))
 	for _, entry := range data.flags[path] {
-		if len(entry.name) < 2 || strings.HasPrefix(entry.name, "-") || index[entry.name] {
+		if len(entry.Name) < 2 || strings.HasPrefix(entry.Name, "-") || index[entry.Name] {
 			continue
 		}
-		index[entry.name] = true
-		out = append(out, completionFlag{name: "--" + entry.name, takesValue: entry.takesValue})
+		index[entry.Name] = true
+		out = append(out, completionFlag{name: "--" + entry.Name, takesValue: entry.TakesValue})
 	}
 	slices.SortFunc(out, func(a, b completionFlag) int { return strings.Compare(a.name, b.name) })
 	return out

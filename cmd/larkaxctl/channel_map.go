@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 )
@@ -123,8 +124,8 @@ var channelMapActions = []string{"add", "list", "remove"}
 // 「名字恰好是保留词的渠道」只能用 ID 指代，这是已知且可接受的。
 func runChannelMap(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, channelMapShortUsage)
-		return usageErr(errors.New("channel map 需要渠道：larkaxctl channel map <渠道> <规范名> [<上游模型名>]"))
+		cli.PrintUsage(os.Stderr, channelMapShortUsage)
+		return cli.UsageErr(errors.New("channel map 需要渠道：larkaxctl channel map <渠道> <规范名> [<上游模型名>]"))
 	}
 
 	switch action := args[0]; action {
@@ -137,10 +138,10 @@ func runChannelMap(args []string) error {
 		// 兼容别名：反义动词是 channel unmap。
 		return runChannelMapRemove(args[1:])
 	case "help":
-		printUsage(os.Stdout, channelMapHelp.long)
+		cli.PrintUsage(os.Stdout, channelMapHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, channelMapHelp.short)
+		cli.PrintUsage(os.Stdout, channelMapHelp.short)
 		return nil
 	default:
 		return runChannelMapAdd(args)
@@ -149,18 +150,18 @@ func runChannelMap(args []string) error {
 
 // runChannelMapUnmap 是反义动词的入口。
 func runChannelUnmap(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, channelMapShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, channelMapShortUsage) {
 		return nil
 	}
 
-	if err := jsonUnsupported("channel unmap"); err != nil {
+	if err := cli.JSONUnsupported("channel unmap"); err != nil {
 		return err
 	}
 
 	channelRef, canonical, err := parseChannelMapRemove(args, "unmap")
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -173,18 +174,18 @@ func runChannelUnmap(args []string) error {
 // 它是两个入口共用的实现：动词写法（第一个位置参数是渠道）与兼容别名
 // `channel map add`。
 func runChannelMapAdd(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, channelMapShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, channelMapShortUsage) {
 		return nil
 	}
 
-	if err := jsonUnsupported("channel map"); err != nil {
+	if err := cli.JSONUnsupported("channel map"); err != nil {
 		return err
 	}
 
 	req, channelRef, err := parseChannelMapAdd(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	var id int64
@@ -199,7 +200,7 @@ func runChannelMapAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedChannelMap(humanStdout(), humanStderr(), id, req)
+	printCreatedChannelMap(cli.HumanStdout(), cli.HumanStderr(), id, req)
 	return nil
 }
 
@@ -297,8 +298,8 @@ func parseChannelMapAdd(args []string) (catalog.CreateAliasRequest, string, erro
 		upstream = canonical
 	}
 
-	fs := newFlagSet("channel map", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelMapShortUsage) }
+	fs := cli.NewFlagSet("channel map", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelMapShortUsage) }
 	overrides := fs.String("overrides", "", "")
 	if parseErr := fs.Parse(args); parseErr != nil {
 		return catalog.CreateAliasRequest{}, "", parseErr
@@ -318,7 +319,7 @@ func parseChannelMapAdd(args []string) (catalog.CreateAliasRequest, string, erro
 	// （判据在 catalog 的 normalizeUpstreamModel，与旧路径同一处）。
 	canonical = strings.TrimSpace(canonical)
 	upstream = strings.TrimSpace(upstream)
-	if checkErr := checkDisplayText("<上游模型名>", upstream); checkErr != nil {
+	if checkErr := cli.CheckDisplayText("<上游模型名>", upstream); checkErr != nil {
 		return catalog.CreateAliasRequest{}, "", checkErr
 	}
 	parsedOverrides, err := parseJSONObject("--overrides", *overrides)
@@ -337,7 +338,7 @@ func parseChannelMapAdd(args []string) (catalog.CreateAliasRequest, string, erro
 func runChannelMapList(args []string) error {
 	channelRef, canonical, err := parseChannelMapList(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -362,10 +363,10 @@ func runChannelMapList(args []string) error {
 		if listErr != nil {
 			return listErr
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, aliasListDoc(aliases), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, aliasListDoc(aliases), nil)
 		}
-		printAliasList(humanStdout(), aliases, "映射", "channel map")
+		printAliasList(cli.HumanStdout(), aliases, "映射", "channel map")
 		return nil
 	})
 }
@@ -394,8 +395,8 @@ func parseChannelMapList(args []string) (string, string, error) {
 		}
 	}
 
-	fs := newFlagSet("channel map list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelMapShortUsage) }
+	fs := cli.NewFlagSet("channel map list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelMapShortUsage) }
 	canonical := fs.String("model", "", "")
 	if err := fs.Parse(args); err != nil {
 		return "", "", err
@@ -416,18 +417,18 @@ func parseChannelMapList(args []string) (string, string, error) {
 
 // runChannelMapRemove 是 `channel map remove` 这条兼容别名的入口。
 func runChannelMapRemove(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, channelMapShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, channelMapShortUsage) {
 		return nil
 	}
 
-	if err := jsonUnsupported("channel map remove"); err != nil {
+	if err := cli.JSONUnsupported("channel map remove"); err != nil {
 		return err
 	}
 
 	channelRef, canonical, err := parseChannelMapRemove(args, "remove")
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -473,7 +474,7 @@ func deleteChannelMap(ctx context.Context, db *sql.DB, channelRef, canonical str
 	if err := catalog.NewAdmin(db).DeleteAlias(ctx, found.ID); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(),
+	_, _ = fmt.Fprintf(cli.HumanStderr(),
 		"已删除映射 id=%d：%s 规范名 %s（上游名 %s）。白名单里的名字保留。\n",
 		found.ID, aliasScope(channelID), found.CanonicalName, found.UpstreamModel)
 	return nil

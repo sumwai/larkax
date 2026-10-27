@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
@@ -106,8 +107,8 @@ var ledgerActions = []string{"balance", "verify", "reconcile", "runs"}
 // runLedger 处理 ledger 子命令。
 func runLedger(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, ledgerShortUsage)
-		return usageErr(errors.New("ledger 需要子命令"))
+		cli.PrintUsage(os.Stderr, ledgerShortUsage)
+		return cli.UsageErr(errors.New("ledger 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -123,11 +124,11 @@ func runLedger(args []string) error {
 	case "runs":
 		return runLedgerRuns(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, ledgerShortUsage)
+		cli.PrintUsage(os.Stdout, ledgerShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, ledgerShortUsage)
-		return usageErr(fmt.Errorf("未知的 ledger 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, ledgerShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 ledger 子命令 %q", action))
 	}
 }
 
@@ -137,34 +138,34 @@ func runLedger(args []string) error {
 // 一个，会让「我写了 --account」与「我忘了写」在输出上分不出来——而后者会
 // 打出一份全库汇总，看起来像一次成功的查询。
 func runLedgerBalance(args []string) error {
-	fs := newFlagSet("ledger balance", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
+	fs := cli.NewFlagSet("ledger balance", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, ledgerShortUsage) }
 	account := fs.String("account", "", "")
 	all := fs.Bool("all", false, "")
 	asset := fs.String("asset", string(ledger.AssetCNY), "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("ledger balance 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("ledger balance 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	switch {
 	case *account == "" && !*all:
-		return usageErr(errors.New("ledger balance 需要 --account <科目> 或 --all"))
+		return cli.UsageErr(errors.New("ledger balance 需要 --account <科目> 或 --all"))
 	case *account != "" && *all:
-		return usageErr(errors.New("ledger balance 的 --account 与 --all 只能给一个"))
+		return cli.UsageErr(errors.New("ledger balance 的 --account 与 --all 只能给一个"))
 	}
 
 	assetValue := ledger.Asset(*asset)
 	if !assetValue.Valid() {
-		return usageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", *asset, ledger.AssetCNY))
+		return cli.UsageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", *asset, ledger.AssetCNY))
 	}
 	var acct ledger.Account
 	if *account != "" {
 		parsed, err := ledger.ParseAccount(*account)
 		if err != nil {
-			return usageErr(fmt.Errorf("科目 %q 不合法: %w", *account, err))
+			return cli.UsageErr(fmt.Errorf("科目 %q 不合法: %w", *account, err))
 		}
 		acct = parsed
 	}
@@ -176,22 +177,22 @@ func runLedgerBalance(args []string) error {
 			if err != nil {
 				return err
 			}
-			// JSON 是**另一条渲染路径**（见 format.go 开头）：表格那一档把
+			// JSON 是**另一条渲染路径**（见 cli 包的 format.go 开头）：表格那一档把
 			// 「没有任何分录」折成一句话，这一档给两个空数组。
-			if jsonOutput() {
-				return emitJSON(os.Stdout, ledgerBalancesDoc(assetValue, report), nil)
+			if cli.JSONOutput() {
+				return cli.EmitJSON(os.Stdout, ledgerBalancesDoc(assetValue, report), nil)
 			}
-			printLedgerBalances(humanStdout(), assetValue, report)
+			printLedgerBalances(cli.HumanStdout(), assetValue, report)
 			return nil
 		}
 		balance, err := s.AccountBalance(ctx, acct, assetValue)
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, ledgerBalanceDoc(acct, assetValue, balance), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, ledgerBalanceDoc(acct, assetValue, balance), nil)
 		}
-		printLedgerBalance(humanStdout(), acct, assetValue, balance)
+		printLedgerBalance(cli.HumanStdout(), acct, assetValue, balance)
 		return nil
 	})
 }
@@ -208,7 +209,7 @@ func printLedgerBalance(w io.Writer, acct ledger.Account, asset ledger.Asset, ba
 //
 // 科目与余额走固定列宽的表格（与其余清单同一条约定，见 docs/cli-output.md）：
 // 科目名长短不一，用 `%-28s` 那样按**字节**补空格的写法在名字里出现非 ASCII
-// 字符时会错位，而 tableWriter 补的是显示宽度（见 table.go）。
+// 字符时会错位，而 tableWriter 补的是显示宽度（见 cli 包的 table.go）。
 func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountBalancesReport) {
 	byAccount := report.ByAccount[asset]
 	if len(byAccount) == 0 {
@@ -228,12 +229,12 @@ func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountB
 		// 而看输出的人（可能正在判断要不要把它接进定时任务）应当知道这件事。
 		_, _ = fmt.Fprintf(w, "资产=%s 科目数=%d（全表汇总，随分录数增长）\n", asset, len(accounts))
 
-		p := newPalette(w)
-		tw := newTableWriter(w)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold("科目"), p.bold("余额"))
+		p := cli.NewPalette(w)
+		tw := cli.NewTableWriter(w)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold("科目"), p.Bold("余额"))
 		for _, acct := range accounts {
 			// 科目是这张表的主键，加粗；余额是数据本身，不上样式。
-			_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(acct.String()), byAccount[acct])
+			_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(acct.String()), byAccount[acct])
 		}
 		_ = tw.Flush()
 	}
@@ -249,31 +250,31 @@ func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountB
 
 // runLedgerVerify 校验账本完整性。
 func runLedgerVerify(args []string) error {
-	fs := newFlagSet("ledger verify", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
+	fs := cli.NewFlagSet("ledger verify", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, ledgerShortUsage) }
 	from := fs.String("from", "", "")
 	to := fs.String("to", "", "")
 	maxTxns := fs.Int("max-txns", 0, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("ledger verify 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("ledger verify 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *maxTxns < 0 {
-		return usageErr(fmt.Errorf("--max-txns 不能为负，得到 %d", *maxTxns))
+		return cli.UsageErr(fmt.Errorf("--max-txns 不能为负，得到 %d", *maxTxns))
 	}
 
 	fromAt, err := parseLedgerTime("--from", *from)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	toAt, err := parseLedgerTime("--to", *to)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if !fromAt.IsZero() && !toAt.IsZero() && !fromAt.Before(toAt) {
-		return usageErr(fmt.Errorf("--from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
+		return cli.UsageErr(fmt.Errorf("--from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
 			fromAt.Format(time.RFC3339), toAt.Format(time.RFC3339)))
 	}
 
@@ -287,13 +288,13 @@ func runLedgerVerify(args []string) error {
 		// ——两处各判一遍的表现是同一轮校验在两条路径上给出不同的退出码。
 		cause := ledgerVerifyCause(report, err)
 
-		if !jsonOutput() {
+		if !cli.JSONOutput() {
 			// 报告先打，再处理错误：跑了一半的结果比一句「失败了」有用得多
 			// ——它至少说明比到了哪里、已经发现了什么（与 reconcile 同一个理由）。
 			//
 			// err 一并交给打印函数，理由与 reconcile 相同：报告本身分不出
 			// 「校验完了一笔都没问题」与「校验到一半读不下去了」。
-			printLedgerVerifyReport(humanStdout(), report, err)
+			printLedgerVerifyReport(cli.HumanStdout(), report, err)
 			return cause
 		}
 
@@ -303,7 +304,7 @@ func runLedgerVerify(args []string) error {
 		if report == nil {
 			return cause
 		}
-		return emitJSON(os.Stdout, ledgerVerifyDoc(report, cause), cause)
+		return cli.EmitJSON(os.Stdout, ledgerVerifyDoc(report, cause), cause)
 	})
 }
 
@@ -331,10 +332,10 @@ func ledgerVerifyCause(report *store.VerifyReport, runErr error) error {
 		//
 		// 标成 reportedErr：结论已经在屏幕那一行状态里打出来了，main 不再
 		// 补打一行 `larkaxctl: …`，只留退出码。
-		return reportedErr(errLedgerVerifyEmpty)
+		return cli.ReportedErr(errLedgerVerifyEmpty)
 	}
 	if len(report.Findings) > 0 {
-		return reportedErr(fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings)))
+		return cli.ReportedErr(fmt.Errorf("发现 %d 笔不合法的交易（见上面的清单）", len(report.Findings)))
 	}
 	return nil
 }
@@ -352,34 +353,34 @@ func ledgerVerifyCause(report *store.VerifyReport, runErr error) error {
 //
 // 细节（不合法的那几笔与它们的分录）不打进 detail：那是这条命令默认就该看见的
 // 内容，不是 -v 才展开的推导过程。它们由 printLedgerVerifyFindings 接着打。
-func ledgerVerifyLine(r *store.VerifyReport, runErr error) statusLine {
+func ledgerVerifyLine(r *store.VerifyReport, runErr error) cli.StatusLine {
 	counts := fmt.Sprintf("校验 %d 笔交易（%d 条分录）", r.CheckedTxns, r.CheckedEntries)
-	line := statusLine{kind: glyphPass, title: "分录校验", conclusion: counts + "，全部自洽"}
+	line := cli.StatusLine{Kind: cli.GlyphPass, Title: "分录校验", Conclusion: counts + "，全部自洽"}
 
 	switch {
 	case runErr != nil:
 		// 计数照打（失败前校验过多少是真的），但明说这一轮没跑完：后面还有
 		// 没读到的交易，这一轮的结论不完整。
-		line.kind = glyphFail
-		line.conclusion = counts + "，这一轮没跑完：只到失败时为止，后面的交易没有校验（原因见 stderr）"
+		line.Kind = cli.GlyphFail
+		line.Conclusion = counts + "，这一轮没跑完：只到失败时为止，后面的交易没有校验（原因见 stderr）"
 	case ledgerVerifyCause(r, nil) != nil:
-		line.kind = glyphFail
+		line.Kind = cli.GlyphFail
 		if len(r.Findings) > 0 {
-			line.conclusion = fmt.Sprintf("%s，发现 %d 笔不合法的交易（见下面的清单）",
+			line.Conclusion = fmt.Sprintf("%s，发现 %d 笔不合法的交易（见下面的清单）",
 				counts, len(r.Findings))
 		} else {
-			line.conclusion = counts + "，" + errLedgerVerifyEmpty.Error()
+			line.Conclusion = counts + "，" + errLedgerVerifyEmpty.Error()
 		}
 	case r.Truncated:
-		line.kind = glyphSkip
-		line.conclusion = counts
+		line.Kind = cli.GlyphSkip
+		line.Conclusion = counts
 	}
 
 	// 截断那一句挂在**任何一种**结论后面，而且挂在最后：有 findings 时那一行
 	// 整行都换成了失败的说法，而「后面还有没校验的交易」并不会因此变得不成立
 	// ——把它并进上面某一支里，另一支就会把它漏掉。
 	if r.Truncated {
-		line.conclusion += "；达到 --max-txns 上限，后面还有没校验的交易"
+		line.Conclusion += "；达到 --max-txns 上限，后面还有没校验的交易"
 	}
 	return line
 }
@@ -406,7 +407,7 @@ func printLedgerVerifyReport(w io.Writer, r *store.VerifyReport, runErr error) {
 	if r == nil {
 		return
 	}
-	printStatusLines(w, []statusLine{ledgerVerifyLine(r, runErr)}, false)
+	cli.PrintStatusLines(w, []cli.StatusLine{ledgerVerifyLine(r, runErr)}, false)
 
 	if len(r.Findings) == 0 {
 		return
@@ -453,19 +454,19 @@ func entryTypeNames() []string {
 
 // ── 机器可读输出 ────────────────────────────────────────────────────────
 //
-// 下面这几个与上面的 printXxx 是同一份数据的另一条渲染路径（见 format.go
+// 下面这几个与上面的 printXxx 是同一份数据的另一条渲染路径（见 cli 包的 format.go
 // 开头）。它们排在文件末尾，是为了让表格那一档的几段读起来是连着的。
 
 // ledgerBalanceDoc 组装 ledger balance --account 的机器可读输出。
 //
 // 不给 summary：这一档要数的东西只有余额本身，再给一个 {total: 1} 只是背景音。
 func ledgerBalanceDoc(acct ledger.Account, asset ledger.Asset, balance money.Amount) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["account"] = acct.String()
 	doc["asset"] = string(asset)
 	// 金额走 jsonAmount（十进制定点字符串）：直接塞 money.Amount 编出来是 `{}`，
-	// 而它的字段不导出（见 format.go）。
-	doc["balance"] = jsonAmount(balance)
+	// 而它的字段不导出（见 cli 包的 format.go）。
+	doc["balance"] = cli.JSONAmount(balance)
 	return doc
 }
 
@@ -486,11 +487,11 @@ func ledgerBalancesDoc(asset ledger.Asset, report *store.AccountBalancesReport) 
 	for _, acct := range accounts {
 		balances = append(balances, map[string]any{
 			"account": acct.String(),
-			"balance": jsonAmount(byAccount[acct]),
+			"balance": cli.JSONAmount(byAccount[acct]),
 		})
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["asset"] = string(asset)
 	doc["summary"] = map[string]any{
 		"accounts": len(balances),
@@ -500,9 +501,9 @@ func ledgerBalancesDoc(asset ledger.Asset, report *store.AccountBalancesReport) 
 		"unreadable": len(report.Unreadable),
 	}
 	doc["accounts"] = balances
-	// 空时打 `[]` 而不是 null（见 format.go 的 jsonList）：一栏有、一条都没有，
+	// 空时打 `[]` 而不是 null（见 cli 包的 format.go 的 jsonList）：一栏有、一条都没有，
 	// 与「这一栏没有」是两件事。
-	doc["unreadable"] = jsonList(report.Unreadable)
+	doc["unreadable"] = cli.JSONList(report.Unreadable)
 	return doc
 }
 
@@ -522,15 +523,15 @@ func ledgerBalancesDoc(asset ledger.Asset, report *store.AccountBalancesReport) 
 //
 // 前两档优先于第三档：有 findings 时即使也被截断，status 也是 failed。
 func ledgerVerifyDoc(report *store.VerifyReport, cause error) map[string]any {
-	status := jsonOK
+	status := cli.JSONOK
 	switch {
 	case cause != nil:
-		status = jsonFailed
+		status = cli.JSONFailed
 	case report.Truncated:
-		status = jsonSkipped
+		status = cli.JSONSkipped
 	}
 
-	doc := jsonDoc(status)
+	doc := cli.JSONDoc(status)
 	doc["summary"] = map[string]any{
 		"checked_txns":    report.CheckedTxns,
 		"checked_entries": report.CheckedEntries,
@@ -567,7 +568,7 @@ func verifyFindingDoc(f store.VerifyFinding) map[string]any {
 			"account":    e.Account.String(),
 			// 金额**保持符号**：账本里借为正、贷为负，这个符号是数据的一部分
 			// （见 internal/ledger/entry.go），取绝对值会把方向这件事抹掉。
-			"amount": jsonAmount(e.Amount),
+			"amount": cli.JSONAmount(e.Amount),
 			"asset":  string(e.Asset),
 		})
 	}
@@ -576,7 +577,7 @@ func verifyFindingDoc(f store.VerifyFinding) map[string]any {
 		"txn_id": string(f.TxnID),
 		// 错误那句话由 internal/ledger 给，原样转述、不在这里改写：改写会让看
 		// JSON 的人与看终端的人拿到两种说法，而排查时两边的说法要能对上。
-		"error":   nullableError(f.Err),
+		"error":   cli.NullableError(f.Err),
 		"entries": entries,
 	}
 }
@@ -593,17 +594,17 @@ const ledgerRunsDefaultLimit = 20
 // 一写一读的两半：只跑不读的话，「跑过几次、上次扫到哪、差额怎么处理的」只能连库看，
 // 而那张表同时还是下一轮增量扫描的起点。
 func runLedgerRuns(args []string) error {
-	fs := newFlagSet("ledger runs", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, ledgerShortUsage) }
+	fs := cli.NewFlagSet("ledger runs", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, ledgerShortUsage) }
 	limit := fs.Int("limit", ledgerRunsDefaultLimit, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("ledger runs 不接受位置参数，得到 %q：要少看几行用 --limit", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("ledger runs 不接受位置参数，得到 %q：要少看几行用 --limit", fs.Arg(0)))
 	}
 	if *limit < 0 {
-		return usageErr(fmt.Errorf("--limit 不能为负，得到 %d（0 表示不限）", *limit))
+		return cli.UsageErr(fmt.Errorf("--limit 不能为负，得到 %d（0 表示不限）", *limit))
 	}
 
 	return withDB(ledgerReadTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -612,10 +613,10 @@ func runLedgerRuns(args []string) error {
 			return err
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, ledgerRunsDoc(page.Runs, page.More, *limit), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, ledgerRunsDoc(page.Runs, page.More, *limit), nil)
 		}
-		printLedgerRuns(humanStdout(), page.Runs, page.More)
+		printLedgerRuns(cli.HumanStdout(), page.Runs, page.More)
 		return nil
 	})
 }
@@ -635,18 +636,18 @@ func printLedgerRuns(w io.Writer, runs []store.ReconcileRun, more bool) {
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("run_id"), p.bold("开始"), p.bold("状态"), p.bold("范围"), p.bold("起点"),
-		p.bold("比对"), p.bold("余额差"), p.bold("冻结差"), p.bold("畸形科目"),
-		p.bold("陈旧预留"), p.bold("面值差"), p.bold("低于下界"), p.bold("修复"))
+		p.Bold("run_id"), p.Bold("开始"), p.Bold("状态"), p.Bold("范围"), p.Bold("起点"),
+		p.Bold("比对"), p.Bold("余额差"), p.Bold("冻结差"), p.Bold("畸形科目"),
+		p.Bold("陈旧预留"), p.Bold("面值差"), p.Bold("低于下界"), p.Bold("修复"))
 	for _, r := range runs {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-			p.bold(strconv.FormatInt(r.ID, 10)),
-			p.dim(r.StartedAt.Format(longStampLayout)),
+			p.Bold(strconv.FormatInt(r.ID, 10)),
+			p.Dim(r.StartedAt.Format(cli.LongStampLayout)),
 			r.Status, scanScopeCell(r.FullScan),
-			p.dim(r.Watermark.Format(longStampLayout)),
+			p.Dim(r.Watermark.Format(cli.LongStampLayout)),
 			r.CheckedWallets, r.BalanceMismatches, r.FrozenMismatches,
 			r.MalformedAccounts, r.StaleReservations, r.PlanFaceShortfalls,
 			r.AccountBelowFloors, r.Repaired)
@@ -673,10 +674,10 @@ func ledgerRunsDoc(runs []store.ReconcileRun, more bool, limit int) map[string]a
 	for _, r := range runs {
 		items = append(items, map[string]any{
 			"id":         r.ID,
-			"started_at": jsonTime(r.StartedAt),
+			"started_at": cli.JSONTime(r.StartedAt),
 			// finished_at 为空表示这一轮还没收尾（status = running）。
-			"finished_at":          jsonTimePtr(nullTimeToPtr(r.FinishedAt)),
-			"watermark":            jsonTime(r.Watermark),
+			"finished_at":          cli.JSONTimePtr(cli.NullTimeToPtr(r.FinishedAt)),
+			"watermark":            cli.JSONTime(r.Watermark),
 			"full_scan":            r.FullScan,
 			"checked_wallets":      r.CheckedWallets,
 			"balance_mismatches":   r.BalanceMismatches,
@@ -687,11 +688,11 @@ func ledgerRunsDoc(runs []store.ReconcileRun, more bool, limit int) map[string]a
 			"plan_face_shortfalls": r.PlanFaceShortfalls,
 			"account_below_floors": r.AccountBelowFloors,
 			"status":               r.Status,
-			"error":                nullableString(r.Error.String),
+			"error":                cli.NullableString(r.Error.String),
 		})
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{
 		"total":     len(items),
 		"limit":     limit,

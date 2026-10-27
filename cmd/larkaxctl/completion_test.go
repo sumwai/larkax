@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // updateCompletionGoldens 重写 testdata 下的 zsh / fish 快照。
@@ -382,7 +384,7 @@ func TestTakesValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := takesValue(tc.value); got != tc.want {
+			if got := cli.TakesValue(tc.value); got != tc.want {
 				t.Errorf("takesValue(%T) = %v，期望 %v", tc.value, got, tc.want)
 			}
 		})
@@ -1243,8 +1245,8 @@ func TestCompletionRejectsUnknownShell(t *testing.T) {
 	if err == nil {
 		t.Fatal("未知的 shell 名应当报错")
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 	}
 	for _, shell := range completionShells {
 		if !strings.Contains(err.Error(), shell) {
@@ -1257,7 +1259,7 @@ func TestCompletionRejectsUnknownShell(t *testing.T) {
 func TestCompletionRequiresShell(t *testing.T) {
 	stdout, stderr := captureStreams(t, func() {
 		err := runCompletion(nil)
-		if err == nil || exitCode(err) != exitUsage {
+		if err == nil || cli.ExitCode(err) != cli.ExitUsage {
 			t.Errorf("缺 shell 名应当按参数错报，得到 %v", err)
 		}
 	})

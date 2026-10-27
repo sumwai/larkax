@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/plugin"
 	"github.com/sumwai/larkax/internal/plugin/sandbox"
 	pluginstore "github.com/sumwai/larkax/internal/plugin/store"
@@ -26,16 +27,16 @@ func TestPluginUnknownSubcommand(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "需要子命令") {
 		t.Fatalf("无子命令时应报错，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 	}
 
 	err = runCaptured(t, func() error { return runPlugin([]string{"bogus"}) })
 	if err == nil || !strings.Contains(err.Error(), "未知的 plugin 子命令") {
 		t.Fatalf("未知子命令时应报错，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 	}
 }
 
@@ -81,8 +82,8 @@ func TestPluginRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -115,7 +116,7 @@ func TestPluginPublishRejectsBrokenSourceWithoutWriting(t *testing.T) {
 	if !strings.Contains(err.Error(), "（") || !strings.Contains(err.Error(), "）") {
 		t.Errorf("错误信息 %q 里没有分类标签", err.Error())
 	}
-	if got := exitCode(err); got == exitOK {
+	if got := cli.ExitCode(err); got == cli.ExitOK {
 		t.Errorf("退出码 = %d，期望非零", got)
 	}
 
@@ -173,8 +174,8 @@ func TestPluginPublishRejectsMissingVersion(t *testing.T) {
 	if !strings.Contains(err.Error(), "version") {
 		t.Errorf("错误信息 %q 里没有提到 version", err.Error())
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（参数问题：源码里少写了一个字段）", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（参数问题：源码里少写了一个字段）", got, cli.ExitUsage)
 	}
 }
 
@@ -690,7 +691,7 @@ func TestPluginPublishRecordsCreatedBy(t *testing.T) {
 		t.Errorf("「写自」那一栏 = %q，期望里面有 %s：\n%s", line, alice, out)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var jsonErr error
 	stdout, _ := captureStreams(t, func() { jsonErr = runPluginGet([]string{key}) })
 	if jsonErr != nil {
@@ -763,7 +764,7 @@ func TestPluginPublishRejectsKeyMismatch(t *testing.T) {
 				err.Error(), want)
 		}
 	}
-	if got := exitCode(err); got == exitOK {
+	if got := cli.ExitCode(err); got == cli.ExitOK {
 		t.Errorf("退出码 = %d，期望非零", got)
 	}
 }
@@ -781,8 +782,8 @@ func TestPluginEnableUnknownKeyExitCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("启用不存在的 key 该报错")
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（约束冲突）", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（约束冲突）", got, cli.ExitConflict)
 	}
 }
 
@@ -882,8 +883,8 @@ func TestPluginListDocIsMachineReadable(t *testing.T) {
 	}
 	decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	if got.Summary.Total != 2 || len(got.Plugins) != 2 {
 		t.Fatalf("summary.total = %d、plugins 有 %d 条，都想要 2",
@@ -956,7 +957,7 @@ func TestPluginListDocEmptyListIsEmptyArray(t *testing.T) {
 // 表里不写条数：这类清单每加一条命令就要跟着长，写死的数字只会变成一句
 // 随表变旧的谎。
 func TestPluginWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
@@ -992,8 +993,8 @@ func TestPluginWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息里要点名 %q：%v", tc.want, err)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 			}
 			if stdout != "" {
 				t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
@@ -1019,7 +1020,7 @@ func TestPluginListJSONStdoutIsMachineReadable(t *testing.T) {
 		t.Fatalf("发布插件失败: %v", err)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var err error
 	stdout, _ := captureStreams(t, func() { err = runPluginList(nil) })
 	if err != nil {
@@ -1042,9 +1043,9 @@ func TestPluginListJSONStdoutIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, stdout)
 	}
-	if got.Status != jsonOK || got.ExitCode != exitOK {
+	if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
 		t.Errorf("status=%q exit_code=%d，想要 %q / %d",
-			got.Status, got.ExitCode, jsonOK, exitOK)
+			got.Status, got.ExitCode, cli.JSONOK, cli.ExitOK)
 	}
 
 	var found bool
@@ -1095,8 +1096,8 @@ func TestPluginGetAndDeleteRejectBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -1153,8 +1154,8 @@ func TestPluginKVRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数问题）", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -1251,8 +1252,8 @@ func TestPluginGetDocIsMachineReadable(t *testing.T) {
 	}
 	decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	p := got.Plugin
 	if p.Key != "demo" || p.Version != "1.2.3" || p.Status != pluginstore.StatusActive ||
@@ -1319,8 +1320,8 @@ func TestPluginKVGetDocIsMachineReadable(t *testing.T) {
 	}
 	decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	if got.Entry.Plugin != "demo" || got.Entry.User != "alice" || got.Entry.Key != "k" {
 		t.Errorf("身份那几栏对不上：%+v", got.Entry)
@@ -1362,7 +1363,7 @@ func TestPluginGetShowsNewestGeneration(t *testing.T) {
 	}
 
 	// JSON 那一档同样只给最新的一代，并且整份能解出来、不含转义码。
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	jsonOut, _ := captureStreams(t, func() {
 		if err := runPluginGet([]string{key}); err != nil {
 			t.Errorf("json 档看详情失败: %v", err)
@@ -1395,8 +1396,8 @@ func TestPluginGetUnknownKeyExitsFour(t *testing.T) {
 	if !errors.Is(err, pluginstore.ErrPluginNotFound) {
 		t.Errorf("错误链里没有 ErrPluginNotFound：%v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（约束冲突）", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（约束冲突）", got, cli.ExitConflict)
 	}
 }
 
@@ -1500,8 +1501,8 @@ func TestPluginDeleteUnknownKeyLeavesOtherTablesAlone(t *testing.T) {
 	if !errors.Is(err, pluginstore.ErrPluginNotFound) {
 		t.Errorf("错误链里没有 ErrPluginNotFound：%v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 	if n := countQueryRows(t, db, `SELECT count(*) FROM plugin_activations WHERE plugin_key = $1`, key); n != 1 {
 		t.Errorf("启用记录被删掉了 %d 行，它不该动", 1-n)
@@ -1588,11 +1589,11 @@ func TestPluginKVSetGetDelete(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s：期望报错，却通过了", tc.name)
 		}
-		if !errors.Is(err, errPluginKVKeyNotFound) {
+		if !errors.Is(err, cli.ErrPluginKVKeyNotFound) {
 			t.Errorf("%s：错误链里没有 errPluginKVKeyNotFound：%v", tc.name, err)
 		}
-		if got := exitCode(err); got != exitConflict {
-			t.Errorf("%s：退出码 = %d，期望 %d", tc.name, got, exitConflict)
+		if got := cli.ExitCode(err); got != cli.ExitConflict {
+			t.Errorf("%s：退出码 = %d，期望 %d", tc.name, got, cli.ExitConflict)
 		}
 	}
 }
@@ -1642,8 +1643,8 @@ func TestPluginKVExpiredKeyLooksAbsent(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s过期的键：期望报错，却通过了", tc.name)
 		}
-		if got := exitCode(err); got != exitConflict {
-			t.Errorf("%s过期的键：退出码 = %d，期望 %d", tc.name, got, exitConflict)
+		if got := cli.ExitCode(err); got != cli.ExitConflict {
+			t.Errorf("%s过期的键：退出码 = %d，期望 %d", tc.name, got, cli.ExitConflict)
 		}
 	}
 
@@ -1700,8 +1701,8 @@ func TestPluginKVRejectsUnknownPluginAndUser(t *testing.T) {
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
-			if got := exitCode(err); got != exitConflict {
-				t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", got, exitConflict)
+			if got := cli.ExitCode(err); got != cli.ExitConflict {
+				t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", got, cli.ExitConflict)
 			}
 		})
 	}
@@ -1910,11 +1911,11 @@ func TestPluginKVIsolatesUsers(t *testing.T) {
 	if err == nil {
 		t.Fatal("bob 名下没有这个键，不该读到")
 	}
-	if !errors.Is(err, errPluginKVKeyNotFound) {
+	if !errors.Is(err, cli.ErrPluginKVKeyNotFound) {
 		t.Errorf("错误链里没有 errPluginKVKeyNotFound：%v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 
 	// bob 删同一个键名：删不掉，而 alice 那一行还在。
@@ -1926,8 +1927,8 @@ func TestPluginKVIsolatesUsers(t *testing.T) {
 	if err == nil {
 		t.Fatal("bob 名下没有这个键，不该删得掉")
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("删除的退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("删除的退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 	if n := countQueryRows(t, db,
 		`SELECT count(*) FROM plugin_kv WHERE plugin_key = $1 AND user_id = $2`, key, alice); n != 1 {

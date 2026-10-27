@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger"
 )
 
@@ -39,7 +40,7 @@ func entryBlock(t *testing.T, out string) []string {
 	}
 	var block []string
 	for _, line := range lines[start:] {
-		if line == dryRunNote {
+		if line == cli.DryRunNote {
 			continue
 		}
 		block = append(block, line)
@@ -110,7 +111,7 @@ func TestWalletCreditDryRunKeepsLedgerAndMatchesRealRun(t *testing.T) {
 
 	dryOut := mustRun(t, runWalletCredit,
 		"--user", user, "--amount", "100", "--ref", order, "--dry-run")
-	assertHas(t, dryOut, "将入账", dryRunNote)
+	assertHas(t, dryOut, "将入账", cli.DryRunNote)
 
 	if balance := walletBalance(t, db, userID); balance != "0.00000000" {
 		t.Errorf("干跑之后余额 = %s，期望 0.00000000", balance)
@@ -180,7 +181,7 @@ func TestWalletRefundDryRunKeepsLedgerAndMatchesRealRun(t *testing.T) {
 
 	dryOut := mustRun(t, runWalletRefund,
 		"--user", user, "--amount", "20", "--ref", ref, "--memo", "请求失败", "--dry-run")
-	assertHas(t, dryOut, "将退款给用户", "原因：请求失败", dryRunNote)
+	assertHas(t, dryOut, "将退款给用户", "原因：请求失败", cli.DryRunNote)
 
 	if balance := walletBalance(t, db, userID); balance != "50.00000000" {
 		t.Errorf("干跑之后余额 = %s，期望 50.00000000", balance)
@@ -216,7 +217,7 @@ func TestWalletPayoutRequestDryRunKeepsLedgerAndMatchesRealRun(t *testing.T) {
 	before := ledgerAccountTotal(t, db, payable.String())
 	dryOut := mustRun(t, runWalletPayout, "request",
 		"--user", merchant, "--amount", "12.5", "--ref", ref, "--dry-run")
-	assertHas(t, dryOut, "将申请提现", ref, dryRunNote)
+	assertHas(t, dryOut, "将申请提现", ref, cli.DryRunNote)
 
 	if got := ledgerAccountTotal(t, db, payable.String()); got != before {
 		t.Errorf("干跑改动了分成科目：%s → %s", before, got)
@@ -256,7 +257,7 @@ func TestWalletPayoutSettleDryRunKeepsLedgerAndMatchesRealRun(t *testing.T) {
 	dryOut := mustRun(t, runWalletPayout, "settle",
 		"--user", merchant, "--amount", "8", "--ref", ref,
 		"--destination", `{"bank":"placeholder"}`, "--by", operator, "--dry-run")
-	assertHas(t, dryOut, "将清算提现单", dryRunNote)
+	assertHas(t, dryOut, "将清算提现单", cli.DryRunNote)
 
 	if got := ledgerAccountTotal(t, db, payable.String()); got != before {
 		t.Errorf("干跑改动了分成科目：%s → %s", before, got)
@@ -512,7 +513,7 @@ func TestDryRunKeepsArgumentErrors(t *testing.T) {
 				t.Errorf("两边的错误原文不同：\n不带 --dry-run %q\n带 --dry-run   %q",
 					plain.Error(), dry.Error())
 			}
-			if got, want := exitCode(dry), exitCode(plain); got != want {
+			if got, want := cli.ExitCode(dry), cli.ExitCode(plain); got != want {
 				t.Errorf("退出码 = %d，期望 %d（与不带 --dry-run 相同）", got, want)
 			}
 		})
@@ -550,8 +551,8 @@ func TestReadOnlyCommandsRejectDryRun(t *testing.T) {
 			if !strings.Contains(err.Error(), "dry-run") {
 				t.Errorf("错误里没点出 --dry-run：%v", err)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 			}
 		})
 	}

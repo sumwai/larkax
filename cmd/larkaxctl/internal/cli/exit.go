@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"errors"
@@ -31,11 +31,11 @@ import (
 // 连不上库要去看环境、约束冲突要改数据。混成一个码，脚本只能去匹配错误
 // 文本，而错误文本是给人看的，措辞会随改动而变。
 const (
-	exitOK        = 0
-	exitFailure   = 1
-	exitUsage     = 2
-	exitDBUnreach = 3
-	exitConflict  = 4
+	ExitOK        = 0
+	ExitFailure   = 1
+	ExitUsage     = 2
+	ExitDBUnreach = 3
+	ExitConflict  = 4
 )
 
 // codedError 给一个错误带上退出码，外加两个形状标记。
@@ -64,7 +64,7 @@ func (e *codedError) Error() string {
 }
 func (e *codedError) Unwrap() error { return e.err }
 
-// usageErr 把一个参数错误标成 exitUsage。
+// UsageErr 把一个参数错误标成 exitUsage。
 //
 // 用法是「解析与校验参数的那一段返回什么，就把它包一层」。判的都是「这条命令本身
 // 对不对」：改一下命令重发就能过，所以这一层能标的一定是参数问题，不必去猜错误的
@@ -73,22 +73,22 @@ func (e *codedError) Unwrap() error { return e.err }
 // **校验不都在连库之前**：`user update` 那条「--no-merchant 打在 admin 上」要读过
 // 库里那一行才判得出（见 docs/cli-reference.md 的退出码一节，`2` 的第三类）。它
 // 仍然是参数错——错在命令不在数据，补救动作是改命令重发，与解析阶段那几类一样。
-func usageErr(err error) error {
+func UsageErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &codedError{code: exitUsage, err: err}
+	return &codedError{code: ExitUsage, err: err}
 }
 
-// dbErr 把一个连库失败标成 exitDBUnreach。
-func dbErr(err error) error {
+// DBErr 把一个连库失败标成 exitDBUnreach。
+func DBErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &codedError{code: exitDBUnreach, err: err}
+	return &codedError{code: ExitDBUnreach, err: err}
 }
 
-// reportedErr 把一个「报告已经说清楚了」的失败标出来。
+// ReportedErr 把一个「报告已经说清楚了」的失败标出来。
 //
 // 体检类命令（doctor / partition check / ledger verify / secret rotate
 // --verify / ledger reconcile）跑完之后，结论本身就在它们打出来的那份报告
@@ -98,26 +98,26 @@ func dbErr(err error) error {
 //
 // 退出码原样保留（它已经是对的）：非零，调度器据此告警。内层若已经带码就以
 // 那个码为准，不在这里重新分类。
-func reportedErr(err error) error {
+func ReportedErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &codedError{code: exitCode(err), err: err, reportOnly: true}
+	return &codedError{code: ExitCode(err), err: err, reportOnly: true}
 }
 
-// internalErr 把一个内部故障标出来（序列化失败、不变量被破坏）。
+// InternalErr 把一个内部故障标出来（序列化失败、不变量被破坏）。
 //
 // 退出码是 exitFailure：它不是输入错（2）也不是环境故障（3），脚本对它的
 // 处置就是「上报」。
-func internalErr(err error) error {
+func InternalErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &codedError{code: exitFailure, err: err, internal: true}
+	return &codedError{code: ExitFailure, err: err, internal: true}
 }
 
-// reportedOnly 判断一个错误是不是「报告已说明」，供 main 决定打不打那一行。
-func reportedOnly(err error) bool {
+// ReportedOnly 判断一个错误是不是「报告已说明」，供 main 决定打不打那一行。
+func ReportedOnly(err error) bool {
 	var coded *codedError
 	return errors.As(err, &coded) && coded.reportOnly
 }
@@ -236,19 +236,19 @@ var conflictErrors = []error{
 	// model onboard 的五步判重：某一步发现目标已经在库里，而这次没给
 	// --update。它与撞唯一键同一档——下一步都是先看库里现在是什么，再决定
 	// 要不要覆盖。
-	errOnboardExists,
+	ErrOnboardExists,
 
 	// 要看的那个配置项在 settings 表里没有行。**不能**改用它旁边那个
 	// settings.ErrUnknownKey：那是写入路径的哨兵，`settings set` 撞上它给的
 	// 退出码是 1（见 docs/cli-reference.md 的退出码一节），登记到这里会把那条
 	// 命令的码也改成 4。读与写各有一个形状相同、归宿不同的错误值。
-	errSettingsNotFound,
+	ErrSettingsNotFound,
 	// 插件 KV 里要读或要删的那个键不在。与上面那些是同一个形状（要动的那一行
 	// 不在），只是缺的那一行在 plugin_kv 里，而且**过期的行也算不在**——它还在
 	// 表里躺着，但对读与删都等于没有。由命令自己造，存储层不返回它：KV 的读与删
 	// 把「不存在」与「已经过期」归成一个 false，没有、也不该有一个错误值
-	// （与下面 errSnapshotNotFound 同一个位置）。
-	errPluginKVKeyNotFound,
+	// （与下面 ErrSnapshotNotFound 同一个位置）。
+	ErrPluginKVKeyNotFound,
 
 	// 要撤销的那条授权不在库里，或者已经撤销过。它与上面那些是同一个形状
 	// （要改的那一行不在），只是缺的那一行在 capture_consents 里。
@@ -257,7 +257,7 @@ var conflictErrors = []error{
 	// 读路径上的「要读的那一条不在」：snapshot get 一条都没读到。它与上面
 	// 那些写入路径的哨兵是同一个形状，只是发生在**读**的一侧，所以它由命令
 	// 自己造（snapshot.go），不来自某个 store 包。
-	errSnapshotNotFound,
+	ErrSnapshotNotFound,
 
 	// 支付单那一侧的两个形状：按单号找不到那一行，与同一个单号已经是一条
 	// 内容不同的单子。两者的下一步都是先去看 `wallet payment status` 或库里
@@ -311,12 +311,12 @@ var usageErrors = []error{
 	auth.ErrDeletionConfirmMismatch,
 }
 
-// exitCode 给出一个错误该用的退出码。
+// ExitCode 给出一个错误该用的退出码。
 //
 // 显式标记（codedError）优先于按哨兵分类：命令自己知道得最清楚。
-func exitCode(err error) int {
+func ExitCode(err error) int {
 	if err == nil {
-		return exitOK
+		return ExitOK
 	}
 
 	var coded *codedError
@@ -325,27 +325,27 @@ func exitCode(err error) int {
 	}
 	for _, target := range noChangeErrors {
 		if errors.Is(err, target) {
-			return exitUsage
+			return ExitUsage
 		}
 	}
 	for _, target := range usageErrors {
 		if errors.Is(err, target) {
-			return exitUsage
+			return ExitUsage
 		}
 	}
 	for _, target := range conflictErrors {
 		if errors.Is(err, target) {
-			return exitConflict
+			return ExitConflict
 		}
 	}
-	return exitFailure
+	return ExitFailure
 }
 
-// helpRequested 判断这次失败其实是「用户要帮助」。
+// HelpRequested 判断这次失败其实是「用户要帮助」。
 //
 // flag 在解析到 -h / --help 时返回 ErrHelp，而那时用法已经打印过了。
 // 把它当失败（还多打一行「flag: help requested」）会让 `larkaxctl channel -h`
 // 在脚本里看起来像一次错误，而它显然不是。
-func helpRequested(err error) bool {
+func HelpRequested(err error) bool {
 	return errors.Is(err, flag.ErrHelp)
 }

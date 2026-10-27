@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // 这一组管的是 --auto-ref 的三条契约：
@@ -25,7 +27,7 @@ func TestNewAutoRefShape(t *testing.T) {
 	// 本地时间是 10 月 24 日凌晨 2 点，UTC 还是 10 月 23 日：日期段必须取 UTC，
 	// 否则同一个时刻在不同时区的机器上会生成两个日期。
 	at := time.Date(2026, 10, 24, 2, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
-	ref, err := newAutoRef(at)
+	ref, err := cli.NewAutoRef(at)
 	if err != nil {
 		t.Fatalf("生成自动单号失败: %v", err)
 	}
@@ -48,7 +50,7 @@ func TestNewAutoRefCharsetAndVariation(t *testing.T) {
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	seen := make(map[string]bool)
 	for i := 0; i < 256; i++ {
-		ref, err := newAutoRef(now)
+		ref, err := cli.NewAutoRef(now)
 		if err != nil {
 			t.Fatalf("第 %d 次生成失败: %v", i, err)
 		}
@@ -65,7 +67,7 @@ func TestNewAutoRefCharsetAndVariation(t *testing.T) {
 // TestResolveOrderRefChoices 钉住「--ref / --auto-ref 二选一」的三种结果。
 func TestResolveOrderRefChoices(t *testing.T) {
 	t.Run("只给 --ref 就用它", func(t *testing.T) {
-		got, err := resolveOrderRef("  ORD-1  ", false, missingRefError("测试单号"))
+		got, err := cli.ResolveOrderRef("  ORD-1  ", false, cli.MissingRefError("测试单号"))
 		if err != nil {
 			t.Fatalf("给了 --ref 还报错: %v", err)
 		}
@@ -75,7 +77,7 @@ func TestResolveOrderRefChoices(t *testing.T) {
 	})
 
 	t.Run("只给 --auto-ref 就生成", func(t *testing.T) {
-		got, err := resolveOrderRef("", true, missingRefError("测试单号"))
+		got, err := cli.ResolveOrderRef("", true, cli.MissingRefError("测试单号"))
 		if err != nil {
 			t.Fatalf("--auto-ref 报错: %v", err)
 		}
@@ -85,12 +87,12 @@ func TestResolveOrderRefChoices(t *testing.T) {
 	})
 
 	t.Run("两个都没给是参数错", func(t *testing.T) {
-		_, err := resolveOrderRef("", false, missingRefError("测试单号"))
+		_, err := cli.ResolveOrderRef("", false, cli.MissingRefError("测试单号"))
 		if err == nil {
 			t.Fatal("两个都没给却成功了：这就是那条「静默重复扣款」的路")
 		}
-		if got := exitCode(err); got != exitUsage {
-			t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+		if got := cli.ExitCode(err); got != cli.ExitUsage {
+			t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 		}
 		if !strings.Contains(err.Error(), "缺少 --ref 或 --auto-ref") {
 			t.Errorf("报错没有点出这两个旗标: %v", err)
@@ -98,12 +100,12 @@ func TestResolveOrderRefChoices(t *testing.T) {
 	})
 
 	t.Run("两个一起给是参数错", func(t *testing.T) {
-		_, err := resolveOrderRef("ORD-1", true, missingRefError("测试单号"))
+		_, err := cli.ResolveOrderRef("ORD-1", true, cli.MissingRefError("测试单号"))
 		if err == nil {
 			t.Fatal("--ref 与 --auto-ref 一起给却成功了")
 		}
-		if got := exitCode(err); got != exitUsage {
-			t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+		if got := cli.ExitCode(err); got != cli.ExitUsage {
+			t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 		}
 	})
 }
@@ -144,8 +146,8 @@ func TestWriteCommandsRejectMissingRef(t *testing.T) {
 			if err == nil {
 				t.Fatal("既没给 --ref 也没给 --auto-ref，命令却成功了")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Fatalf("退出码 = %d，期望 %d（参数错），错误是 %v", got, exitUsage, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Fatalf("退出码 = %d，期望 %d（参数错），错误是 %v", got, cli.ExitUsage, err)
 			}
 			if !strings.Contains(err.Error(), "--auto-ref") {
 				t.Errorf("报错没有提到 --auto-ref，读的人不知道还有这条路: %v", err)
@@ -164,8 +166,8 @@ func TestWriteCommandsRejectRefWithAutoRef(t *testing.T) {
 			if err == nil {
 				t.Fatal("--ref 与 --auto-ref 一起给，命令却成功了")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Fatalf("退出码 = %d，期望 %d（参数错），错误是 %v", got, exitUsage, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Fatalf("退出码 = %d，期望 %d（参数错），错误是 %v", got, cli.ExitUsage, err)
 			}
 			if !strings.Contains(err.Error(), "只能给一个") {
 				t.Errorf("报错没有说清两个旗标互斥: %v", err)
@@ -318,7 +320,7 @@ func TestWalletCreditAutoRefDryRunMatchesRealRun(t *testing.T) {
 	mustRun(t, runWalletCreate, "--user", user)
 
 	dryOut := mustRun(t, runWalletCredit, "--user", user, "--amount", "100", "--auto-ref", "--dry-run")
-	assertHas(t, dryOut, "将入账", dryRunNote)
+	assertHas(t, dryOut, "将入账", cli.DryRunNote)
 
 	ref := refFromOutput(t, dryOut)
 	if !autoRefPattern.MatchString(ref) {

@@ -20,8 +20,8 @@
 所以它们各有各的符号，也各自影响退出码。
 
 体检类命令（`doctor`、`partition check`、`ledger verify`、
-`secret rotate --verify`）共用同一条渲染路径 `printStatusLines`
-（`cmd/larkaxctl/style.go`）：
+`secret rotate --verify`）共用同一条渲染路径 `PrintStatusLines`
+（`cmd/larkaxctl/internal/cli/style.go`）：
 每一项一行「状态符 标题 一句结论」，标题那一栏按最宽的那个对齐，细节只在 `-v`
 时跟着各自那一行缩进打出来。默认一屏收敛的是**篇幅**，不是信息量——原先那些
 长句一条都没删，只是挪进了 `-v`。
@@ -42,24 +42,24 @@
 不上色不是「颜色变成透明」，而是那几段字节根本不存在：`| grep` 与写进文件的
 输出里不会夹着控制码。
 
-帮助文本（`printUsage`，唯一的帮助出口）另有第四条：`--format json` 之下不上色
+帮助文本（`PrintUsage`，唯一的帮助出口）另有第四条：`--format json` 之下不上色
 ——那一档是给管道下游的纯文本，混进控制码只会让下游多剥一层壳。`-q` 不在这一条
 里：帮助是使用者主动要的，照打、照上色。帮助只给**结构**上色：段标题与组标题、
-命令名与选项名加粗，说明与指针行置灰；规则在 `cmd/larkaxctl/style.go` 的
-`paintHelp`，它只插样式码、不动内容与排版（`style_test.go` 的
+命令名与选项名加粗，说明与指针行置灰；规则在 `cmd/larkaxctl/internal/cli/style.go` 的
+`Palette.PaintHelp`，它只插样式码、不动内容与排版（`style_test.go` 的
 `TestHelpTextStylesWithoutChangingContent` 比对「剥掉样式码之后与不上色那一档
 逐字相同」）。
 
 样式只有三种：关键实体（表头、主键、出错的对象）加粗，辅助描述（版本号、耗时、
-时间戳）置灰，失败项的状态符是加粗红。都收在 `cmd/larkaxctl/style.go` 里，
-**调用点不要自己拼转义序列**：转义序列是唯一样式出口 `palette` 的产物，自己拼
+时间戳）置灰，失败项的状态符是加粗红。都收在 `cmd/larkaxctl/internal/cli/style.go` 里，
+**调用点不要自己拼转义序列**：转义序列是唯一样式出口 `Palette` 的产物，自己拼
 就绕过了上面那三个判断，`| grep` 里会夹进控制码。这一点按字面量钉在
 `renderpaths_test.go` 的 `TestOnlyThePalettePaints` 里（用法文本那几段是例外：
 它们举例子解释输出长什么样，自己不打印）。
 
 ## 表格按显示宽度对齐
 
-`newTableWriter`（`cmd/larkaxctl/table.go`）按**显示列**补空格：汉字、假名、
+`NewTableWriter`（`cmd/larkaxctl/internal/cli/table.go`）按**显示列**补空格：汉字、假名、
 谚文与全角标点算两列。样式码不占列，所以先上色再对齐与先对齐再上色结果一样。
 
 不要改回标准库的 `tabwriter`：它按 rune 数补空格，同一栏里既有 `ID` 又有
@@ -90,7 +90,7 @@
 默认只打第一条，其余的折成「（另有 N 条，用 -v 看）」。
 
 `doctor` 之外的体检命令（`partition check`、`ledger verify`、
-`secret rotate --verify`）自己收一组 `statusLine` 交给 `printStatusLines`，
+`secret rotate --verify`）自己收一组 `cli.StatusLine` 交给 `PrintStatusLines`，
 不要另起一套渲染：状态符、对齐、`-v` 缩进都从这条路出来。
 
 **汇总行不由这条路打。** 它有自己的前缀与档数，由各命令自己打，打不打也由
@@ -99,7 +99,7 @@
 N 项通过 (运行 -v 查看细节)`），`ledger verify` 与 `secret rotate --verify`
 只有那一行、不打汇总。
 
-计数分两条实现，不是一处：`partition check` 用 `countStatusLines` 从**打出去的
+计数分两条实现，不是一处：`partition check` 用 `cli.CountStatusLines` 从**打出去的
 行**里数；`doctor` 从自己报告结构上的计数（`rep.counts()`）数。汇总说的是「上面
 这一屏里有几项」，所以从打出去的行里数更不容易说谎——多打或少打一行时，
 从数据结构数出来的那句汇总会与它上面那一屏对不上。
@@ -114,7 +114,7 @@ N 项通过 (运行 -v 查看细节)`），`ledger verify` 与 `secret rotate --
   RFC3339 会把一栏撑到 25 列。要精确到秒的时候看单个实体的回显，它仍然打完整时刻。
 - 空清单打一句 **`暂无<实体>。可使用 larkaxctl <子命令> 添加。`**，不要什么都不
   输出：空清单与「命令没跑起来」在安静的终端里长得一样。这句模板只有
-  `style.go` 的 `emptyListNote` 一处，调用点传实体名与添加它的子命令；
+  `internal/cli/style.go` 的 `EmptyListNote` 一处，调用点传实体名与添加它的子命令；
   **没有「添加」这个动作的清单不走它**（给不出可执行的下一步时硬造一个命令名
   更坏，例如 `ledger balance --all` 的科目由分录产生）。逐条钉在
   `style_test.go` 的 `TestEmptyListMessages` 里，模板的唯一性钉在
@@ -122,7 +122,7 @@ N 项通过 (运行 -v 查看细节)`），`ledger verify` 与 `secret rotate --
 - 被 `--limit` 截住时，末行补一句 **`（以上是最近 N 条，更早的没打出来：把 --limit
   调大，或用筛选条件缩小范围）`**，没被截住时一个字都不补：一份少了后文的清单与一份
   完整的清单在屏幕上长得一样，而每次都补一句「可能还有」与不补一样没用。这句模板
-  只有 `style.go` 的 `truncatedListNote` 一处，调用点只传打了多少条；**「打出来的
+  只有 `internal/cli/style.go` 的 `TruncatedListNote` 一处，调用点只传打了多少条；**「打出来的
   条数等于上限」不足以判截断**，查询要多读一行（`LIMIT limit+1`）才分得开「刚好打完」
   与「恰好被截住」。
 - 一个实体**只点一次身份**：写名字就不挂 ID（`用户 alice`，不是
@@ -308,7 +308,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 
 | 路径 | 谁在用 | 怎么打 | 为什么 |
 |---|---|---|---|
-| `--format json` | 脚本、探针（`\| jq`） | `jsonTime` / `jsonTimePtr` / `jsonTimeOrNull`（`cmd/larkaxctl/format.go`），恒 `t.UTC()`、精度到纳秒 | 同一行在两台机器上必须编出**同一个**字符串，比对、缓存键、对账的一方不会去猜写它的机器在哪个时区 |
+| `--format json` | 脚本、探针（`\| jq`） | `JSONTime` / `JSONTimePtr` / `JSONTimeOrNull`（`cmd/larkaxctl/internal/cli/format.go`），恒 `t.UTC()`、精度到纳秒 | 同一行在两台机器上必须编出**同一个**字符串，比对、缓存键、对账的一方不会去猜写它的机器在哪个时区 |
 | 终端表格 / 状态行 | 在终端里扫一眼的人 | 各命令自己的 `Format(time.RFC3339)`，按进程时区 | 「这是几点」按本机时区读才是对的 |
 | 内部观测面的 HTTP JSON | 别的程序 | `internal/api/ratelimitusage.go` 的时间栏、`internal/plugin/adapter.go` 给插件的 `resets_at`，两者恒 `.UTC()` | 同上：机器读的不能带本机时区 |
 
@@ -318,7 +318,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
 默认跑在 UTC，本地开发机也常是 UTC，于是这类偏差**不会自己冒出来**：修的是
 被发现的实例，不是这一类。
 
-所以出 JSON 的时刻只有 `jsonTime` 一条路，**别在任何一处再手工 `Format`**：
+所以出 JSON 的时刻只有 `JSONTime` 一条路，**别在任何一处再手工 `Format`**：
 多一处就多一处要记得带 `.UTC()` 的地方。`cmd/larkaxctl` 里这条规矩由
 `TestJSONTimeIsUTCWhateverTheProcessZone`（`format_test.go`）钉住——它在
 `TZ=Asia/Shanghai` 下会显形、在 UTC 下不会，`gates.yml` 因此单开一步在非 UTC
@@ -364,7 +364,7 @@ larkaxctl channel list -o json | jq -r '.channels[] | select(.status == "enabled
    **不要**把表格转成 JSON：转出来的金额是字符串、缺值是占位符，而这两件事
    正是这一档最不能有的。
 4. 写类等还没接的命令，在函数体**第一行**、连库之前
-   `if err := jsonUnsupported("<命令名>"); err != nil { return err }`。
+   `if err := cli.JSONUnsupported("<命令名>"); err != nil { return err }`。
    放在写库之后就成了「先把事情做完，再报不支持」。
 5. 用例一律 `json.Unmarshal` 之后断言字段，**不靠人眼看**；空清单、`null`
    的那几栏、以及退出码各钉一条。命令级再补一条：跑一遍真命令，断言 stdout

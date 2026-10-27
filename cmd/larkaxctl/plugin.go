@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/plugin"
@@ -200,8 +201,8 @@ var pluginActions = []string{"list", "get", "publish", "enable", "disable", "del
 
 func runPlugin(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, pluginShortUsage)
-		return usageErr(errors.New("plugin 需要子命令"))
+		cli.PrintUsage(os.Stderr, pluginShortUsage)
+		return cli.UsageErr(errors.New("plugin 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -221,22 +222,22 @@ func runPlugin(args []string) error {
 	case "kv":
 		return runPluginKV(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, pluginShortUsage)
+		cli.PrintUsage(os.Stdout, pluginShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, pluginShortUsage)
-		return usageErr(fmt.Errorf("未知的 plugin 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, pluginShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 plugin 子命令 %q", action))
 	}
 }
 
 func runPluginList(args []string) error {
-	fs := newFlagSet("plugin list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	fs := cli.NewFlagSet("plugin list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -244,12 +245,12 @@ func runPluginList(args []string) error {
 		if err != nil {
 			return err
 		}
-		// JSON 是**另一条渲染路径**（见 format.go 开头）：表格那一档把坏掉的
+		// JSON 是**另一条渲染路径**（见 cli 包的 format.go 开头）：表格那一档把坏掉的
 		// meta 折成表后的一行说明，这一档给 meta_problem 那一栏。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, pluginListDoc(rows), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, pluginListDoc(rows), nil)
 		}
-		printPluginList(humanStdout(), rows)
+		printPluginList(cli.HumanStdout(), rows)
 		return nil
 	})
 }
@@ -275,18 +276,18 @@ func printPluginList(w io.Writer, rows []pluginstore.Row) {
 	if len(rows) == 0 {
 		// 明确打一句，而不是什么都不输出：「暂无插件」与「命令因为某个
 		// 原因没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
-		_, _ = fmt.Fprintln(w, emptyListNote("插件", "plugin publish"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("插件", "plugin publish"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("KEY"), p.bold("VERSION"), p.bold("STATUS"), p.bold("GENERATION"),
-		p.bold("PRIORITY"), p.bold("NAME"), p.bold("在跑"), p.bold("上次加载"))
+		p.Bold("KEY"), p.Bold("VERSION"), p.Bold("STATUS"), p.Bold("GENERATION"),
+		p.Bold("PRIORITY"), p.Bold("NAME"), p.Bold("在跑"), p.Bold("上次加载"))
 	for _, row := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
-			p.bold(row.Key), row.Version, row.Status, row.Generation, row.Priority, row.Name,
+			p.Bold(row.Key), row.Version, row.Status, row.Generation, row.Priority, row.Name,
 			runningMark(row), loadMark(row))
 	}
 	_ = tw.Flush()
@@ -424,14 +425,14 @@ func loadTime(a *pluginstore.LoadAttempt) string {
 
 // pluginListDoc 组装 plugin list 的机器可读输出。
 //
-// 与 printPluginList 是同一份数据的另一条渲染路径（见 format.go 开头）。
+// 与 printPluginList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）。
 // 键名用**库里的列名**，与那张表的表头同一条理由：它们在 psql 里、在迁移
 // 文件里、在这里是同一个东西。
 func pluginListDoc(rows []pluginstore.Row) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(rows)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		entries = append(entries, pluginEntry(row))
@@ -472,8 +473,8 @@ func pluginEntry(row pluginstore.Row) map[string]any {
 		"name":       row.Name,
 		// 坏掉的那一行照样在清单里（见 printPluginList 的注释）：整次报错或
 		// 跳过它，都会让最需要看清单的那一刻看不到东西。
-		"meta_problem":       nullableString(row.MetaProblem),
-		"compile_error":      nullableString(row.CompileError),
+		"meta_problem":       cli.NullableString(row.MetaProblem),
+		"compile_error":      cli.NullableString(row.CompileError),
 		"latest":             row.Latest,
 		"running_generation": generationOrNull(row.Running),
 		"running_load":       loadAttemptOrNull(row.RunningLoad),
@@ -500,8 +501,8 @@ func loadAttemptOrNull(a *pluginstore.LoadAttempt) any {
 	}
 	return map[string]any{
 		"result": a.Result,
-		"error":  nullableString(a.Error),
-		"at":     jsonTimeOrNull(a.At),
+		"error":  cli.NullableString(a.Error),
+		"at":     cli.JSONTimeOrNull(a.At),
 	}
 }
 
@@ -510,17 +511,17 @@ func loadAttemptOrNull(a *pluginstore.LoadAttempt) any {
 // 只读，所以**不要主密钥**（与 list 同一条）：它不改任何东西，而多要一份密钥
 // 材料只会让查看这一个动作在只有库口令的机器上跑不起来。
 func runPluginGet(args []string) error {
-	fs := newFlagSet("plugin get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	fs := cli.NewFlagSet("plugin get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf("get 需要一个插件 key，得到 %d 个参数", fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("get 需要一个插件 key，得到 %d 个参数", fs.NArg()))
 	}
 	key := strings.TrimSpace(fs.Arg(0))
 	if key == "" {
-		return usageErr(errors.New("get 的插件 key 不能为空"))
+		return cli.UsageErr(errors.New("get 的插件 key 不能为空"))
 	}
 
 	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -529,11 +530,11 @@ func runPluginGet(args []string) error {
 			return err
 		}
 		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把上面那张表转成 JSON
-		// （见 format.go 开头）。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, pluginGetDoc(d), nil)
+		// （见 cli 包的 format.go 开头）。
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, pluginGetDoc(d), nil)
 		}
-		printPluginDetail(humanStdout(), d)
+		printPluginDetail(cli.HumanStdout(), d)
 		return nil
 	})
 }
@@ -548,10 +549,10 @@ func runPluginGet(args []string) error {
 // （key / version / …）已经在清单那张表上出现过一次了——那一处要的是与 psql、
 // 与迁移文件对得上，这一处要的是读得顺。
 func printPluginDetail(w io.Writer, d pluginstore.Detail) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("KEY", d.Key)
 	row("版本", d.Version)
@@ -636,13 +637,13 @@ func pluginCreatedBy(id *int64) string {
 // 同一条理由）。这三栏是**加**不是换——list 里问不出来的正是「这一行是谁、什么
 // 时候写的」与「这个 key 下有几行」。
 func pluginGetDoc(d pluginstore.Detail) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 
 	entry := pluginEntry(d.Row)
 	entry["versions"] = d.Versions
 	// 走 jsonTime（恒 UTC、完整精度），不走表格那一档的 formatTimeValue：库里
 	// 交回来的是带会话时区的时刻，直接打出来同一行在两台机器上不一样。
-	entry["created_at"] = jsonTime(d.CreatedAt)
+	entry["created_at"] = cli.JSONTime(d.CreatedAt)
 	// nil 是「没有记录」——那一列可空，迁移或手工 SQL 写下的行就是 NULL，
 	// 与「写自用户 0」不是一回事。
 	var createdBy any
@@ -657,13 +658,13 @@ func pluginGetDoc(d pluginstore.Detail) map[string]any {
 
 func runPluginPublish(args []string) error {
 	// 在**函数体第一行**拦下来，早于读文件、更早于连库与落库：publish 会写进
-	// plugins 表，做完再报不支持就成了一次静默的写入（见 format.go）。
-	if err := jsonUnsupported("plugin publish"); err != nil {
+	// plugins 表，做完再报不支持就成了一次静默的写入（见 cli 包的 format.go）。
+	if err := cli.JSONUnsupported("plugin publish"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plugin publish", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	fs := cli.NewFlagSet("plugin publish", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginShortUsage) }
 	key := fs.String("key", "", "")
 	priority := fs.Int("priority", 0, "")
 	// 操作人必填，与 settings set 的 --by 同一条约定（见那个命令里的说明）：
@@ -671,18 +672,18 @@ func runPluginPublish(args []string) error {
 	// ——允许留空的话，最省事的用法就是永远不填。
 	by := fs.String("by", "", "")
 	if err := parseFlagsAnywhere(fs, args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	switch {
 	case fs.NArg() == 0:
 		// 不打整段用法：人已经会用这条命令了，只是漏了源文件路径。用法留给
 		// 「还没开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
-		return usageErr(errors.New("缺少插件源文件路径"))
+		return cli.UsageErr(errors.New("缺少插件源文件路径"))
 	case fs.NArg() > 1:
-		return usageErr(fmt.Errorf("publish 只接受一个源文件，多出 %q", fs.Arg(1)))
+		return cli.UsageErr(fmt.Errorf("publish 只接受一个源文件，多出 %q", fs.Arg(1)))
 	}
 	if strings.TrimSpace(*by) == "" {
-		return usageErr(errors.New("缺少 --by：这条命令要记下是谁发布的插件"))
+		return cli.UsageErr(errors.New("缺少 --by：这条命令要记下是谁发布的插件"))
 	}
 	path := fs.Arg(0)
 
@@ -692,7 +693,7 @@ func runPluginPublish(args []string) error {
 		// 前者的下一步是改命令，后者是看环境。脚本按退出码分派，混成一个数
 		// 就只能去匹配错误文本了。
 		if errors.Is(err, os.ErrNotExist) {
-			return usageErr(fmt.Errorf("读取插件源文件失败: %w", err))
+			return cli.UsageErr(fmt.Errorf("读取插件源文件失败: %w", err))
 		}
 		return fmt.Errorf("读取插件源文件失败: %w", err)
 	}
@@ -720,7 +721,7 @@ func runPluginPublish(args []string) error {
 	// 空着的话所有版本会挤成同一个 (key, '')，第二次发布就变成覆盖第一代，
 	// 而那种「怎么发都是同一行」在清单上要盯着 generation 才看得出来。
 	if strings.TrimSpace(compiled.Meta.Version) == "" {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"插件 %s 的 meta 里没有 version：它在源码里声明（export const meta = { version: \"1.0.0\", … }）",
 			compiled.Key))
 	}
@@ -754,10 +755,10 @@ func runPluginPublish(args []string) error {
 	if res.Overwritten {
 		action = "已覆盖（同一版本重新发布）"
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "插件 %s %s，版本 %s，第 %d 代，状态 %s。对 larkax 进程发 SIGHUP 后生效。\n",
+	_, _ = fmt.Fprintf(cli.HumanStdout(), "插件 %s %s，版本 %s，第 %d 代，状态 %s。对 larkax 进程发 SIGHUP 后生效。\n",
 		res.Key, action, res.Version, res.Generation, res.Status)
 	if res.Status != pluginstore.StatusActive {
-		_, _ = fmt.Fprintf(humanStdout(), "它还没有生效：%s 不参与注册，用 `larkaxctl plugin enable %s` 启用。\n",
+		_, _ = fmt.Fprintf(cli.HumanStdout(), "它还没有生效：%s 不参与注册，用 `larkaxctl plugin enable %s` 启用。\n",
 			pluginstore.StatusPending, res.Key)
 	}
 	return nil
@@ -800,7 +801,7 @@ func compileErrorKind(err error) string {
 //
 // 判断一个开关吃不吃值靠 IsBoolFlag：不吃值的开关后面那个词是位置参数，
 // 跟着一起挪会把文件名当成开关的值。
-func parseFlagsAnywhere(fs *flagSet, args []string) error {
+func parseFlagsAnywhere(fs *cli.FlagSet, args []string) error {
 	flags := make([]string, 0, len(args))
 	rest := make([]string, 0, len(args))
 
@@ -845,19 +846,10 @@ func flagName(arg string) (string, bool) {
 // 判据与补全那边共用一份：takesValue 认的是标准库的 IsBoolFlag 约定。
 // 未声明的名字按「取值」处理：多挪一个词进去会让 flag 报一句「flag provided
 // but not defined」，比把文件名吃掉更容易看懂。
-func isBoolFlag(fs *flagSet, name string) bool {
+func isBoolFlag(fs *cli.FlagSet, name string) bool {
 	f := fs.Lookup(name)
-	return f != nil && !takesValue(f.Value)
+	return f != nil && !cli.TakesValue(f.Value)
 }
-
-// errPluginKVKeyNotFound 表示要读或要删的那个键不在。
-//
-// 由命令自己造，而不是从存储层拿：KV 的读与删把「不存在」与「已经过期」归成
-// 同一个答案（回 false，见 kv.go 的 Get），所以那一层没有、也不该有一个表示
-// 「找不到」的错误值——它的调用方（插件）看到的都是 null。命令行这一档要给出
-// 一个退出码，于是这个判断落在这里（与 snapshot get 的 errSnapshotNotFound
-// 同一个形状）。
-var errPluginKVKeyNotFound = errors.New("插件 KV 里没有这个键")
 
 // requireMasterKey 要求这台机器带着主密钥。
 //
@@ -885,22 +877,22 @@ func requireMasterKey() error {
 // 同样是写类，都不读它。
 func runPluginDelete(args []string) error {
 	// 在**函数体第一行**拦下来，早于连库：这条命令会删插件与它的私有存储，
-	// 做完再报不支持就成了一次静默的删除（见 format.go）。
-	if err := jsonUnsupported("plugin delete"); err != nil {
+	// 做完再报不支持就成了一次静默的删除（见 cli 包的 format.go）。
+	if err := cli.JSONUnsupported("plugin delete"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plugin delete", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	fs := cli.NewFlagSet("plugin delete", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf("delete 需要一个插件 key，得到 %d 个参数", fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("delete 需要一个插件 key，得到 %d 个参数", fs.NArg()))
 	}
 	key := strings.TrimSpace(fs.Arg(0))
 	if key == "" {
-		return usageErr(errors.New("delete 的插件 key 不能为空"))
+		return cli.UsageErr(errors.New("delete 的插件 key 不能为空"))
 	}
 
 	if err := requireMasterKey(); err != nil {
@@ -911,7 +903,7 @@ func runPluginDelete(args []string) error {
 		if err != nil {
 			return err
 		}
-		printPluginDeleteResult(humanStderr(), res)
+		printPluginDeleteResult(cli.HumanStderr(), res)
 		return nil
 	})
 }
@@ -938,8 +930,8 @@ var pluginKVActions = []string{"get", "set", "delete"}
 // runPluginKV 处理 plugin 下的 kv 子命令。
 func runPluginKV(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, pluginKVShortUsage)
-		return usageErr(errors.New("plugin kv 需要子命令"))
+		cli.PrintUsage(os.Stderr, pluginKVShortUsage)
+		return cli.UsageErr(errors.New("plugin kv 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -951,14 +943,14 @@ func runPluginKV(args []string) error {
 	case "delete":
 		return runPluginKVDelete(rest)
 	case "help":
-		printUsage(os.Stdout, pluginKVHelp.long)
+		cli.PrintUsage(os.Stdout, pluginKVHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, pluginKVHelp.short)
+		cli.PrintUsage(os.Stdout, pluginKVHelp.short)
 		return nil
 	default:
-		printUsage(os.Stderr, pluginKVShortUsage)
-		return usageErr(fmt.Errorf("未知的 plugin kv 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, pluginKVShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 plugin kv 子命令 %q", action))
 	}
 }
 
@@ -981,34 +973,34 @@ type kvTarget struct {
 // 值都是旗标，形状就统一了；另外键名与用户名都可能以减号开头（排障时插一个
 // `-1` 进去），走旗标才不会被当成另一个开关。
 func parseKVTarget(verb string, args []string) (kvTarget, error) {
-	fs := newFlagSet("plugin kv "+verb, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginKVShortUsage) }
+	fs := cli.NewFlagSet("plugin kv "+verb, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginKVShortUsage) }
 	plugin := fs.String("plugin", "", "")
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
-		return kvTarget{}, usageErr(err)
+		return kvTarget{}, cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return kvTarget{}, usageErr(fmt.Errorf(
+		return kvTarget{}, cli.UsageErr(fmt.Errorf(
 			"%s 不接受位置参数，得到 %q：插件用 --plugin、用户用 --user、键用 --key",
 			verb, fs.Arg(0)))
 	}
 
 	t := kvTarget{plugin: strings.TrimSpace(*plugin), user: *user, key: *key}
 	if t.plugin == "" {
-		return kvTarget{}, usageErr(errors.New("缺少 --plugin：这是哪个插件的键"))
+		return kvTarget{}, cli.UsageErr(errors.New("缺少 --plugin：这是哪个插件的键"))
 	}
 	if t.user == "" {
-		return kvTarget{}, usageErr(errors.New("缺少 --user：这个键是哪个用户的"))
+		return kvTarget{}, cli.UsageErr(errors.New("缺少 --user：这个键是哪个用户的"))
 	}
 	if t.key == "" {
-		return kvTarget{}, usageErr(errors.New("缺少 --key：要看、要写还是要删哪一个键"))
+		return kvTarget{}, cli.UsageErr(errors.New("缺少 --key：要看、要写还是要删哪一个键"))
 	}
 	// 键会被 `plugin kv get` 打成「键」那一行：控制字符在连库之前拒掉
 	// （写入路径 store.KV.Set 也判一次，别的写方从那一头同样进不来）。
-	if err := checkDisplayText("--key", t.key); err != nil {
+	if err := cli.CheckDisplayText("--key", t.key); err != nil {
 		return kvTarget{}, err
 	}
 	return t, nil
@@ -1058,12 +1050,12 @@ func runPluginKVGet(args []string) error {
 			// 而在这条命令的输出上分辨它们也分辨不出来——表里那一行还在，但它
 			// 已经不算数了。
 			return fmt.Errorf("%w：插件 %s 的用户 %s 名下没有键 %q（也可能它已经过期）",
-				errPluginKVKeyNotFound, resolved.plugin, resolved.user, resolved.key)
+				cli.ErrPluginKVKeyNotFound, resolved.plugin, resolved.user, resolved.key)
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, pluginKVGetDoc(resolved, value), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, pluginKVGetDoc(resolved, value), nil)
 		}
-		printPluginKVEntry(humanStdout(), resolved, value)
+		printPluginKVEntry(cli.HumanStdout(), resolved, value)
 		return nil
 	})
 }
@@ -1074,10 +1066,10 @@ func runPluginKVGet(args []string) error {
 // 进去的任意文本，换行与制表符都可能带（写 JSON 时最常见），塞进单元格会顶出
 // 一行、多出一栏。命令不改写它，原样打出来。
 func printPluginKVEntry(w io.Writer, target kvTarget, value string) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("插件", target.plugin)
 	row("用户", target.user)
@@ -1096,7 +1088,7 @@ func printPluginKVEntry(w io.Writer, target kvTarget, value string) {
 // users.id：这两条读路径要回答的是「我查的是哪一个键」，照抄一次输入最不容易
 // 读错。要那个 ID 的话它在 users 表上，user get 打的就是它。
 func pluginKVGetDoc(target kvTarget, value string) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["entry"] = map[string]any{
 		"plugin": target.plugin,
 		"user":   target.user,
@@ -1108,47 +1100,47 @@ func pluginKVGetDoc(target kvTarget, value string) map[string]any {
 
 func runPluginKVSet(args []string) error {
 	// 在**函数体第一行**拦下来，早于 flag 解析、更早于连库：这条命令会往
-	// plugin_kv 里写一行，做完再报不支持就成了一次没人知道的写入（见 format.go）。
-	if err := jsonUnsupported("plugin kv set"); err != nil {
+	// plugin_kv 里写一行，做完再报不支持就成了一次没人知道的写入（见 cli 包的 format.go）。
+	if err := cli.JSONUnsupported("plugin kv set"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plugin kv set", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginKVShortUsage) }
+	fs := cli.NewFlagSet("plugin kv set", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginKVShortUsage) }
 	plugin := fs.String("plugin", "", "")
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	key := fs.String("key", "", "")
 	value := fs.String("value", "", "")
 	ttl := fs.Duration("ttl", 0, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q：值用 --value 给", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("set 不接受位置参数，得到 %q：值用 --value 给", fs.Arg(0)))
 	}
 
 	target := kvTarget{plugin: strings.TrimSpace(*plugin), user: *user, key: *key}
 	if target.plugin == "" {
-		return usageErr(errors.New("缺少 --plugin：这是哪个插件的键"))
+		return cli.UsageErr(errors.New("缺少 --plugin：这是哪个插件的键"))
 	}
 	if target.user == "" {
-		return usageErr(errors.New("缺少 --user：这个键是哪个用户的"))
+		return cli.UsageErr(errors.New("缺少 --user：这个键是哪个用户的"))
 	}
 	if target.key == "" {
-		return usageErr(errors.New("缺少 --key：要写哪一个键"))
+		return cli.UsageErr(errors.New("缺少 --key：要写哪一个键"))
 	}
 	// 负数直接拒，不按「不过期」处置：0 已经表达了不过期，让 -1 再表达一次
 	// 只会多出一条要记的规则，而写 `--ttl -1` 的人多半是想写一个很短的时长、
 	// 手滑多打了一个减号。
 	if *ttl < 0 {
-		return usageErr(fmt.Errorf("--ttl 不接受负数（得到 %s）：不给或给 0 就是不过期", *ttl))
+		return cli.UsageErr(fmt.Errorf("--ttl 不接受负数（得到 %s）：不给或给 0 就是不过期", *ttl))
 	}
 	// 键会被 `plugin kv get` 打成「键」那一行：控制字符在连库之前拒掉。
 	// set 的三个旗标比 get / delete 多（--value / --ttl），所以这一段解析没走
 	// parseKVTarget；判据仍与那两条共用同一个函数，免得只有读的那两条拦得住。
 	// 值不判：它按设计排在表外原样打（见 printPluginKVEntry）。
-	if err := checkDisplayText("--key", target.key); err != nil {
+	if err := cli.CheckDisplayText("--key", target.key); err != nil {
 		return err
 	}
 
@@ -1164,7 +1156,7 @@ func runPluginKVSet(args []string) error {
 			*value, *ttl); err != nil {
 			return err
 		}
-		printPluginKVSetResult(humanStderr(), resolved, *ttl, len(*value))
+		printPluginKVSetResult(cli.HumanStderr(), resolved, *ttl, len(*value))
 		return nil
 	})
 }
@@ -1189,7 +1181,7 @@ func printPluginKVSetResult(w io.Writer, target kvTarget, ttl time.Duration, byt
 
 func runPluginKVDelete(args []string) error {
 	// 与其余写类同一条：函数体第一行拦下 json 档。
-	if err := jsonUnsupported("plugin kv delete"); err != nil {
+	if err := cli.JSONUnsupported("plugin kv delete"); err != nil {
 		return err
 	}
 
@@ -1215,11 +1207,11 @@ func runPluginKVDelete(args []string) error {
 			// 看这个键在不在。删一个不存在的键报成成功，会让脚本把「我删掉了」
 			// 记下来，而库里那一行可能正被别人重新写进去。
 			return fmt.Errorf("%w：插件 %s 的用户 %s 名下没有可见的键 %q（也可能它已经过期）",
-				errPluginKVKeyNotFound, resolved.plugin, resolved.user, resolved.key)
+				cli.ErrPluginKVKeyNotFound, resolved.plugin, resolved.user, resolved.key)
 		}
 		// 开头不写「已删除插件」：那是卸载那条命令的回显开头，两条读起来
 		// 像是同一件事。这一条删的是一个键，插件还在。
-		_, _ = fmt.Fprintf(humanStderr(), "已删除 %s 的键 %s（用户 %s）。\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除 %s 的键 %s（用户 %s）。\n",
 			resolved.plugin, resolved.key, resolved.user)
 		return nil
 	})
@@ -1233,21 +1225,21 @@ func runPluginSetEnabled(args []string, enable bool) error {
 	// 命令名按 enable 算出来：这两条命令共用这一个入口，写死一个会让其中一条
 	// 在不支持 json 时报出兄弟命令的名字。拦在**函数体第一行**、连库之前——
 	// 它会改 plugin_activations，做完再报不支持就成了一次静默的启用/停用。
-	if err := jsonUnsupported("plugin " + verb); err != nil {
+	if err := cli.JSONUnsupported("plugin " + verb); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plugin "+verb, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pluginShortUsage) }
+	fs := cli.NewFlagSet("plugin "+verb, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pluginShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf("%s 需要一个插件 key，得到 %d 个参数", verb, fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("%s 需要一个插件 key，得到 %d 个参数", verb, fs.NArg()))
 	}
 	key := strings.TrimSpace(fs.Arg(0))
 	if key == "" {
-		return usageErr(fmt.Errorf("%s 的插件 key 不能为空", verb))
+		return cli.UsageErr(fmt.Errorf("%s 的插件 key 不能为空", verb))
 	}
 
 	return withDB(pluginTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -1261,7 +1253,7 @@ func runPluginSetEnabled(args []string, enable bool) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "插件 %s %s。对 larkax 进程发 SIGHUP 后生效。\n", key, done)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "插件 %s %s。对 larkax 进程发 SIGHUP 后生效。\n", key, done)
 		return nil
 	})
 }

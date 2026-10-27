@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // 本文件是 `snapshot access-log` 只读入口的用例。
@@ -246,7 +248,7 @@ func TestSnapshotAccessLogSystemRow(t *testing.T) {
 		t.Errorf("那一行的身份应当是 system：%s", line)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runSnapshot, []string{"access-log", "--request-id", requestID})
 	if r.err != nil {
 		t.Fatalf("snapshot access-log -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
@@ -363,7 +365,7 @@ func TestSnapshotAccessLogJSONShape(t *testing.T) {
 	from := at.Add(-time.Hour)
 	to := at.Add(time.Hour)
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runSnapshot, []string{"access-log", "--request-id", requestID,
 		"--user", itoa64(actor),
 		"--from", from.Format(time.RFC3339), "--to", to.Format(time.RFC3339)})
@@ -397,7 +399,7 @@ func TestSnapshotAccessLogJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
 	}
-	if doc.Status != jsonOK || doc.Summary.Total != 1 || len(doc.Accesses) != 1 {
+	if doc.Status != cli.JSONOK || doc.Summary.Total != 1 || len(doc.Accesses) != 1 {
 		t.Fatalf("形状不对：status=%q total=%d 行数=%d\n%s",
 			doc.Status, doc.Summary.Total, len(doc.Accesses), r.stdout)
 	}
@@ -452,8 +454,8 @@ func TestSnapshotAccessLogRejectsBadFlags(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("这一次应当报错，却成功返回了：stdout=%q", r.stdout)
 			}
-			if got := exitCode(r.err); got != exitUsage {
-				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 			}
 			if !strings.Contains(r.err.Error(), tc.want) {
 				t.Errorf("错误里没有 %q：%v", tc.want, r.err)

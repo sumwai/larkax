@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/expiry"
 )
 
@@ -231,8 +232,8 @@ var userPlanActions = []string{"grant", "list", "void", "order"}
 // runUserPlan 分发 user plan 的子命令。
 func runUserPlan(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userPlanHelp.short)
-		return usageErr(errors.New("user plan 需要子命令"))
+		cli.PrintUsage(os.Stderr, userPlanHelp.short)
+		return cli.UsageErr(errors.New("user plan 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -246,20 +247,20 @@ func runUserPlan(args []string) error {
 	case "order":
 		return runUserPlanOrder(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userPlanHelp.short)
+		cli.PrintUsage(os.Stdout, userPlanHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userPlanHelp.long)
+		cli.PrintUsage(os.Stdout, userPlanHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userPlanHelp.short)
-		return usageErr(fmt.Errorf("未知的 user plan 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, userPlanHelp.short)
+		return cli.UsageErr(fmt.Errorf("未知的 user plan 子命令 %q", action))
 	}
 }
 
 func runUserPlanGrant(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userPlanShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userPlanShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -274,8 +275,8 @@ func runUserPlanGrant(args []string) error {
 }
 
 func runUserPlanList(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userPlanShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userPlanShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -286,8 +287,8 @@ func runUserPlanList(args []string) error {
 }
 
 func runUserPlanVoid(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userPlanShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userPlanShortUsage) {
 		return nil
 	}
 	id, rest, err := takeOperand(args, "<订阅 ID>")
@@ -303,8 +304,8 @@ var userPlanOrderActions = []string{"show", "set"}
 
 func runUserPlanOrder(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userPlanHelp.short)
-		return usageErr(errors.New("user plan order 需要 show 或 set"))
+		cli.PrintUsage(os.Stderr, userPlanHelp.short)
+		return cli.UsageErr(errors.New("user plan order 需要 show 或 set"))
 	}
 	action, rest := args[0], args[1:]
 	switch action {
@@ -313,19 +314,19 @@ func runUserPlanOrder(args []string) error {
 	case "set":
 		return runUserPlanOrderSet(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userPlanHelp.short)
+		cli.PrintUsage(os.Stdout, userPlanHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userPlanHelp.long)
+		cli.PrintUsage(os.Stdout, userPlanHelp.long)
 		return nil
 	default:
-		return usageErr(fmt.Errorf("未知的 user plan order 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 user plan order 子命令 %q", action))
 	}
 }
 
 func runUserPlanOrderShow(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userPlanShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userPlanShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -336,8 +337,8 @@ func runUserPlanOrderShow(args []string) error {
 }
 
 func runUserPlanOrderSet(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userPlanShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userPlanShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -354,8 +355,8 @@ var userWalletActions = []string{"show", "credit", "adjust", "refund"}
 // runUserWallet 分发 user wallet 的子命令。
 func runUserWallet(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userWalletHelp.short)
-		return usageErr(errors.New("user wallet 需要子命令"))
+		cli.PrintUsage(os.Stderr, userWalletHelp.short)
+		return cli.UsageErr(errors.New("user wallet 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -369,20 +370,20 @@ func runUserWallet(args []string) error {
 	case "refund":
 		return runUserWalletRefund(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userWalletHelp.short)
+		cli.PrintUsage(os.Stdout, userWalletHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userWalletHelp.long)
+		cli.PrintUsage(os.Stdout, userWalletHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userWalletHelp.short)
-		return usageErr(fmt.Errorf("未知的 user wallet 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, userWalletHelp.short)
+		return cli.UsageErr(fmt.Errorf("未知的 user wallet 子命令 %q", action))
 	}
 }
 
 func runUserWalletShow(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userWalletShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userWalletShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -393,8 +394,8 @@ func runUserWalletShow(args []string) error {
 }
 
 func runUserWalletCredit(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userWalletShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userWalletShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -405,8 +406,8 @@ func runUserWalletCredit(args []string) error {
 }
 
 func runUserWalletAdjust(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userWalletShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userWalletShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -417,8 +418,8 @@ func runUserWalletAdjust(args []string) error {
 }
 
 func runUserWalletRefund(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userWalletShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userWalletShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -435,8 +436,8 @@ var userKeyActions = []string{"list", "create", "plans"}
 // runUserKey 分发 user key 的子命令。
 func runUserKey(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userKeyHelp.short)
-		return usageErr(errors.New("user key 需要子命令"))
+		cli.PrintUsage(os.Stderr, userKeyHelp.short)
+		return cli.UsageErr(errors.New("user key 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -448,20 +449,20 @@ func runUserKey(args []string) error {
 	case "plans":
 		return runUserKeyPlans(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userKeyHelp.short)
+		cli.PrintUsage(os.Stdout, userKeyHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userKeyHelp.long)
+		cli.PrintUsage(os.Stdout, userKeyHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userKeyHelp.short)
-		return usageErr(fmt.Errorf("未知的 user key 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, userKeyHelp.short)
+		return cli.UsageErr(fmt.Errorf("未知的 user key 子命令 %q", action))
 	}
 }
 
 func runUserKeyList(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userKeyShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userKeyShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -472,8 +473,8 @@ func runUserKeyList(args []string) error {
 }
 
 func runUserKeyCreate(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userKeyShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userKeyShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -490,8 +491,8 @@ var userKeyPlansActions = []string{"show", "set"}
 // runUserKeyPlans 分发 user key plans 的子命令（一把 Key 能用哪些订阅）。
 func runUserKeyPlans(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userKeyHelp.short)
-		return usageErr(errors.New("user key plans 需要 show 或 set"))
+		cli.PrintUsage(os.Stderr, userKeyHelp.short)
+		return cli.UsageErr(errors.New("user key plans 需要 show 或 set"))
 	}
 	action, rest := args[0], args[1:]
 	switch action {
@@ -500,19 +501,19 @@ func runUserKeyPlans(args []string) error {
 	case "set":
 		return runUserKeyPlansSet(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userKeyHelp.short)
+		cli.PrintUsage(os.Stdout, userKeyHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userKeyHelp.long)
+		cli.PrintUsage(os.Stdout, userKeyHelp.long)
 		return nil
 	default:
-		return usageErr(fmt.Errorf("未知的 user key plans 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 user key plans 子命令 %q", action))
 	}
 }
 
 func runUserKeyPlansShow(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userKeyShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userKeyShortUsage) {
 		return nil
 	}
 	id, rest, err := takeOperand(args, "<API Key ID>")
@@ -523,8 +524,8 @@ func runUserKeyPlansShow(args []string) error {
 }
 
 func runUserKeyPlansSet(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userKeyShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userKeyShortUsage) {
 		return nil
 	}
 	id, rest, err := takeOperand(args, "<API Key ID>")
@@ -541,8 +542,8 @@ var userUsageActions = []string{"events", "requests"}
 // runUserUsage 分发 user usage 的子命令。
 func runUserUsage(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, userUsageHelp.short)
-		return usageErr(errors.New("user usage 需要子命令"))
+		cli.PrintUsage(os.Stderr, userUsageHelp.short)
+		return cli.UsageErr(errors.New("user usage 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -552,20 +553,20 @@ func runUserUsage(args []string) error {
 	case "requests":
 		return runUserUsageRequests(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, userUsageHelp.short)
+		cli.PrintUsage(os.Stdout, userUsageHelp.short)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userUsageHelp.long)
+		cli.PrintUsage(os.Stdout, userUsageHelp.long)
 		return nil
 	default:
-		printUsage(os.Stderr, userUsageHelp.short)
-		return usageErr(fmt.Errorf("未知的 user usage 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, userUsageHelp.short)
+		return cli.UsageErr(fmt.Errorf("未知的 user usage 子命令 %q", action))
 	}
 }
 
 func runUserUsageEvents(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userUsageShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userUsageShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -576,8 +577,8 @@ func runUserUsageEvents(args []string) error {
 }
 
 func runUserUsageRequests(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userUsageShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userUsageShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -592,17 +593,17 @@ func runUserUsageRequests(args []string) error {
 // 以 - 开头的不当位置参数：那样报出来的是「不认识这个旗标」，而人写的是少了一个
 // 宾语；把两件事混成一句，读的人会去查旗标名。
 func takeOperand(args []string, name string) (string, []string, error) {
-	// 收集补全数据时（见 completion.go 的 collectCommandFlags）不判缺参数：
+	// 收集补全数据时（见 cli 包的 CollectFlags）不判缺参数：
 	// 那时走的是 `<命令> -h`，位置参数本来就不会给。让它照常往下走，
 	// 后面的 flag 集才注册得出来；真正的解析在 fs.Parse 里遇到 -h 就停了。
-	if collectingCommandFlags {
+	if cli.CollectingFlags() {
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			return args[0], args[1:], nil
 		}
 		return "", args, nil
 	}
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") || strings.TrimSpace(args[0]) == "" {
-		return "", nil, usageErr(fmt.Errorf("缺少 %s：把它写成位置参数", name))
+		return "", nil, cli.UsageErr(fmt.Errorf("缺少 %s：把它写成位置参数", name))
 	}
 	return args[0], args[1:], nil
 }
@@ -612,7 +613,7 @@ func takeOperand(args []string, name string) (string, []string, error) {
 // 走 stderr 的「提示」那一档：它是附注，不是这一次的结果（见 docs/cli-output.md）；
 // -q 之下跟着一起压掉，--format json 的 stdout 不受影响。
 func noteLegacyUserPath(message string) {
-	_, _ = fmt.Fprintf(humanStderr(),
+	_, _ = fmt.Fprintf(cli.HumanStderr(),
 		"提示：%s；旧路径至少保留一个发布周期。\n", message)
 }
 
@@ -630,7 +631,7 @@ func noteLegacyUserPath(message string) {
 // 落在后面才不会被当成结果的一部分；写在前面还得在两处各判一次「跑成没有」。
 func runLegacyUserPath(message string, run func() error) error {
 	err := run()
-	if exitCode(err) != exitUsage {
+	if cli.ExitCode(err) != cli.ExitUsage {
 		noteLegacyUserPath(message)
 	}
 	return err

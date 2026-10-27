@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/config"
@@ -187,8 +188,8 @@ var modelActions = []string{"add", "list", "get", "update", "delete", "onboard",
 
 func runModel(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, modelShortUsage)
-		return usageErr(errors.New("model 需要子命令"))
+		cli.PrintUsage(os.Stderr, modelShortUsage)
+		return cli.UsageErr(errors.New("model 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -212,24 +213,24 @@ func runModel(args []string) error {
 	case "trace":
 		return runModelTrace(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, modelShortUsage)
+		cli.PrintUsage(os.Stdout, modelShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, modelShortUsage)
-		return usageErr(fmt.Errorf("未知的 model 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, modelShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 model 子命令 %q", action))
 	}
 }
 
 func runModelCreate(args []string) error {
 	// 命令名写正式名 add：jsonUnsupported 那句会把命令名打给人看，而 create
 	// 是旧写法（见 modelUsage 的「旧名仍可用」）。
-	if err := jsonUnsupported("model add"); err != nil {
+	if err := cli.JSONUnsupported("model add"); err != nil {
 		return err
 	}
 
 	req, err := parseModelCreate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -238,7 +239,7 @@ func runModelCreate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -248,44 +249,44 @@ func runModelCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedModel(humanStdout(), humanStderr(), id, req.CanonicalName)
+	printCreatedModel(cli.HumanStdout(), cli.HumanStderr(), id, req.CanonicalName)
 	return nil
 }
 
 // modelCanonicalOperand 是 model add 的位置参数：规范模型名。
-var modelCanonicalOperand = operandSpec{
-	what:  "规范名",
-	flag:  "model",
-	usage: "写成第一个位置参数（larkaxctl model add <规范名> …）",
+var modelCanonicalOperand = cli.OperandSpec{
+	What:  "规范名",
+	Flag:  "model",
+	Usage: "写成第一个位置参数（larkaxctl model add <规范名> …）",
 }
 
 func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	// 规范名是第一个位置参数，且必须写在旗标前面：flag 包遇到第一个非旗标词就
 	// 停止解析，写在后面的一整段都会落进 NArg（下面按「多给了参数」报）。
-	operand, rest, takeErr := takeLeadingOperand(args, modelCanonicalOperand)
+	operand, rest, takeErr := cli.TakeLeadingOperand(args, modelCanonicalOperand)
 	if takeErr != nil {
 		return catalog.CreateModelRequest{}, takeErr
 	}
 
-	fs := newFlagSet("model add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	fs := cli.NewFlagSet("model add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	display := fs.String("display", "", "")
 	vendor := fs.String("vendor", "", "")
 	family := fs.String("family", "", "")
 	contextLimit := fs.Int("context-limit", 0, "")
-	intAlias(fs, contextLimit, "ctx")
+	cli.IntAlias(fs, contextLimit, "ctx")
 	inputLimit := fs.Int("input-limit", 0, "")
-	intAlias(fs, inputLimit, "in")
+	cli.IntAlias(fs, inputLimit, "in")
 	outputLimit := fs.Int("output-limit", 0, "")
-	intAlias(fs, outputLimit, "out")
+	cli.IntAlias(fs, outputLimit, "out")
 	capFlags := newCapabilityFlags(fs)
 	endpoints := fs.String("endpoints", "", "")
-	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "")
-	stringAlias(fs, modalitiesIn, "im")
-	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "")
-	stringAlias(fs, modalitiesOut, "om")
+	modalitiesIn := cli.LegacyStringFlag(fs, "input-modalities", "modalities-input", "")
+	cli.StringAlias(fs, modalitiesIn, "im")
+	modalitiesOut := cli.LegacyStringFlag(fs, "output-modalities", "modalities-output", "")
+	cli.StringAlias(fs, modalitiesOut, "om")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
 	releaseDate := fs.String("release-date", "", "")
 	if err := fs.Parse(rest); err != nil {
@@ -296,8 +297,8 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 			"add 不接受多余的参数，得到 %q：规范名要写成第一个位置参数，排在旗标前面", fs.Arg(0))
 	}
 	given := visitedFlags(fs)
-	canonicalName, nameErr := resolveOperand(
-		operand, *canonical, flagGiven(given, "model", "canonical", "m"), modelCanonicalOperand)
+	canonicalName, nameErr := cli.ResolveOperand(
+		operand, *canonical, cli.FlagGiven(given, "model", "canonical", "m"), modelCanonicalOperand)
 	if nameErr != nil {
 		return catalog.CreateModelRequest{}, nameErr
 	}
@@ -309,26 +310,26 @@ func parseModelCreate(args []string) (catalog.CreateModelRequest, error) {
 	}
 	// 这些值都会进 model list / get 的表格：控制字符在连库之前拒掉（判据在
 	// catalog 的写入路径，见 normalizeCanonicalName 一组）。
-	if err := checkDisplayText("--model（规范模型名）", canonicalName); err != nil {
+	if err := cli.CheckDisplayText("--model（规范模型名）", canonicalName); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
-	if err := checkDisplayText("--display（展示名）", displayName); err != nil {
+	if err := cli.CheckDisplayText("--display（展示名）", displayName); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
-	if err := checkDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
+	if err := cli.CheckDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
-	if err := checkDisplayText("--family（家族）", strings.TrimSpace(*family)); err != nil {
+	if err := cli.CheckDisplayText("--family（家族）", strings.TrimSpace(*family)); err != nil {
 		return catalog.CreateModelRequest{}, err
 	}
 	for i, value := range splitOptionalList(*modalitiesIn) {
-		if err := checkDisplayText(
+		if err := cli.CheckDisplayText(
 			fmt.Sprintf("--input-modalities（输入模态） 里第 %d 个", i+1), value); err != nil {
 			return catalog.CreateModelRequest{}, err
 		}
 	}
 	for i, value := range splitOptionalList(*modalitiesOut) {
-		if err := checkDisplayText(
+		if err := cli.CheckDisplayText(
 			fmt.Sprintf("--output-modalities（输出模态） 里第 %d 个", i+1), value); err != nil {
 			return catalog.CreateModelRequest{}, err
 		}
@@ -392,7 +393,7 @@ type modelCapabilityFlag struct {
 // 名字只写一次：它同时是 flag 包里的标志名与下面用来查「给没给」的键。
 // 两处各写一个字符串时，写歪的那一处不会报错——那个标志会静默地永远算
 // 「没给」，而它的表现是「关不掉一个能力」。
-func newCapabilityFlags(fs *flagSet) []modelCapabilityFlag {
+func newCapabilityFlags(fs *cli.FlagSet) []modelCapabilityFlag {
 	return []modelCapabilityFlag{
 		newCapabilityFlag(fs, "reasoning",
 			func(c *catalog.Capabilities, v *bool) { c.Reasoning = v }),
@@ -409,7 +410,7 @@ func newCapabilityFlags(fs *flagSet) []modelCapabilityFlag {
 	}
 }
 
-func newCapabilityFlag(fs *flagSet, name string,
+func newCapabilityFlag(fs *cli.FlagSet, name string,
 	set func(*catalog.Capabilities, *bool)) modelCapabilityFlag {
 	return modelCapabilityFlag{name: name, value: fs.Bool(name, false, ""), set: set}
 }
@@ -418,7 +419,7 @@ func newCapabilityFlag(fs *flagSet, name string,
 // 在这里分得开，而 flag 包的零值分不出它们。
 //
 // 必须在 Parse 之后调用：Visit 只遍历**被设置过**的标志。
-func visitedFlags(fs *flagSet) map[string]bool {
+func visitedFlags(fs *cli.FlagSet) map[string]bool {
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	return given
@@ -522,13 +523,13 @@ func (e capabilityEdit) apply(base catalog.Capabilities) catalog.Capabilities {
 // 另一个做法是把这一组当成「必须给全」，那会让「加一个能力」变成每次都要把
 // 另外五项与端点清单也抄一遍，而抄漏一个就是静默地关掉一个能力或一条端点。
 func runModelUpdate(args []string) error {
-	if err := jsonUnsupported("model update"); err != nil {
+	if err := cli.JSONUnsupported("model update"); err != nil {
 		return err
 	}
 
 	req, edit, err := parseModelUpdate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -537,7 +538,7 @@ func runModelUpdate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -555,7 +556,7 @@ func runModelUpdate(args []string) error {
 	if err := catalog.NewAdmin(db).Update(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "已更新规范模型 %s。\n", req.CanonicalName)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已更新规范模型 %s。\n", req.CanonicalName)
 	return nil
 }
 
@@ -574,23 +575,23 @@ var (
 )
 
 func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit, error) {
-	fs := newFlagSet("model update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	fs := cli.NewFlagSet("model update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	display := fs.String("display", "", "")
 	vendor := fs.String("vendor", "", "")
 	family := fs.String("family", "", "")
 	contextLimit := fs.Int("context-limit", 0, "")
-	intAlias(fs, contextLimit, "ctx")
+	cli.IntAlias(fs, contextLimit, "ctx")
 	inputLimit := fs.Int("input-limit", 0, "")
-	intAlias(fs, inputLimit, "in")
+	cli.IntAlias(fs, inputLimit, "in")
 	outputLimit := fs.Int("output-limit", 0, "")
-	intAlias(fs, outputLimit, "out")
-	modalitiesIn := legacyStringFlag(fs, "input-modalities", "modalities-input", "")
-	stringAlias(fs, modalitiesIn, "im")
-	modalitiesOut := legacyStringFlag(fs, "output-modalities", "modalities-output", "")
-	stringAlias(fs, modalitiesOut, "om")
+	cli.IntAlias(fs, outputLimit, "out")
+	modalitiesIn := cli.LegacyStringFlag(fs, "input-modalities", "modalities-input", "")
+	cli.StringAlias(fs, modalitiesIn, "im")
+	modalitiesOut := cli.LegacyStringFlag(fs, "output-modalities", "modalities-output", "")
+	cli.StringAlias(fs, modalitiesOut, "om")
 	knowledgeCutoff := fs.String("knowledge-cutoff", "", "")
 	releaseDate := fs.String("release-date", "", "")
 	capFlags := newCapabilityFlags(fs)
@@ -607,7 +608,7 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 	}
 	// 与 create 同一条：这些值会进 model list / get 的表格，控制字符在连库
 	// 之前拒掉（判据在 catalog 的写入路径）。
-	if err := checkDisplayText("--model（规范模型名）", strings.TrimSpace(*canonical)); err != nil {
+	if err := cli.CheckDisplayText("--model（规范模型名）", strings.TrimSpace(*canonical)); err != nil {
 		return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 	}
 
@@ -630,42 +631,42 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 	req := catalog.UpdateModelRequest{CanonicalName: *canonical}
 	changes := 0
 	if given["display"] {
-		if err := checkDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
+		if err := cli.CheckDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
 			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 		}
 		req.DisplayName = display
 		changes++
 	}
 	if given["vendor"] {
-		if err := checkDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
+		if err := cli.CheckDisplayText("--vendor（厂商）", strings.TrimSpace(*vendor)); err != nil {
 			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 		}
 		req.Vendor = vendor
 		changes++
 	}
 	if given["family"] {
-		if err := checkDisplayText("--family（家族）", strings.TrimSpace(*family)); err != nil {
+		if err := cli.CheckDisplayText("--family（家族）", strings.TrimSpace(*family)); err != nil {
 			return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 		}
 		req.Family = family
 		changes++
 	}
-	if flagGiven(given, contextLimitFlagNames...) {
+	if cli.FlagGiven(given, contextLimitFlagNames...) {
 		req.ContextLimit = contextLimit
 		changes++
 	}
-	if flagGiven(given, inputLimitFlagNames...) {
+	if cli.FlagGiven(given, inputLimitFlagNames...) {
 		req.InputLimit = inputLimit
 		changes++
 	}
-	if flagGiven(given, outputLimitFlagNames...) {
+	if cli.FlagGiven(given, outputLimitFlagNames...) {
 		req.OutputLimit = outputLimit
 		changes++
 	}
-	if flagGiven(given, modalitiesInFlagNames...) {
+	if cli.FlagGiven(given, modalitiesInFlagNames...) {
 		list := splitOptionalList(*modalitiesIn)
 		for i, value := range list {
-			if err := checkDisplayText(
+			if err := cli.CheckDisplayText(
 				fmt.Sprintf("--input-modalities（输入模态） 里第 %d 个", i+1), value); err != nil {
 				return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 			}
@@ -673,10 +674,10 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 		req.ModalitiesInput = &list
 		changes++
 	}
-	if flagGiven(given, modalitiesOutFlagNames...) {
+	if cli.FlagGiven(given, modalitiesOutFlagNames...) {
 		list := splitOptionalList(*modalitiesOut)
 		for i, value := range list {
-			if err := checkDisplayText(
+			if err := cli.CheckDisplayText(
 				fmt.Sprintf("--output-modalities（输出模态） 里第 %d 个", i+1), value); err != nil {
 				return catalog.UpdateModelRequest{}, capabilityEdit{}, err
 			}
@@ -720,23 +721,23 @@ func parseModelUpdate(args []string) (catalog.UpdateModelRequest, capabilityEdit
 // 判据要是两处各写一份，删掉的就可能是一条其实还在被用的名字。被引用时
 // 那条错误里带着「各有多少条」，原样打出来。
 func runModelDelete(args []string) error {
-	if err := jsonUnsupported("model delete"); err != nil {
+	if err := cli.JSONUnsupported("model delete"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("model delete", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	fs := cli.NewFlagSet("model delete", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"delete 不接受位置参数，得到 %q：要删的模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		return usageErr(errors.New("缺少 --model（要删的规范模型名）"))
+		return cli.UsageErr(errors.New("缺少 --model（要删的规范模型名）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -745,7 +746,7 @@ func runModelDelete(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -754,7 +755,7 @@ func runModelDelete(args []string) error {
 	if err := catalog.NewAdmin(db).Delete(ctx, *canonical); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "已删除规范模型 %s。\n", *canonical)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除规范模型 %s。\n", *canonical)
 	return nil
 }
 
@@ -764,19 +765,19 @@ func runModelDelete(args []string) error {
 // 另写一条 SQL：写入与读取对同一套列的假设是否一致，只有「写进去再读出来」
 // 能证明，而这里正是那个读回来的一端。
 func runModelGet(args []string) error {
-	fs := newFlagSet("model get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	fs := cli.NewFlagSet("model get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"get 不接受位置参数，得到 %q：要看的模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		return usageErr(errors.New("缺少 --model（要看的规范模型名）"))
+		return cli.UsageErr(errors.New("缺少 --model（要看的规范模型名）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -785,7 +786,7 @@ func runModelGet(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -795,21 +796,21 @@ func runModelGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, modelGetDoc(model), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, modelGetDoc(model), nil)
 	}
-	printModelDetail(humanStdout(), model)
+	printModelDetail(cli.HumanStdout(), model)
 	return nil
 }
 
 func runModelList(args []string) error {
-	fs := newFlagSet("model list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
+	fs := cli.NewFlagSet("model list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	cfg, err := config.LoadOps()
@@ -818,7 +819,7 @@ func runModelList(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -828,10 +829,10 @@ func runModelList(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, modelListDoc(models), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, modelListDoc(models), nil)
 	}
-	printModelList(humanStdout(), models)
+	printModelList(cli.HumanStdout(), models)
 	return nil
 }
 
@@ -850,10 +851,10 @@ func printCreatedModel(stdout, stderr io.Writer, id int64, canonicalName string)
 // 与 printModelList 是同一份数据的另一条渲染路径：那一档打表、把没设的上限
 // 打成 `-`，这一档给原始值与 null。
 func modelListDoc(models []catalog.Model) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(models)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(models))
 	for _, m := range models {
 		entries = append(entries, modelEntry(m))
@@ -867,7 +868,7 @@ func modelListDoc(models []catalog.Model) map[string]any {
 // 只有一条，所以不打 summary（没有可数的东西），形状是 `{"model": {...}}`：
 // 一眼能看出这一条是「哪个东西」的详情。
 func modelGetDoc(m catalog.Model) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["model"] = modelDetailEntry(m)
 	return doc
 }
@@ -884,14 +885,14 @@ func modelEntry(m catalog.Model) map[string]any {
 		"display_name":   m.DisplayName,
 		// 厂商与家族是 text 可空列，空串就是「没填」（update 的 --vendor ''
 		// 正是把它清成 NULL）。
-		"vendor":            nullableString(m.Vendor),
-		"family":            nullableString(m.Family),
-		"context_limit":     nullableInt(m.ContextLimit),
-		"input_limit":       nullableInt(m.InputLimit),
-		"output_limit":      nullableInt(m.OutputLimit),
+		"vendor":            cli.NullableString(m.Vendor),
+		"family":            cli.NullableString(m.Family),
+		"context_limit":     cli.NullableInt(m.ContextLimit),
+		"input_limit":       cli.NullableInt(m.InputLimit),
+		"output_limit":      cli.NullableInt(m.OutputLimit),
 		"capabilities":      capabilityEntry(m.Capabilities),
-		"modalities_input":  jsonList(m.ModalitiesInput),
-		"modalities_output": jsonList(m.ModalitiesOutput),
+		"modalities_input":  cli.JSONList(m.ModalitiesInput),
+		"modalities_output": cli.JSONList(m.ModalitiesOutput),
 	}
 }
 
@@ -907,10 +908,10 @@ func modelEntry(m catalog.Model) map[string]any {
 func modelDetailEntry(m catalog.Model) map[string]any {
 	entry := modelEntry(m)
 	entry["endpoints"] = nullableEndpoints(m.Capabilities.Endpoints)
-	entry["knowledge_cutoff"] = jsonDate(m.KnowledgeCutoff)
-	entry["release_date"] = jsonDate(m.ReleaseDate)
-	entry["canonical_model_id"] = nullableString(m.CanonicalModelID)
-	entry["updated_at"] = jsonTime(m.UpdatedAt)
+	entry["knowledge_cutoff"] = cli.JSONDate(m.KnowledgeCutoff)
+	entry["release_date"] = cli.JSONDate(m.ReleaseDate)
+	entry["canonical_model_id"] = cli.NullableString(m.CanonicalModelID)
+	entry["updated_at"] = cli.JSONTime(m.UpdatedAt)
 	return entry
 }
 
@@ -933,19 +934,19 @@ func capabilityEntry(c catalog.Capabilities) map[string]any {
 // printModelList 打印目录里的规范模型。
 func printModelList(w io.Writer, models []catalog.Model) {
 	if len(models) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("模型", "model add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("模型", "model add"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("ID"), p.bold("规范名"), p.bold("展示名"), p.bold("厂商"),
-		p.bold("家族"), p.bold("上下文"), p.bold("输入"), p.bold("输出"),
-		p.bold("能力"), p.bold("模态"))
+		p.Bold("ID"), p.Bold("规范名"), p.Bold("展示名"), p.Bold("厂商"),
+		p.Bold("家族"), p.Bold("上下文"), p.Bold("输入"), p.Bold("输出"),
+		p.Bold("能力"), p.Bold("模态"))
 	for _, m := range models {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.FormatInt(m.ID, 10)), p.bold(m.CanonicalName),
+			p.Bold(strconv.FormatInt(m.ID, 10)), p.Bold(m.CanonicalName),
 			m.DisplayName, orDash(m.Vendor), orDash(m.Family),
 			limitLabel(m.ContextLimit), limitLabel(m.InputLimit), limitLabel(m.OutputLimit),
 			capabilitySummary(m.Capabilities), modalityLabel(m.ModalitiesInput, m.ModalitiesOutput))
@@ -962,10 +963,10 @@ func printModelList(w io.Writer, models []catalog.Model) {
 // reasoning_options 与 raw 不打：它们是采集来的原始元信息，命令行不写它们，
 // 而 raw 可能是一大段嵌套 JSON——把它铺在这里会把上面那几行挤走。
 func printModelDetail(w io.Writer, m catalog.Model) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("ID", strconv.FormatInt(m.ID, 10))
 	row("规范名", m.CanonicalName)
@@ -982,7 +983,7 @@ func printModelDetail(w io.Writer, m catalog.Model) {
 	row("知识截止", dateLabel(m.KnowledgeCutoff))
 	row("发布日期", dateLabel(m.ReleaseDate))
 	row("采集源 ID", orDash(m.CanonicalModelID))
-	row("更新时间", p.dim(m.UpdatedAt.Format(time.RFC3339)))
+	row("更新时间", p.Dim(m.UpdatedAt.Format(time.RFC3339)))
 	_ = tw.Flush()
 }
 

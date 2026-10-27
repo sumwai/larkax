@@ -12,6 +12,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/config"
 )
 
@@ -63,10 +64,10 @@ func TestMigrateUpWithoutRoleOrMasterKey(t *testing.T) {
 	err := runCaptured(t, func() error { return runMigrate([]string{"up"}) })
 	if err != nil {
 		t.Fatalf("不设 LARKAX_ROLE / LARKAX_MASTER_KEYS 时 migrate up 应当成功，"+
-			"却报错（退出码 %d）: %v", exitCode(err), err)
+			"却报错（退出码 %d）: %v", cli.ExitCode(err), err)
 	}
-	if got := exitCode(err); got != exitOK {
-		t.Errorf("退出码 = %d，期望 %d", got, exitOK)
+	if got := cli.ExitCode(err); got != cli.ExitOK {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitOK)
 	}
 
 	if after := existingTables(t, dsn); len(after) != len(wantTables) {
@@ -89,7 +90,7 @@ func TestOpsCommandsIgnoreUnrelatedVariables(t *testing.T) {
 
 	err := runCaptured(t, func() error { return runMigrate([]string{"version"}) })
 	if err != nil {
-		t.Fatalf("这三个变量与 migrate 无关，命令不该失败（退出码 %d）: %v", exitCode(err), err)
+		t.Fatalf("这三个变量与 migrate 无关，命令不该失败（退出码 %d）: %v", cli.ExitCode(err), err)
 	}
 }
 

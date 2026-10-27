@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
@@ -56,8 +57,8 @@ func TestLedgerBalanceRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -86,8 +87,8 @@ func TestLedgerVerifyRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -315,8 +316,8 @@ func TestLedgerBalanceReportsOverflowInsteadOfClamping(t *testing.T) {
 	if err == nil {
 		t.Fatalf("余额算不出来时命令应当失败，实际输出 %q", out)
 	}
-	if code := exitCode(err); code != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d（其他失败）", code, exitFailure)
+	if code := cli.ExitCode(err); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d（其他失败）", code, cli.ExitFailure)
 	}
 	// 关键的一条：不许把被夹住的那个数打出去。打出去了就是一次静默的错账，
 	// 而退出码再对也救不回来。
@@ -360,8 +361,8 @@ func TestLedgerBalanceReadsTheLedger(t *testing.T) {
 	if want := "科目=" + account.String() + " 资产=CNY 余额=30.00000000\n"; out != want {
 		t.Errorf("输出 = %q，期望 %q", out, want)
 	}
-	if code := exitCode(err); code != exitOK {
-		t.Errorf("退出码 = %d，期望 %d", code, exitOK)
+	if code := cli.ExitCode(err); code != cli.ExitOK {
+		t.Errorf("退出码 = %d，期望 %d", code, cli.ExitOK)
 	}
 }
 
@@ -373,7 +374,7 @@ func balanceAllLines(out string) ([]string, map[string]string) {
 	var names []string
 	byName := make(map[string]string)
 	for _, line := range strings.Split(out, "\n") {
-		// 表格那一档的一行是「科目 + 两列以上空格 + 余额」（见 table.go），
+		// 表格那一档的一行是「科目 + 两列以上空格 + 余额」（见 cli 包的 table.go），
 		// 所以按空白切正好两栏；抬头（「资产=CNY 科目数=4…」）与读不出来的
 		// 那一句都不是两栏，自然被跳过。
 		fields := strings.Fields(line)
@@ -453,8 +454,8 @@ func TestLedgerVerifyCleanRangeExitsZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("自洽的区间不该失败: %v", err)
 	}
-	if code := exitCode(err); code != exitOK {
-		t.Errorf("退出码 = %d，期望 %d", code, exitOK)
+	if code := cli.ExitCode(err); code != cli.ExitOK {
+		t.Errorf("退出码 = %d，期望 %d", code, cli.ExitOK)
 	}
 	for _, want := range []string{"校验 1 笔交易（2 条分录）", "全部自洽"} {
 		if !strings.Contains(out, want) {
@@ -488,8 +489,8 @@ func TestLedgerVerifyFindsBadEntryAndExitsNonZero(t *testing.T) {
 	if err == nil {
 		t.Fatalf("发现不合法的分录时应当以非零退出码收尾，输出：\n%s", out)
 	}
-	if code := exitCode(err); code != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", code, exitFailure)
+	if code := cli.ExitCode(err); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", code, cli.ExitFailure)
 	}
 	for _, want := range []string{
 		"校验 2 笔交易（5 条分录）",
@@ -542,8 +543,8 @@ func TestLedgerVerifyMidwayFailureIsNotClean(t *testing.T) {
 	if err == nil {
 		t.Fatalf("读不下去时应当以非零退出码收尾，输出：\n%s", out)
 	}
-	if code := exitCode(err); code != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", code, exitFailure)
+	if code := cli.ExitCode(err); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", code, cli.ExitFailure)
 	}
 	if strings.Contains(out, "全部自洽") {
 		t.Errorf("没跑完的一轮不该说全部自洽：\n%s", out)
@@ -609,8 +610,8 @@ func TestLedgerBalanceDocIsMachineReadable(t *testing.T) {
 	}
 	raw := decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	if got.Account != "user:42" || got.Asset != "CNY" {
 		t.Errorf("account=%q asset=%q，想要 user:42 / CNY", got.Account, got.Asset)
@@ -672,8 +673,8 @@ func TestLedgerBalancesDocIsStableAndMachineReadable(t *testing.T) {
 	}
 	decodeDoc(t, ledgerBalancesDoc(ledger.AssetCNY, report), &got)
 
-	if got.Status != jsonOK || got.Asset != "CNY" {
-		t.Errorf("status=%q asset=%q，想要 %q / CNY", got.Status, got.Asset, jsonOK)
+	if got.Status != cli.JSONOK || got.Asset != "CNY" {
+		t.Errorf("status=%q asset=%q，想要 %q / CNY", got.Status, got.Asset, cli.JSONOK)
 	}
 	if got.Summary.Accounts != 3 || len(got.Accounts) != 3 {
 		t.Fatalf("summary.accounts = %d、accounts 有 %d 条，都想要 3",
@@ -738,15 +739,15 @@ func TestLedgerVerifyDocStatuses(t *testing.T) {
 		cause  error
 		want   string
 	}{
-		{"跑完且自洽", &store.VerifyReport{CheckedTxns: 3, CheckedEntries: 6}, nil, jsonOK},
+		{"跑完且自洽", &store.VerifyReport{CheckedTxns: 3, CheckedEntries: 6}, nil, cli.JSONOK},
 		{"查出问题", &store.VerifyReport{
-			CheckedTxns: 3, CheckedEntries: 6, Findings: findings}, badErr, jsonFailed},
+			CheckedTxns: 3, CheckedEntries: 6, Findings: findings}, badErr, cli.JSONFailed},
 		{"读了一半读不下去", &store.VerifyReport{CheckedTxns: 1, CheckedEntries: 2},
-			errors.New("读分录失败"), jsonFailed},
+			errors.New("读分录失败"), cli.JSONFailed},
 		{"被 --max-txns 截断", &store.VerifyReport{
-			CheckedTxns: 1, CheckedEntries: 2, Truncated: true}, nil, jsonSkipped},
+			CheckedTxns: 1, CheckedEntries: 2, Truncated: true}, nil, cli.JSONSkipped},
 		{"既截断又查出问题", &store.VerifyReport{
-			CheckedTxns: 1, Truncated: true, Findings: findings}, badErr, jsonFailed},
+			CheckedTxns: 1, Truncated: true, Findings: findings}, badErr, cli.JSONFailed},
 	}
 
 	for _, tc := range cases {
@@ -884,7 +885,7 @@ func TestLedgerBalanceAllJSONStdoutIsMachineReadable(t *testing.T) {
 		adjustment(t, ledger.NewTxnID(), ledger.PlatformRevenueAccount(), "-7"),
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	out, err := runBalanceCmd(t, "--all")
 	if err != nil {
 		t.Fatalf("汇总失败: %v", err)
@@ -905,8 +906,8 @@ func TestLedgerBalanceAllJSONStdoutIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, out)
 	}
-	if got.Status != jsonOK || got.Asset != "CNY" {
-		t.Errorf("status=%q asset=%q，想要 %q / CNY", got.Status, got.Asset, jsonOK)
+	if got.Status != cli.JSONOK || got.Asset != "CNY" {
+		t.Errorf("status=%q asset=%q，想要 %q / CNY", got.Status, got.Asset, cli.JSONOK)
 	}
 	if got.Summary.Accounts != len(got.Accounts) {
 		t.Errorf("summary.accounts = %d，清单里有 %d 条", got.Summary.Accounts, len(got.Accounts))
@@ -980,14 +981,14 @@ func TestLedgerVerifyJSONStdoutIsMachineReadable(t *testing.T) {
 	}
 
 	t.Run("跑完且自洽", func(t *testing.T) {
-		withFormat(t, formatJSON)
+		withFormat(t, cli.FormatJSON)
 		out, err := run(t, "--from", fromArg, "--to", toArg)
 		if err != nil {
 			t.Fatalf("自洽的区间不该失败: %v\n%s", err, out)
 		}
 		got := decode(t, out)
-		if got.Status != jsonOK || got.ExitCode != exitOK {
-			t.Errorf("status=%q exit_code=%d，想要 %q / 0", got.Status, got.ExitCode, jsonOK)
+		if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
+			t.Errorf("status=%q exit_code=%d，想要 %q / 0", got.Status, got.ExitCode, cli.JSONOK)
 		}
 		if got.Summary.CheckedTxns != 2 {
 			t.Errorf("checked_txns = %d，想要 2", got.Summary.CheckedTxns)
@@ -998,26 +999,26 @@ func TestLedgerVerifyJSONStdoutIsMachineReadable(t *testing.T) {
 	})
 
 	t.Run("被截断", func(t *testing.T) {
-		withFormat(t, formatJSON)
+		withFormat(t, cli.FormatJSON)
 		out, err := run(t, "--from", fromArg, "--to", toArg, "--max-txns", "1")
 		if err != nil {
 			t.Fatalf("截断不是失败: %v\n%s", err, out)
 		}
 		got := decode(t, out)
 		// 没查出问题，但这一轮**不是**全量：这正是 skipped 那一档的定义。
-		if got.Status != jsonSkipped {
-			t.Errorf("status = %q，想要 %q（截断不是「全部通过」）", got.Status, jsonSkipped)
+		if got.Status != cli.JSONSkipped {
+			t.Errorf("status = %q，想要 %q（截断不是「全部通过」）", got.Status, cli.JSONSkipped)
 		}
 		if !got.Summary.Truncated || got.Summary.CheckedTxns != 1 {
 			t.Errorf("summary 对不上：%+v", got.Summary)
 		}
-		if got.ExitCode != exitOK {
+		if got.ExitCode != cli.ExitOK {
 			t.Errorf("exit_code = %d，想要 0：截断是用 --max-txns 要来的", got.ExitCode)
 		}
 	})
 
 	t.Run("一条分录都没有", func(t *testing.T) {
-		withFormat(t, formatJSON)
+		withFormat(t, cli.FormatJSON)
 		// 另一个没放东西的时间窗（见 ledgerSlot）。
 		_, emptyFrom, emptyTo := ledgerSlot()
 		out, err := run(t, "--from", emptyFrom.Format(time.RFC3339), "--to", emptyTo.Format(time.RFC3339))
@@ -1025,9 +1026,9 @@ func TestLedgerVerifyJSONStdoutIsMachineReadable(t *testing.T) {
 			t.Fatalf("一条都没校验到时应当以非零退出码收尾：\n%s", out)
 		}
 		got := decode(t, out)
-		if got.Status != jsonFailed || got.ExitCode != exitFailure {
+		if got.Status != cli.JSONFailed || got.ExitCode != cli.ExitFailure {
 			t.Errorf("status=%q exit_code=%d，想要 %q / %d",
-				got.Status, got.ExitCode, jsonFailed, exitFailure)
+				got.Status, got.ExitCode, cli.JSONFailed, cli.ExitFailure)
 		}
 		if got.Findings == nil {
 			t.Error("findings 应当是 []，不是 null")

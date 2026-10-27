@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/calendar"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -151,8 +152,8 @@ var usageActions = []string{"events", "requests", "summary"}
 // runUsage 处理 usage 子命令。
 func runUsage(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, usageShortUsage)
-		return usageErr(errors.New("usage 需要子命令"))
+		cli.PrintUsage(os.Stderr, usageShortUsage)
+		return cli.UsageErr(errors.New("usage 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -172,11 +173,11 @@ func runUsage(args []string) error {
 	case "summary":
 		return runUsageSummary(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, usageShortUsage)
+		cli.PrintUsage(os.Stdout, usageShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, usageShortUsage)
-		return usageErr(fmt.Errorf("未知的 usage 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, usageShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 usage 子命令 %q", action))
 	}
 }
 
@@ -192,14 +193,14 @@ type usageReadFlags struct {
 }
 
 // newUsageReadFlags 注册这组筛选项。
-func newUsageReadFlags(fs *flagSet) usageReadFlags {
+func newUsageReadFlags(fs *cli.FlagSet) usageReadFlags {
 	f := usageReadFlags{
 		user:  fs.String("user", "", ""),
 		from:  fs.String("from", "", ""),
 		to:    fs.String("to", "", ""),
 		limit: fs.Int("limit", usageDefaultLimit, ""),
 	}
-	stringAlias(fs, f.user, "u")
+	cli.StringAlias(fs, f.user, "u")
 	return f
 }
 
@@ -210,19 +211,19 @@ func newUsageReadFlags(fs *flagSet) usageReadFlags {
 func (f usageReadFlags) window(what string) (from, to time.Time, limit int, err error) {
 	from, err = parseLedgerTime("--from", *f.from)
 	if err != nil {
-		return time.Time{}, time.Time{}, 0, usageErr(err)
+		return time.Time{}, time.Time{}, 0, cli.UsageErr(err)
 	}
 	to, err = parseLedgerTime("--to", *f.to)
 	if err != nil {
-		return time.Time{}, time.Time{}, 0, usageErr(err)
+		return time.Time{}, time.Time{}, 0, cli.UsageErr(err)
 	}
 	if !from.IsZero() && !to.IsZero() && !from.Before(to) {
-		return time.Time{}, time.Time{}, 0, usageErr(fmt.Errorf(
+		return time.Time{}, time.Time{}, 0, cli.UsageErr(fmt.Errorf(
 			"%s 的 --from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
 			what, from.Format(time.RFC3339), to.Format(time.RFC3339)))
 	}
 	if *f.limit < 0 {
-		return time.Time{}, time.Time{}, 0, usageErr(fmt.Errorf(
+		return time.Time{}, time.Time{}, 0, cli.UsageErr(fmt.Errorf(
 			"%s 的 --limit 不能为负，得到 %d（0 表示不限）", what, *f.limit))
 	}
 	return from, to, *f.limit, nil
@@ -248,14 +249,14 @@ func (f usageReadFlags) resolveUser(ctx context.Context, authStore *auth.Store) 
 
 // runUsageEvents 列出用量事件。
 func runUsageEvents(args []string) error {
-	fs := newFlagSet("usage events", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
+	fs := cli.NewFlagSet("usage events", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, usageShortUsage) }
 	flags := newUsageReadFlags(fs)
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("usage events 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("usage events 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
 	}
 
 	from, to, limit, err := flags.window("usage events")
@@ -303,10 +304,10 @@ func runUsageEvents(args []string) error {
 		}
 
 		filters := usageFilters{userID: userID, from: from, to: to, limit: limit}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, usageEventsDoc(rows, page.More, filters), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, usageEventsDoc(rows, page.More, filters), nil)
 		}
-		printUsageEvents(humanStdout(), rows, page.More)
+		printUsageEvents(cli.HumanStdout(), rows, page.More)
 		return nil
 	})
 }
@@ -328,7 +329,7 @@ type usageRequestFlags struct {
 // 说明串一律留空：本包的帮助只有手写的 *Usage 常量一个出口，flag 自己的
 // PrintDefaults 没有调用点，传进去的说明一个字都不会被打印（见 main.go 的包注释）。
 // 「这三个参数只属于 usage requests」这句话因此写在帮助正文里。
-func newUsageRequestFlags(fs *flagSet) usageRequestFlags {
+func newUsageRequestFlags(fs *cli.FlagSet) usageRequestFlags {
 	return usageRequestFlags{
 		usageReadFlags: newUsageReadFlags(fs),
 		status:         fs.String("status", "", ""),
@@ -359,7 +360,7 @@ func (f usageRequestFlags) resolve(what string) (usageRequestSelection, error) {
 	since := strings.TrimSpace(*f.since)
 	// --since 与 --from 说的是同一件事（这段从哪里开始），同时给时说不清该听谁的。
 	if since != "" && strings.TrimSpace(*f.from) != "" {
-		return usageRequestSelection{}, usageErr(fmt.Errorf(
+		return usageRequestSelection{}, cli.UsageErr(fmt.Errorf(
 			"%s 的 --since 与 --from 只能给一个：--since 是相对现在的一段，--from 是绝对起点", what))
 	}
 
@@ -371,11 +372,11 @@ func (f usageRequestFlags) resolve(what string) (usageRequestSelection, error) {
 	if since != "" {
 		d, err := parseUsageSince(since, what)
 		if err != nil {
-			return usageRequestSelection{}, usageErr(err)
+			return usageRequestSelection{}, cli.UsageErr(err)
 		}
 		from = usageNow().Add(-d)
 		if !to.IsZero() && !from.Before(to) {
-			return usageRequestSelection{}, usageErr(fmt.Errorf(
+			return usageRequestSelection{}, cli.UsageErr(fmt.Errorf(
 				"%s 的 --since 太长，起点 %s 不早于 --to %s（区间左闭右开）",
 				what, from.Format(time.RFC3339), to.Format(time.RFC3339)))
 		}
@@ -383,7 +384,7 @@ func (f usageRequestFlags) resolve(what string) (usageRequestSelection, error) {
 
 	status := strings.TrimSpace(*f.status)
 	if err := validateUsageStatus(status, what); err != nil {
-		return usageRequestSelection{}, usageErr(err)
+		return usageRequestSelection{}, cli.UsageErr(err)
 	}
 
 	return usageRequestSelection{
@@ -463,14 +464,14 @@ func validateUsageStatus(status, what string) error {
 
 // runUsageRequests 列出计费请求。
 func runUsageRequests(args []string) error {
-	fs := newFlagSet("usage requests", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
+	fs := cli.NewFlagSet("usage requests", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, usageShortUsage) }
 	flags := newUsageRequestFlags(fs)
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("usage requests 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("usage requests 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
 	}
 
 	sel, err := flags.resolve("usage requests")
@@ -521,10 +522,10 @@ func runUsageRequests(args []string) error {
 			userID: userID, from: sel.from, to: sel.to, limit: sel.limit,
 			status: sel.status, model: sel.model, since: sel.since,
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, usageRequestsDoc(rows, page.More, filters), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, usageRequestsDoc(rows, page.More, filters), nil)
 		}
-		printUsageRequests(humanStdout(), rows, page.More)
+		printUsageRequests(cli.HumanStdout(), rows, page.More)
 		return nil
 	})
 }
@@ -562,7 +563,7 @@ type usageSummaryFlags struct {
 }
 
 // newUsageSummaryFlags 注册这组筛选项。
-func newUsageSummaryFlags(fs *flagSet) usageSummaryFlags {
+func newUsageSummaryFlags(fs *cli.FlagSet) usageSummaryFlags {
 	f := usageSummaryFlags{
 		user:      fs.String("user", "", ""),
 		today:     fs.Bool("today", false, ""),
@@ -570,7 +571,7 @@ func newUsageSummaryFlags(fs *flagSet) usageSummaryFlags {
 		from:      fs.String("from", "", ""),
 		to:        fs.String("to", "", ""),
 	}
-	stringAlias(fs, f.user, "u")
+	cli.StringAlias(fs, f.user, "u")
 	return f
 }
 
@@ -590,7 +591,7 @@ type usageWindowChoice struct {
 // 机器上这几个错都看不出来（与 usage 另外两条的 --from/--to 同一个位置）。
 func (f usageSummaryFlags) choice(what string) (usageWindowChoice, error) {
 	if *f.today && *f.thisMonth {
-		return usageWindowChoice{}, usageErr(fmt.Errorf(
+		return usageWindowChoice{}, cli.UsageErr(fmt.Errorf(
 			"%s 的 --today 与 --this-month 只能给一个", what))
 	}
 
@@ -604,30 +605,30 @@ func (f usageSummaryFlags) choice(what string) (usageWindowChoice, error) {
 
 	fromRaw, toRaw := strings.TrimSpace(*f.from), strings.TrimSpace(*f.to)
 	if relative != "" && (fromRaw != "" || toRaw != "") {
-		return usageWindowChoice{}, usageErr(fmt.Errorf(
+		return usageWindowChoice{}, cli.UsageErr(fmt.Errorf(
 			"%s 的相对窗口（--today / --this-month）与绝对窗口（--from / --to）只能给一种："+
 				"相对窗口是快捷方式，对拍请用绝对窗口", what))
 	}
 
 	if fromRaw != "" || toRaw != "" {
 		if fromRaw == "" {
-			return usageWindowChoice{}, usageErr(fmt.Errorf(
+			return usageWindowChoice{}, cli.UsageErr(fmt.Errorf(
 				"%s 给了 --to 却缺 --from：两个要一起给", what))
 		}
 		if toRaw == "" {
-			return usageWindowChoice{}, usageErr(fmt.Errorf(
+			return usageWindowChoice{}, cli.UsageErr(fmt.Errorf(
 				"%s 给了 --from 却缺 --to：两个要一起给", what))
 		}
 		from, err := parseLedgerTime("--from", fromRaw)
 		if err != nil {
-			return usageWindowChoice{}, usageErr(err)
+			return usageWindowChoice{}, cli.UsageErr(err)
 		}
 		to, err := parseLedgerTime("--to", toRaw)
 		if err != nil {
-			return usageWindowChoice{}, usageErr(err)
+			return usageWindowChoice{}, cli.UsageErr(err)
 		}
 		if !from.Before(to) {
-			return usageWindowChoice{}, usageErr(fmt.Errorf(
+			return usageWindowChoice{}, cli.UsageErr(fmt.Errorf(
 				"%s 的 --from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
 				what, from.Format(time.RFC3339), to.Format(time.RFC3339)))
 		}
@@ -677,21 +678,21 @@ func usageSiteTimezone(ctx context.Context, db *sql.DB) (*time.Location, error) 
 
 // runUsageSummary 汇总一个用户在一段时间里的用量与金额。
 func runUsageSummary(args []string) error {
-	fs := newFlagSet("usage summary", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, usageShortUsage) }
+	fs := cli.NewFlagSet("usage summary", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, usageShortUsage) }
 	flags := newUsageSummaryFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打过了。
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("usage summary 不接受位置参数，得到 %q：按用户汇总用 --user", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("usage summary 不接受位置参数，得到 %q：按用户汇总用 --user", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*flags.user) == "" {
-		return usageErr(errors.New("usage summary 需要 --user <用户 ID 或用户名>：汇总只做用户维度"))
+		return cli.UsageErr(errors.New("usage summary 需要 --user <用户 ID 或用户名>：汇总只做用户维度"))
 	}
 
 	choice, err := flags.choice("usage summary")
@@ -717,7 +718,7 @@ func runUsageSummary(args []string) error {
 		if !from.Before(to) {
 			// 只可能发生在「现在正好是本月起点」那一瞬间：窗口宽度为 0。
 			// 换一句清楚的说明，而不是把 store 的「起点不早于终点」端给使用者。
-			return usageErr(fmt.Errorf(
+			return cli.UsageErr(fmt.Errorf(
 				"usage summary 的窗口是空的（%s 至 %s）：现在正好在窗口起点，稍后再跑或改用绝对窗口",
 				from.In(loc).Format(time.RFC3339), to.In(loc).Format(time.RFC3339)))
 		}
@@ -729,10 +730,10 @@ func runUsageSummary(args []string) error {
 			return err
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, usageSummaryDoc(owner.ID, choice.mode, from, to, loc, summary), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, usageSummaryDoc(owner.ID, choice.mode, from, to, loc, summary), nil)
 		}
-		printUsageSummary(humanStdout(), from, to, loc, summary)
+		printUsageSummary(cli.HumanStdout(), from, to, loc, summary)
 		return nil
 	})
 }
@@ -746,15 +747,15 @@ func printUsageSummary(w io.Writer, from, to time.Time, loc *time.Location, summ
 	_, _ = fmt.Fprintf(w, "窗口：%s 至 %s（站点时区 %s）\n",
 		from.In(loc).Format(time.RFC3339), to.In(loc).Format(time.RFC3339), loc)
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("计费口径"), p.bold("请求数"), p.bold("金额"), p.bold("额度包面值"),
-		p.bold("输入"), p.bold("输出"), p.bold("缓存读"), p.bold("缓存写"), p.bold("推理"))
+		p.Bold("计费口径"), p.Bold("请求数"), p.Bold("金额"), p.Bold("额度包面值"),
+		p.Bold("输入"), p.Bold("输出"), p.Bold("缓存读"), p.Bold("缓存写"), p.Bold("推理"))
 
 	t := summary.Totals
 	_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
-		p.bold("合计"), t.Requests, t.Cost.String(), t.PlanReservedAmount.String(),
+		p.Bold("合计"), t.Requests, t.Cost.String(), t.PlanReservedAmount.String(),
 		t.PromptTokens, t.CompletionTokens, t.CacheReadTokens, t.CacheWriteTokens,
 		t.ReasoningTokens)
 
@@ -776,19 +777,19 @@ func printUsageSummary(w io.Writer, from, to time.Time, loc *time.Location, summ
 // cost 与 plan_reserved_amount 是两个独立字段，永不相加。
 func usageSummaryDoc(userID int64, mode usageWindowMode, from, to time.Time,
 	loc *time.Location, summary store.UsageSummary) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{
 		"user_id":  userID,
 		"window":   string(mode),
-		"from":     jsonTime(from),
-		"to":       jsonTime(to),
+		"from":     cli.JSONTime(from),
+		"to":       cli.JSONTime(to),
 		"timezone": loc.String(),
 	}
 
 	t := summary.Totals
 	doc["totals"] = map[string]any{
-		"cost":                 jsonAmount(t.Cost),
-		"plan_reserved_amount": jsonAmount(t.PlanReservedAmount),
+		"cost":                 cli.JSONAmount(t.Cost),
+		"plan_reserved_amount": cli.JSONAmount(t.PlanReservedAmount),
 		"requests":             t.Requests,
 		"tokens": map[string]any{
 			"input":       t.PromptTokens,
@@ -803,7 +804,7 @@ func usageSummaryDoc(userID int64, mode usageWindowMode, from, to time.Time,
 	for _, path := range summary.Paths {
 		paths = append(paths, map[string]any{
 			"path":     path.Path,
-			"cost":     jsonAmount(path.Cost),
+			"cost":     cli.JSONAmount(path.Cost),
 			"requests": path.Requests,
 		})
 	}
@@ -886,16 +887,16 @@ func printUsageEvents(w io.Writer, rows []usageEventRow, more bool) {
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("时刻"), p.bold("用户 ID"), p.bold("用户名"), p.bold("模型"),
-		p.bold("输入"), p.bold("输出"), p.bold("缓存读"), p.bold("缓存写"),
-		p.bold("计费口径"), p.bold("金额"))
+		p.Bold("时刻"), p.Bold("用户 ID"), p.Bold("用户名"), p.Bold("模型"),
+		p.Bold("输入"), p.Bold("输出"), p.Bold("缓存读"), p.Bold("缓存写"),
+		p.Bold("计费口径"), p.Bold("金额"))
 	for _, r := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
-			p.dim(r.CreatedAt.Format(longStampLayout)),
-			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
+			p.Dim(r.CreatedAt.Format(cli.LongStampLayout)),
+			p.Bold(strconv.FormatInt(r.UserID, 10)), p.Bold(r.Username),
 			r.CanonicalModel,
 			r.PromptTokens, r.CompletionTokens, r.CacheReadTokens, r.CacheWriteTokens,
 			r.BillingPath, r.Cost.String())
@@ -918,16 +919,16 @@ func printUsageRequests(w io.Writer, rows []usageRequestRow, more bool) {
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("时刻"), p.bold("request_id"), p.bold("用户 ID"), p.bold("用户名"),
-		p.bold("模型"), p.bold("状态"), p.bold("钱包预留"), p.bold("包预留"),
-		p.bold("结算"), p.bold("规则"))
+		p.Bold("时刻"), p.Bold("request_id"), p.Bold("用户 ID"), p.Bold("用户名"),
+		p.Bold("模型"), p.Bold("状态"), p.Bold("钱包预留"), p.Bold("包预留"),
+		p.Bold("结算"), p.Bold("规则"))
 	for _, r := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.dim(r.StartedAt.Format(longStampLayout)), p.bold(r.RequestID),
-			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
+			p.Dim(r.StartedAt.Format(cli.LongStampLayout)), p.Bold(r.RequestID),
+			p.Bold(strconv.FormatInt(r.UserID, 10)), p.Bold(r.Username),
 			r.CanonicalModel, r.Status, r.ReservedAmount.String(),
 			r.PlanReservedAmount.String(), r.settledCell(), r.pricingRuleCell())
 	}
@@ -981,8 +982,8 @@ type usageFilters struct {
 func (f usageFilters) summary() map[string]any {
 	summary := map[string]any{
 		"limit": f.limit,
-		"from":  jsonTimeOrNull(f.from),
-		"to":    jsonTimeOrNull(f.to),
+		"from":  cli.JSONTimeOrNull(f.from),
+		"to":    cli.JSONTimeOrNull(f.to),
 	}
 	if f.userID != nil {
 		summary["user_id"] = *f.userID
@@ -1004,7 +1005,7 @@ func (f usageFilters) summary() map[string]any {
 // usageEventsDoc 组装 usage events 的机器可读输出。
 //
 // 金额走 jsonAmount（十进制定点字符串）：直接塞过一个 float64 会丢精度，而丢掉的
-// 恰好是账单要精确到的那几位（见 format.go）。
+// 恰好是账单要精确到的那几位（见 cli 包的 format.go）。
 func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[string]any {
 	summary := filters.summary()
 	summary["total"] = len(rows)
@@ -1016,12 +1017,12 @@ func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[s
 	events := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		events = append(events, map[string]any{
-			"created_at":         jsonTime(r.CreatedAt),
-			"priced_at":          jsonTime(r.PricedAt),
+			"created_at":         cli.JSONTime(r.CreatedAt),
+			"priced_at":          cli.JSONTime(r.PricedAt),
 			"request_id":         r.RequestID,
 			"user_id":            r.UserID,
-			"username":           nullableString(r.Username),
-			"channel_id":         jsonID(r.ChannelID),
+			"username":           cli.NullableString(r.Username),
+			"channel_id":         cli.JSONID(r.ChannelID),
 			"canonical_model":    r.CanonicalModel,
 			"prompt_tokens":      r.PromptTokens,
 			"completion_tokens":  r.CompletionTokens,
@@ -1029,12 +1030,12 @@ func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[s
 			"cache_write_tokens": r.CacheWriteTokens,
 			"reasoning_tokens":   r.ReasoningTokens,
 			"billing_path":       r.BillingPath,
-			"cost":               jsonAmount(r.Cost),
+			"cost":               cli.JSONAmount(r.Cost),
 			"asset":              r.Asset,
 		})
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = summary
 	doc["events"] = events
 	return doc
@@ -1043,7 +1044,7 @@ func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[s
 // usageRequestsDoc 组装 usage requests 的机器可读输出。
 //
 // 结算金额与规则这两档没值时是 null，不打 `-`：占位符进 JSON 比留空更坏，按数字
-// 解析它的一方会拿到一个解析不了的值（见 format.go 上面那几段）。字段的命名与库里
+// 解析它的一方会拿到一个解析不了的值（见 cli 包的 format.go 上面那几段）。字段的命名与库里
 // 那几列对得上（reserved_amount、plan_reserved_amount、final_amount、pricing_rule_id）。
 func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) map[string]any {
 	summary := filters.summary()
@@ -1053,26 +1054,26 @@ func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) m
 	requests := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		requests = append(requests, map[string]any{
-			"started_at":           jsonTime(r.StartedAt),
-			"settled_at":           jsonTimePtr(nullTimeToPtr(r.SettledAt)),
+			"started_at":           cli.JSONTime(r.StartedAt),
+			"settled_at":           cli.JSONTimePtr(cli.NullTimeToPtr(r.SettledAt)),
 			"request_id":           r.RequestID,
 			"user_id":              r.UserID,
-			"username":             nullableString(r.Username),
+			"username":             cli.NullableString(r.Username),
 			"canonical_model":      r.CanonicalModel,
-			"upstream_model":       nullableString(r.UpstreamModel.String),
+			"upstream_model":       cli.NullableString(r.UpstreamModel.String),
 			"protocol":             r.Protocol,
 			"streamed":             r.Streamed,
 			"status":               r.Status,
-			"reserved_amount":      jsonAmount(r.ReservedAmount),
-			"plan_reserved_amount": jsonAmount(r.PlanReservedAmount),
-			"final_amount":         nullableString(r.FinalAmount.String),
+			"reserved_amount":      cli.JSONAmount(r.ReservedAmount),
+			"plan_reserved_amount": cli.JSONAmount(r.PlanReservedAmount),
+			"final_amount":         cli.NullableString(r.FinalAmount.String),
 			"pricing_rule_id":      jsonNullInt64(r.PricingRuleID),
 			"asset":                r.Asset,
-			"error_code":           nullableString(r.ErrorCode.String),
+			"error_code":           cli.NullableString(r.ErrorCode.String),
 		})
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = summary
 	doc["requests"] = requests
 	return doc
@@ -1083,5 +1084,5 @@ func printTruncatedListNote(w io.Writer, more bool, shown int) {
 	if !more {
 		return
 	}
-	_, _ = fmt.Fprintln(w, truncatedListNote(shown))
+	_, _ = fmt.Fprintln(w, cli.TruncatedListNote(shown))
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/config"
@@ -343,8 +344,8 @@ var channelActions = []string{"add", "create", "list", "get", "health", "update"
 
 func runChannel(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, channelShortUsage)
-		return usageErr(errors.New("channel 需要子命令"))
+		cli.PrintUsage(os.Stderr, channelShortUsage)
+		return cli.UsageErr(errors.New("channel 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -382,24 +383,24 @@ func runChannel(args []string) error {
 	case "unmap":
 		return runChannelUnmap(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, channelShortUsage)
+		cli.PrintUsage(os.Stdout, channelShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, channelShortUsage)
-		return usageErr(fmt.Errorf("未知的 channel 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, channelShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 channel 子命令 %q", action))
 	}
 }
 
 // runChannelAdd 建一条渠道。`channel add` 与 `channel create` 是同一条实现：
 // create 是加位置参数之前的名字，保留给已经在跑的脚本。
 func runChannelAdd(args []string) error {
-	if err := jsonUnsupported("channel add"); err != nil {
+	if err := cli.JSONUnsupported("channel add"); err != nil {
 		return err
 	}
 
 	req, ownerRef, err := parseChannelCreate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -421,7 +422,7 @@ func runChannelAdd(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -452,7 +453,7 @@ func runChannelAdd(args []string) error {
 	admin := channels.NewAdmin(db, sealer, registry)
 
 	if ownerRef != "" {
-		ownerID, resolveErr := resolveOwnerID(ctx, db, ownerRef)
+		ownerID, resolveErr := cli.ResolveOwnerID(ctx, db, ownerRef)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -473,7 +474,7 @@ func runChannelAdd(args []string) error {
 	if sealer != nil {
 		primaryKeyID = sealer.PrimaryKeyID()
 	}
-	printCreatedChannel(humanStdout(), humanStderr(), id, primaryKeyID,
+	printCreatedChannel(cli.HumanStdout(), cli.HumanStderr(), id, primaryKeyID,
 		channel.SettingUnreadNote(primaryType, req.Setting))
 	return nil
 }
@@ -519,8 +520,8 @@ var protocolBaseURLFlags = []protocolBaseURLFlag{
 // registerProtocolBaseURLFlags 给一个 add / update 的 flag 集合注册分址旗标。
 //
 // 收本包的 flagSet 而不是 flag.FlagSet：补全的选项名靠那一层记下来，
-// 绕过去的名字不会出现在补全里（见 flagset.go）。
-func registerProtocolBaseURLFlags(fs *flagSet) map[channel.Protocol]*string {
+// 绕过去的名字不会出现在补全里（见 cli 包的 flagset.go）。
+func registerProtocolBaseURLFlags(fs *cli.FlagSet) map[channel.Protocol]*string {
 	out := make(map[channel.Protocol]*string, len(protocolBaseURLFlags))
 	for _, f := range protocolBaseURLFlags {
 		out[f.protocol] = fs.String(f.name, "", "")
@@ -574,23 +575,23 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	// 渠道名与上游地址可以写成前两个位置参数（见 takeLeadingPositionals）。
 	positionals, rest := takeLeadingPositionals(args, 2)
 
-	fs := newFlagSet("channel add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	name := fs.String("name", "", "")
 	channelType := fs.String("type", "", "")
 	protocols := fs.String("protocols", "", "")
 	baseURL := fs.String("base-url", "", "")
 	protocolURLValues := registerProtocolBaseURLFlags(fs)
 	models := fs.String("models", "", "")
-	owner := legacyStringFlag(fs, "user", "owner", "")
-	stringAlias(fs, owner, "u")
+	owner := cli.LegacyStringFlag(fs, "user", "owner", "")
+	cli.StringAlias(fs, owner, "u")
 	weight := fs.Int("weight", 0, "")
 	priority := fs.Int("priority", 0, "")
 	setting := fs.String("setting", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin")
+	cli.BoolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env")
+	cli.StringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(rest); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
@@ -630,7 +631,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 	}
 	// 名称与模型名单会进 channel list / health 的表格：控制字符在连库之前
 	// 就拒掉（判据在 channels 的写入路径，见 normalizeName / normalizeModels）。
-	if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(nameValue)); err != nil {
+	if err := cli.CheckDisplayText("--name（渠道名）", strings.TrimSpace(nameValue)); err != nil {
 		return channels.CreateRequest{}, "", err
 	}
 	if strings.TrimSpace(baseURLValue) == "" {
@@ -674,7 +675,7 @@ func parseChannelCreate(args []string) (channels.CreateRequest, string, error) {
 		}
 		modelList = splitList(*models)
 		for i, model := range modelList {
-			if shapeErr := checkDisplayText(
+			if shapeErr := cli.CheckDisplayText(
 				fmt.Sprintf("--models 里第 %d 个模型名", i+1), strings.TrimSpace(model)); shapeErr != nil {
 				return channels.CreateRequest{}, "", shapeErr
 			}
@@ -832,12 +833,12 @@ func probeProtocolsForAdd(ctx context.Context, registry *channel.Registry, req *
 	}
 	req.Protocols = bound
 	// 绑上了哪些、哪些没通、哪些没问：各一行打到 stderr（stdout 留给新渠道的 ID）。
-	_, _ = fmt.Fprintf(humanStderr(), "已绑定协议：%s\n", strings.Join(bound, "、"))
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已绑定协议：%s\n", strings.Join(bound, "、"))
 	for _, failure := range failures {
-		_, _ = fmt.Fprintf(humanStderr(), "未绑定协议 %s\n", failure)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "未绑定协议 %s\n", failure)
 	}
 	for _, candidateType := range unprobed {
-		_, _ = fmt.Fprintf(humanStderr(), "未探测协议 %s：%s\n", candidateType, unprobedReason)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "未探测协议 %s：%s\n", candidateType, unprobedReason)
 	}
 	return nil
 }
@@ -856,8 +857,8 @@ const probeTimedOutReason = "探测超时：预算内没有回应"
 // 没有 --user：归属（平台自营 / 某个商家）不在写入路径能改的字段里，
 // 见 channels.UpdateRequest。要换归属是另一件事，不该混在一次「改配置」里。
 func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
-	fs := newFlagSet("channel update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要改的渠道 ID")
 	name := fs.String("name", "", "")
 	channelType := fs.String("type", "", "")
@@ -869,9 +870,9 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	priority := fs.Int("priority", 0, "")
 	setting := fs.String("setting", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin")
+	cli.BoolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env")
+	cli.StringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(args); err != nil {
 		return channels.UpdateRequest{}, err
 	}
@@ -891,7 +892,7 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	req := channels.UpdateRequest{ID: *id}
 	changes := 0
 	if given["name"] {
-		if err := checkDisplayText("--name（渠道名）", strings.TrimSpace(*name)); err != nil {
+		if err := cli.CheckDisplayText("--name（渠道名）", strings.TrimSpace(*name)); err != nil {
 			return channels.UpdateRequest{}, err
 		}
 		req.Name = name
@@ -952,7 +953,7 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	if given["models"] {
 		list := splitList(*models)
 		for i, model := range list {
-			if err := checkDisplayText(
+			if err := cli.CheckDisplayText(
 				fmt.Sprintf("--models 里第 %d 个模型名", i+1), strings.TrimSpace(model)); err != nil {
 				return channels.UpdateRequest{}, err
 			}
@@ -979,7 +980,7 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 	// 判据要连别名一起看（见 flagGiven）：写 `--env FOO` 时 Visit 记的是
 	// "env"，只查规范名的表现是那次轮换被静默跳过——命令报成功，
 	// 而库里那一列还是旧凭证。
-	if flagGiven(given, credentialStdinFlagNames...) || flagGiven(given, credentialEnvFlagNames...) {
+	if cli.FlagGiven(given, cli.CredentialStdinFlagNames...) || cli.FlagGiven(given, cli.CredentialEnvFlagNames...) {
 		plaintext, err := readCredential(*credentialStdin, *credentialEnv, true)
 		if err != nil {
 			return channels.UpdateRequest{}, err
@@ -998,13 +999,13 @@ func parseChannelUpdate(args []string) (channels.UpdateRequest, error) {
 }
 
 func runChannelUpdate(args []string) error {
-	if err := jsonUnsupported("channel update"); err != nil {
+	if err := cli.JSONUnsupported("channel update"); err != nil {
 		return err
 	}
 
 	req, err := parseChannelUpdate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -1013,7 +1014,7 @@ func runChannelUpdate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1029,7 +1030,7 @@ func runChannelUpdate(args []string) error {
 	// 写成功的回显走 stderr：stdout 只放能被下游脚本接走的值，而这条命令要改的
 	// 那一条是调用方自己用 --id 指定的，没有一个新值要给出去
 	// （见 docs/cli-output.md 的「提示与警告」）。
-	_, _ = fmt.Fprintf(humanStderr(), "已更新渠道 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已更新渠道 %d。\n", req.ID)
 	// 提示按**改完之后**的 type 与 setting 算：只改 --type 时，库里原有的
 	// 键可能对新类型没有读者；只改 --setting 时，类型取自库里那一行。
 	// 两样都没碰的 update 不打——那条渠道的 setting 有没有读者，`channel
@@ -1042,7 +1043,7 @@ func runChannelUpdate(args []string) error {
 			// 只是明说前半句已经完成。
 			return fmt.Errorf("渠道 %d 已更新，但读取更新后的配置失败: %w", req.ID, getErr)
 		}
-		printSettingUnreadNote(humanStderr(), info.Type, info.Setting)
+		printSettingUnreadNote(cli.HumanStderr(), info.Type, info.Setting)
 	}
 	return nil
 }
@@ -1070,14 +1071,14 @@ func printSettingUnreadNote(w io.Writer, channelType string, setting map[string]
 }
 
 func runChannelList(args []string) error {
-	fs := newFlagSet("channel list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	all := fs.Bool("all", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	cfg, err := config.LoadOps()
@@ -1086,7 +1087,7 @@ func runChannelList(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1104,10 +1105,10 @@ func runChannelList(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, channelListDoc(infos, *all), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, channelListDoc(infos, *all), nil)
 	}
-	printChannelList(humanStdout(), infos, *all)
+	printChannelList(cli.HumanStdout(), infos, *all)
 	return nil
 }
 
@@ -1118,21 +1119,21 @@ func runChannelSetStatus(args []string, status string) error {
 	}
 	// 命令名按 status 算出来：enable 与 disable 共用这一个入口，写死一个
 	// 会让另一条命令在不支持 json 时报出兄弟命令的名字。
-	if err := jsonUnsupported("channel " + verb); err != nil {
+	if err := cli.JSONUnsupported("channel " + verb); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("channel "+verb, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel "+verb, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "渠道 ID")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("%s 不接受位置参数，得到 %q：渠道用 --id 指定", verb, fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("%s 不接受位置参数，得到 %q：渠道用 --id 指定", verb, fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id（渠道 ID）"))
+		return cli.UsageErr(errors.New("缺少 --id（渠道 ID）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -1141,7 +1142,7 @@ func runChannelSetStatus(args []string, status string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1151,7 +1152,7 @@ func runChannelSetStatus(args []string, status string) error {
 	if err := channels.NewAdmin(db, nil, nil).SetStatus(ctx, *id, status); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "渠道 %d %s。\n", *id, done)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "渠道 %d %s。\n", *id, done)
 	return nil
 }
 
@@ -1167,21 +1168,21 @@ func runChannelSetStatus(args []string, status string) error {
 // 第二条不是错误：删除是幂等的，脚本重跑一次不该失败。而 id 不存在仍然报错
 // （ErrChannelNotFound）——那说明调用方拿错了 id，报成功会让它以为删对了。
 func runChannelDelete(args []string) error {
-	if err := jsonUnsupported("channel delete"); err != nil {
+	if err := cli.JSONUnsupported("channel delete"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("channel delete", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel delete", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要删的渠道 ID")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("delete 不接受位置参数，得到 %q：要删的渠道用 --id 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("delete 不接受位置参数，得到 %q：要删的渠道用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id（要删的渠道 ID）"))
+		return cli.UsageErr(errors.New("缺少 --id（要删的渠道 ID）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -1190,7 +1191,7 @@ func runChannelDelete(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1201,10 +1202,10 @@ func runChannelDelete(args []string) error {
 		return err
 	}
 	if deleted {
-		_, _ = fmt.Fprintf(humanStderr(), "已删除渠道 %d。\n", *id)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除渠道 %d。\n", *id)
 		return nil
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "渠道 %d 已经是删除状态。\n", *id)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "渠道 %d 已经是删除状态。\n", *id)
 	return nil
 }
 
@@ -1213,17 +1214,17 @@ func runChannelDelete(args []string) error {
 // 它与 list 的差别只在形状：list 一张表，get 一栏一行。**已软删的渠道也打得出来**
 // 并由那一栏标出——行还在库里，单条读取的目的是核对配置，藏起来反而让人打不开。
 func runChannelGet(args []string) error {
-	fs := newFlagSet("channel get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要看的渠道 ID")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q：要看哪条渠道用 --id 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("get 不接受位置参数，得到 %q：要看哪条渠道用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id（要看的渠道 ID）"))
+		return cli.UsageErr(errors.New("缺少 --id（要看的渠道 ID）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -1232,7 +1233,7 @@ func runChannelGet(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1244,10 +1245,10 @@ func runChannelGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, channelGetDoc(info), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, channelGetDoc(info), nil)
 	}
-	printChannelDetail(humanStdout(), info)
+	printChannelDetail(cli.HumanStdout(), info)
 	return nil
 }
 
@@ -1291,23 +1292,23 @@ func parseSince(raw string) (time.Time, error) {
 
 // runChannelHealth 打窗口内的渠道健康。
 func runChannelHealth(args []string) error {
-	fs := newFlagSet("channel health", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel health", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "只看这一条渠道（渠道 ID）")
 	since := fs.String("since", "", "窗口起点：一段时长或一个 RFC3339 时刻")
 	all := fs.Bool("all", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("health 不接受位置参数，得到 %q：要看哪一条渠道用 --id 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("health 不接受位置参数，得到 %q：要看哪一条渠道用 --id 指定", fs.Arg(0)))
 	}
 	if *id < 0 {
-		return usageErr(errors.New("--id 必须是正数（渠道 ID）"))
+		return cli.UsageErr(errors.New("--id 必须是正数（渠道 ID）"))
 	}
 	windowStart, err := parseSince(*since)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -1316,7 +1317,7 @@ func runChannelHealth(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1330,12 +1331,12 @@ func runChannelHealth(args []string) error {
 		if healthErr != nil {
 			return healthErr
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout,
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout,
 				channelHealthDoc([]channels.ChannelHealth{one}, time.Now(), windowStart, false, buckets, true), nil)
 		}
-		printChannelHealthDetail(humanStdout(), one, time.Now())
-		printChannelHealthHours(humanStdout(), buckets)
+		printChannelHealthDetail(cli.HumanStdout(), one, time.Now())
+		printChannelHealthHours(cli.HumanStdout(), buckets)
 		return nil
 	}
 
@@ -1343,10 +1344,10 @@ func runChannelHealth(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, channelHealthDoc(rows, time.Now(), windowStart, *all, nil, false), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, channelHealthDoc(rows, time.Now(), windowStart, *all, nil, false), nil)
 	}
-	printChannelHealthList(humanStdout(), rows, *all, time.Now())
+	printChannelHealthList(cli.HumanStdout(), rows, *all, time.Now())
 	return nil
 }
 
@@ -1357,21 +1358,21 @@ func runChannelHealth(args []string) error {
 // （见 internal/channels 的 Restore），而恢复正是 delete 的逆操作，所以三者的
 // 环境要求也就该一样。
 func runChannelRestore(args []string) error {
-	if err := jsonUnsupported("channel restore"); err != nil {
+	if err := cli.JSONUnsupported("channel restore"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("channel restore", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel restore", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "要恢复的渠道 ID")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("restore 不接受位置参数，得到 %q：要恢复的渠道用 --id 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("restore 不接受位置参数，得到 %q：要恢复的渠道用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id（要恢复的渠道 ID）"))
+		return cli.UsageErr(errors.New("缺少 --id（要恢复的渠道 ID）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -1380,7 +1381,7 @@ func runChannelRestore(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1393,13 +1394,13 @@ func runChannelRestore(args []string) error {
 	if !restored {
 		// 与 delete 的「已经是删除状态」配成一对：两条命令都幂等，重跑一次
 		// 不该失败，而回显要说清这一次什么都没改。
-		_, _ = fmt.Fprintf(humanStderr(), "渠道 %d 没有处于删除状态。\n", *id)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "渠道 %d 没有处于删除状态。\n", *id)
 		return nil
 	}
 	// 健康结论回落这件事**必须当场说**：恢复之后的第一次 health 会报 unknown，
 	// 而 unknown 与「这条渠道没问题」在只看一眼时很容易被读成一回事。这一句
 	// 只在真的恢复了的时候打——没恢复的那一次没有任何结论被改写。
-	_, _ = fmt.Fprintf(humanStderr(),
+	_, _ = fmt.Fprintf(cli.HumanStderr(),
 		"已恢复渠道 %d。它的健康结论已回落为 %s：上一次的结论是软删之前的，不能直接沿用。\n",
 		*id, channels.HealthUnknown)
 	return nil
@@ -1538,35 +1539,35 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 		// 明确打一句，而不是什么都不输出：「暂无渠道」与「命令因为某个
 		// 原因没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
 		// 带上添加的命令：空清单是「还没配」，读者下一步的动作就写在那一句里。
-		_, _ = fmt.Fprintln(w, emptyListNote("渠道", "channel create"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("渠道", "channel create"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	if withDeleted {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.bold("ID"), p.bold("状态"), p.bold("类型"), p.bold("名称"),
-			p.bold("上游地址"), p.bold("模型"), p.bold("归属"), p.bold("权重"),
-			p.bold("优先级"), p.bold("凭证"), p.bold("已删"))
+			p.Bold("ID"), p.Bold("状态"), p.Bold("类型"), p.Bold("名称"),
+			p.Bold("上游地址"), p.Bold("模型"), p.Bold("归属"), p.Bold("权重"),
+			p.Bold("优先级"), p.Bold("凭证"), p.Bold("已删"))
 	} else {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.bold("ID"), p.bold("状态"), p.bold("类型"), p.bold("名称"),
-			p.bold("上游地址"), p.bold("模型"), p.bold("归属"), p.bold("权重"),
-			p.bold("优先级"), p.bold("凭证"))
+			p.Bold("ID"), p.Bold("状态"), p.Bold("类型"), p.Bold("名称"),
+			p.Bold("上游地址"), p.Bold("模型"), p.Bold("归属"), p.Bold("权重"),
+			p.Bold("优先级"), p.Bold("凭证"))
 	}
 	for _, info := range infos {
 		if withDeleted {
 			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-				p.bold(strconv.FormatInt(info.ID, 10)), info.Status, info.Type, p.bold(info.Name),
+				p.Bold(strconv.FormatInt(info.ID, 10)), info.Status, info.Type, p.Bold(info.Name),
 				info.BaseURL,
 				strings.Join(info.Models, ","), ownerLabel(info.OwnerUserID),
 				info.Weight, info.Priority, credentialKeysLabel(info),
-				p.dim(deletedLabel(info)))
+				p.Dim(deletedLabel(info)))
 			continue
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			p.bold(strconv.FormatInt(info.ID, 10)), info.Status, info.Type, p.bold(info.Name),
+			p.Bold(strconv.FormatInt(info.ID, 10)), info.Status, info.Type, p.Bold(info.Name),
 			info.BaseURL,
 			strings.Join(info.Models, ","), ownerLabel(info.OwnerUserID),
 			info.Weight, info.Priority, credentialKeysLabel(info))
@@ -1611,7 +1612,7 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 
 // channelListDoc 组装 channel list 的机器可读输出。
 //
-// 与 printChannelList 是同一份数据的另一条渲染路径（见 format.go 开头）：
+// 与 printChannelList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）：
 // 那一档打表、用 `-` 与「平台」铺空栏，这一档给原始值与 null。
 //
 // withDeleted 是这次有没有 --all：默认清单按软删过滤（每一行的 deleted_at
@@ -1619,7 +1620,7 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 // 只在 --all 下给：它的读者问的是「这条是删了还是只是停用」，而没带 --all 时
 // 它恒为 0，给出来只是一栏背景音。
 func channelListDoc(infos []channels.ChannelInfo, withDeleted bool) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 
 	summary := map[string]any{"total": len(infos)}
 	if withDeleted {
@@ -1633,7 +1634,7 @@ func channelListDoc(infos []channels.ChannelInfo, withDeleted bool) map[string]a
 	}
 	doc["summary"] = summary
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(infos))
 	for _, info := range infos {
 		entries = append(entries, channelEntry(info))
@@ -1653,9 +1654,9 @@ func channelEntry(info channels.ChannelInfo) map[string]any {
 		"type":     info.Type,
 		"name":     info.Name,
 		"base_url": info.BaseURL,
-		"models":   jsonList(info.Models),
+		"models":   cli.JSONList(info.Models),
 		// 0 表示平台自营（库里存 NULL），不是「编号 0 的用户」。
-		"owner_user_id": jsonID(info.OwnerUserID),
+		"owner_user_id": cli.JSONID(info.OwnerUserID),
 		"weight":        info.Weight,
 		"priority":      info.Priority,
 		// 密文与凭证明文都不在这里：这两栏一个是主密钥标识、一个是末四位提示，
@@ -1663,12 +1664,12 @@ func channelEntry(info channels.ChannelInfo) map[string]any {
 		//
 		// 三个平铺字段描述**主账号**（选路会用的那一个）；完整的池子在
 		// accounts 里，同样只有名字、权重与信封头部的解析结果。
-		"credential_keys":  jsonList(info.CredentialKeys),
-		"credential_hint":  nullableString(info.Hint),
-		"credential_error": nullableError(info.CredentialErr),
+		"credential_keys":  cli.JSONList(info.CredentialKeys),
+		"credential_hint":  cli.NullableString(info.Hint),
+		"credential_error": cli.NullableError(info.CredentialErr),
 		"accounts":         accountRefsJSON(info.Accounts),
-		"setting":          jsonObject(info.Setting),
-		"deleted_at":       jsonTimeOrNull(info.DeletedAt),
+		"setting":          cli.JSONObject(info.Setting),
+		"deleted_at":       cli.JSONTimeOrNull(info.DeletedAt),
 	}
 	// 每个协议实际生效的地址。只在有多条协议、或者有协议配了自己的地址时
 	// 出现：单协议且没配专属地址时它就是 base_url 那一栏，多一个键只是把
@@ -1707,9 +1708,9 @@ func accountRefsJSON(accounts []channels.ChannelAccount) []map[string]any {
 			"id":               acc.ID,
 			"name":             acc.Name,
 			"weight":           acc.Weight,
-			"credential_keys":  jsonList(acc.CredentialKeys),
-			"credential_hint":  nullableString(acc.Hint),
-			"credential_error": nullableError(acc.CredentialErr),
+			"credential_keys":  cli.JSONList(acc.CredentialKeys),
+			"credential_hint":  cli.NullableString(acc.Hint),
+			"credential_error": cli.NullableError(acc.CredentialErr),
 		})
 	}
 	return out
@@ -1720,10 +1721,10 @@ func accountRefsJSON(accounts []channels.ChannelAccount) []map[string]any {
 // 与 printChannelList 是同一份数据的另一种排版（一栏一行 vs 一张表），与
 // user / apikey / model 的 get 是同一个形状。
 func printChannelDetail(w io.Writer, info channels.ChannelInfo) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("ID", strconv.FormatInt(info.ID, 10))
 	row("名称", info.Name)
@@ -1742,13 +1743,13 @@ func printChannelDetail(w io.Writer, info channels.ChannelInfo) {
 	row("凭证", credentialKeysLabel(info))
 	row("账号", accountRefsLabel(info))
 	row("setting", settingLabel(info.Setting))
-	row("创建时间", p.dim(info.CreatedAt.Format(time.RFC3339)))
-	row("更新时间", p.dim(info.UpdatedAt.Format(time.RFC3339)))
+	row("创建时间", p.Dim(info.CreatedAt.Format(time.RFC3339)))
+	row("更新时间", p.Dim(info.UpdatedAt.Format(time.RFC3339)))
 	// 「已删」整行只在真删了的时候出现：单条详情只有一行，打一个空的已删栏
 	// 除了让人多找一次「哪儿写着我删没删」没有别的用处（与 list 那一栏不同，
 	// 那里一列空值要能逐行分辨）。
 	if !info.DeletedAt.IsZero() {
-		row("已删", p.dim(deletedAtLabel(info.DeletedAt)))
+		row("已删", p.Dim(deletedAtLabel(info.DeletedAt)))
 	}
 	_ = tw.Flush()
 
@@ -1809,12 +1810,12 @@ func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDele
 	if len(rows) == 0 {
 		// 与 list 共用同一句：空清单与「命令没跑起来」在安静的终端里长得一样
 		// （见 LESSONS.md 第 16 条），而这里的下一步动作也确实是建一条渠道。
-		_, _ = fmt.Fprintln(w, emptyListNote("渠道", "channel create"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("渠道", "channel create"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"ID", "名称", "health", "最近探测", "请求数", "失败数", "失败率",
 		"缓存命中", "缓存未命中", "p50", "p95", "成本", "账号", "凭证池"}
 	if withDeleted {
@@ -1822,20 +1823,20 @@ func printChannelHealthList(w io.Writer, rows []channels.ChannelHealth, withDele
 	}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 
 	for _, h := range rows {
 		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s",
-			p.bold(strconv.FormatInt(h.ID, 10)), p.bold(h.Name), h.Health,
-			p.dim(probeLabel(h.LastProbeAt)),
+			p.Bold(strconv.FormatInt(h.ID, 10)), p.Bold(h.Name), h.Health,
+			p.Dim(probeLabel(h.LastProbeAt)),
 			h.Requests, h.Failures, rateLabel(h.FailureRate()),
 			h.CacheHitTokens, h.CacheMissTokens,
 			latencyLabel(h.LatencyP50ms), latencyLabel(h.LatencyP95ms), costLabel(h.Cost),
 			poolCountLabel(h, now), h.PoolState(now))
 		if withDeleted {
-			line += "\t" + p.dim(deletedAtLabel(h.DeletedAt))
+			line += "\t" + p.Dim(deletedAtLabel(h.DeletedAt))
 		}
 		_, _ = fmt.Fprintln(tw, line)
 	}
@@ -1868,10 +1869,10 @@ func poolCountLabel(h channels.ChannelHealth, now time.Time) string {
 // 与汇总表同一份数据、另一种排版。健康那一栏与几个计数在这里是逐项列出来的，
 // 因为 --id 这一档的读者问的是「这条渠道怎么了」，而不是「哪条渠道最差」。
 func printChannelHealthDetail(w io.Writer, h channels.ChannelHealth, now time.Time) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("ID", strconv.FormatInt(h.ID, 10))
 	row("名称", h.Name)
@@ -1888,7 +1889,7 @@ func printChannelHealthDetail(w io.Writer, h channels.ChannelHealth, now time.Ti
 	row("成本", costLabel(h.Cost))
 	row("凭证池", fmt.Sprintf("%s（%s）", h.PoolState(now), poolCountLabel(h, now)))
 	if !h.DeletedAt.IsZero() {
-		row("已删", p.dim(deletedAtLabel(h.DeletedAt)))
+		row("已删", p.Dim(deletedAtLabel(h.DeletedAt)))
 	}
 	_ = tw.Flush()
 
@@ -1917,12 +1918,12 @@ func printChannelHealthAccounts(w io.Writer, h channels.ChannelHealth, now time.
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"账号", "权重", "状态", "可用", "连败", "最近失败", "结论"}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 	for _, acc := range h.Accounts {
@@ -1930,9 +1931,9 @@ func printChannelHealthAccounts(w io.Writer, h channels.ChannelHealth, now time.
 		// 冷却期就又是可用（下一次调用成功才把状态改回 healthy）。两列缺一，
 		// 「还在冷却里」与「冷却过了但还没被再次选中」就分不开。
 		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%d\t%s\t%s\n",
-			p.bold(acc.Name), acc.Weight, acc.Health, yesNo(acc.Usable(now)),
+			p.Bold(acc.Name), acc.Weight, acc.Health, yesNo(acc.Usable(now)),
 			acc.ConsecutiveFailures,
-			p.dim(probeLabel(acc.LastFailureAt)), conclusionLabel(acc.Conclusion))
+			p.Dim(probeLabel(acc.LastFailureAt)), conclusionLabel(acc.Conclusion))
 	}
 	_ = tw.Flush()
 }
@@ -1968,18 +1969,18 @@ func printChannelHealthHours(w io.Writer, buckets []channels.HealthBucket) {
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"小时", "请求数", "成功数", "失败数", "缓存命中", "缓存未命中", "p50", "p95", "成本"}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 
 	for _, b := range buckets {
 		_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n",
-			p.dim(b.Bucket.Format(time.RFC3339)), b.Requests, b.Successes, b.Failures,
+			p.Dim(b.Bucket.Format(time.RFC3339)), b.Requests, b.Successes, b.Failures,
 			b.CacheHitTokens, b.CacheMissTokens,
 			latencyLabel(b.LatencyP50ms), latencyLabel(b.LatencyP95ms), costLabel(b.Cost))
 	}
@@ -2051,7 +2052,7 @@ func printDeletedChannelsNote(w io.Writer, deleted []string) {
 
 // channelGetDoc 组装 channel get 的机器可读输出。
 func channelGetDoc(info channels.ChannelInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["channel"] = channelDetailEntry(info)
 	return doc
 }
@@ -2059,8 +2060,8 @@ func channelGetDoc(info channels.ChannelInfo) map[string]any {
 // channelDetailEntry 打一条渠道的详情：在清单那几栏之上多给创建与更新时刻。
 func channelDetailEntry(info channels.ChannelInfo) map[string]any {
 	entry := channelEntry(info)
-	entry["created_at"] = jsonTime(info.CreatedAt)
-	entry["updated_at"] = jsonTime(info.UpdatedAt)
+	entry["created_at"] = cli.JSONTime(info.CreatedAt)
+	entry["updated_at"] = cli.JSONTime(info.UpdatedAt)
 	return entry
 }
 
@@ -2073,9 +2074,9 @@ func channelDetailEntry(info channels.ChannelInfo) map[string]any {
 // 数组，--id 那一档恰好一个元素），于是 `jq '.channels[]'` 在两种调用下都成立。
 func channelHealthDoc(rows []channels.ChannelHealth, now, since time.Time, withDeleted bool,
 	buckets []channels.HealthBucket, detail bool) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 
-	summary := map[string]any{"total": len(rows), "since": jsonTime(since)}
+	summary := map[string]any{"total": len(rows), "since": cli.JSONTime(since)}
 	if withDeleted {
 		deleted := 0
 		for _, h := range rows {
@@ -2090,7 +2091,7 @@ func channelHealthDoc(rows []channels.ChannelHealth, now, since time.Time, withD
 	}
 	doc["summary"] = summary
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, h := range rows {
 		entries = append(entries, healthEntry(h, now))
@@ -2125,7 +2126,7 @@ func healthEntry(h channels.ChannelHealth, now time.Time) map[string]any {
 		"id":                h.ID,
 		"name":              h.Name,
 		"health":            h.Health,
-		"last_probe_at":     jsonTimePtr(h.LastProbeAt),
+		"last_probe_at":     cli.JSONTimePtr(h.LastProbeAt),
 		"requests":          h.Requests,
 		"successes":         h.Successes,
 		"failures":          h.Failures,
@@ -2135,7 +2136,7 @@ func healthEntry(h channels.ChannelHealth, now time.Time) map[string]any {
 		"latency_p50_ms":    jsonOpt(h.LatencyP50ms),
 		"latency_p95_ms":    jsonOpt(h.LatencyP95ms),
 		"cost":              jsonOpt(h.Cost),
-		"deleted_at":        jsonTimeOrNull(h.DeletedAt),
+		"deleted_at":        cli.JSONTimeOrNull(h.DeletedAt),
 		"pool":              h.PoolState(now),
 		"accounts_usable":   h.UsableAccounts(now),
 		"accounts":          accounts,
@@ -2153,8 +2154,8 @@ func accountHealthEntry(acc channels.AccountHealth, now time.Time) map[string]an
 		"weight":               acc.Weight,
 		"health":               acc.Health,
 		"consecutive_failures": acc.ConsecutiveFailures,
-		"last_failure_at":      jsonTimePtr(acc.LastFailureAt),
-		"conclusion":           nullableString(acc.Conclusion),
+		"last_failure_at":      cli.JSONTimePtr(acc.LastFailureAt),
+		"conclusion":           cli.NullableString(acc.Conclusion),
 		"usable":               acc.Usable(now),
 	}
 }
@@ -2162,7 +2163,7 @@ func accountHealthEntry(acc channels.AccountHealth, now time.Time) map[string]an
 // healthBucketEntry 打逐小时明细里的一行。
 func healthBucketEntry(b channels.HealthBucket) map[string]any {
 	return map[string]any{
-		"bucket":            jsonTime(b.Bucket),
+		"bucket":            cli.JSONTime(b.Bucket),
 		"requests":          b.Requests,
 		"successes":         b.Successes,
 		"failures":          b.Failures,
@@ -2308,17 +2309,17 @@ var probeChannelRegistry = upstream.ProbeRegistry
 // 就是那一份（见 internal/adminapi/probe.go 的 listAdapters），两处同源，
 // 「控制台列得出的类型」与「命令行列得出的类型」不会各说各的。
 func runChannelAdapters(args []string) error {
-	if err := jsonUnsupported("channel adapters"); err != nil {
+	if err := cli.JSONUnsupported("channel adapters"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("channel adapters", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel adapters", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("adapters 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("adapters 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	registry, err := probeChannelRegistry()
@@ -2330,9 +2331,9 @@ func runChannelAdapters(args []string) error {
 		// 二进制不完整」，而不是「今天一个适配器都没有」——后者会被读成
 		// 一次正常的查询结果，所以这里报内部错误（internalErr 在人读的那句
 		// 前面另加「内部错误: 」）。也没有任何添加适配器的命令可指。
-		return internalErr(errors.New("内置适配器注册表为空：这个二进制的装配不完整"))
+		return cli.InternalErr(errors.New("内置适配器注册表为空：这个二进制的装配不完整"))
 	}
-	printChannelAdapters(humanStdout(), registry)
+	printChannelAdapters(cli.HumanStdout(), registry)
 	return nil
 }
 
@@ -2341,10 +2342,10 @@ func runChannelAdapters(args []string) error {
 // 三栏与控制台 adapterJSON 的三个字段一一对应（type / protocol / endpoint）。
 // 顺序直接用 registry.Types()：它已经排好序，调用点不再排第二遍。
 func printChannelAdapters(w io.Writer, registry *channel.Registry) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
-		p.bold("类型"), p.bold("协议"), p.bold("端点"))
+		p.Bold("类型"), p.Bold("协议"), p.Bold("端点"))
 	for _, name := range registry.Types() {
 		adapter, err := registry.Lookup(name)
 		if err != nil {
@@ -2353,7 +2354,7 @@ func printChannelAdapters(w io.Writer, registry *channel.Registry) {
 			continue
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
-			p.bold(adapter.Type()), adapter.Protocol(), adapter.Endpoint())
+			p.Bold(adapter.Type()), adapter.Protocol(), adapter.Endpoint())
 	}
 	_ = tw.Flush()
 }
@@ -2370,14 +2371,14 @@ type channelProbeArgs struct {
 // 校验全部发生在发请求之前：写错的命令不该先打一次上游再报错，而这些错误
 // 都是参数错（退出码 2）。
 func parseChannelProbe(args []string) (channelProbeArgs, error) {
-	fs := newFlagSet("channel probe", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel probe", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	channelType := fs.String("type", "", "")
 	baseURL := fs.String("base-url", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin")
+	cli.BoolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env")
+	cli.StringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(args); err != nil {
 		return channelProbeArgs{}, err
 	}
@@ -2411,13 +2412,13 @@ func parseChannelProbe(args []string) (channelProbeArgs, error) {
 
 // runChannelProbe 拿一份还没落库的地址与凭证向上游问一次模型清单。
 func runChannelProbe(args []string) error {
-	if err := jsonUnsupported("channel probe"); err != nil {
+	if err := cli.JSONUnsupported("channel probe"); err != nil {
 		return err
 	}
 
 	parsed, err := parseChannelProbe(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	registry, err := probeChannelRegistry()
@@ -2427,14 +2428,14 @@ func runChannelProbe(args []string) error {
 	// 类型写错是命令错：在发请求之前判，按退出码 2 报。Lookup 的报错里带着
 	// 注册表现有的类型（从 Types() 取，不在这里抄第二份）。
 	if _, lookupErr := registry.Lookup(parsed.channelType); lookupErr != nil {
-		return usageErr(fmt.Errorf("渠道类型无效: %w", lookupErr))
+		return cli.UsageErr(fmt.Errorf("渠道类型无效: %w", lookupErr))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
 	// 打出这次打的是哪个协议、哪条地址：地址来自参数，不点出来就没法与
 	// 渠道配置里那个协议实际生效的地址核对（见 channel get 的「协议地址」）。
-	_, _ = fmt.Fprintf(humanStderr(), "探测 %s 协议，地址 %s。\n", parsed.channelType, parsed.baseURL)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "探测 %s 协议，地址 %s。\n", parsed.channelType, parsed.baseURL)
 	result, err := channels.NewModelProbe(nil, nil, registry).Probe(ctx, channels.ProbeRequest{
 		Type:       parsed.channelType,
 		BaseURL:    parsed.baseURL,
@@ -2446,11 +2447,11 @@ func runChannelProbe(args []string) error {
 	if !result.Supported {
 		// 「没有这个接口」不是失败，也不等于「清单是空的」：打一句说明、退出
 		// 码 0，并且不打任何清单行——空清单与一次失败的输出在屏幕上分不开。
-		_, _ = fmt.Fprintf(humanStdout(),
+		_, _ = fmt.Fprintf(cli.HumanStdout(),
 			"这家上游（%s）不提供模型列表，这不算错误。\n", parsed.channelType)
 		return nil
 	}
-	printProbeModels(humanStdout(), result)
+	printProbeModels(cli.HumanStdout(), result)
 	return nil
 }
 

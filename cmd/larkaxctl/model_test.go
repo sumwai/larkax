@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 )
@@ -39,8 +40,8 @@ func TestModelCreateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -170,8 +171,8 @@ func TestModelUpdateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -429,8 +430,8 @@ func TestModelEndpointsFlagRejectsUnknownValue(t *testing.T) {
 					t.Errorf("报错里应当列出 %s，得到 %v", endpoint, err)
 				}
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码应当是 %d（参数错），得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码应当是 %d（参数错），得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -665,8 +666,8 @@ func TestModelGetMissing(t *testing.T) {
 	if !errors.Is(err, catalog.ErrModelNotFound) {
 		t.Errorf("期望 catalog.ErrModelNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 
@@ -718,8 +719,8 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 			t.Errorf("错误里应当报出 %q：%v", want, delErr)
 		}
 	}
-	if got := exitCode(delErr); got != exitConflict {
-		t.Errorf("退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(delErr); got != cli.ExitConflict {
+		t.Errorf("退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 
 	// 解掉引用之后删得掉。
@@ -744,8 +745,8 @@ func TestModelDeleteRefusesWhenReferenced(t *testing.T) {
 	if !errors.Is(err, catalog.ErrModelNotFound) {
 		t.Errorf("重复删除期望 ErrModelNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("重复删除的退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("重复删除的退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 
@@ -812,8 +813,8 @@ func TestModelCreateRejectsDuplicateCanonical(t *testing.T) {
 	if err == nil {
 		t.Fatal("重复的规范名应当被拒")
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("重复的规范名是约束冲突，退出码应当是 %d，得到 %d（%v）", exitConflict, got, err)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("重复的规范名是约束冲突，退出码应当是 %d，得到 %d（%v）", cli.ExitConflict, got, err)
 	}
 }
 
@@ -840,7 +841,7 @@ func TestModelListDocIsMachineReadable(t *testing.T) {
 	}
 
 	got := jsonRoundTrip(t, modelListDoc(models))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
 
 	list := jsonEntries(t, got, "models")
@@ -908,7 +909,7 @@ func TestModelGetDocIsMachineReadable(t *testing.T) {
 		}
 
 		got := jsonRoundTrip(t, modelGetDoc(m))
-		assertJSONField(t, got, "status", jsonOK)
+		assertJSONField(t, got, "status", cli.JSONOK)
 		model := jsonObjectField(t, got, "model")
 		assertJSONField(t, model, "canonical_name", "m1")
 		// 表上那两列是 date（无时区），所以只打日子；把无时区的日期按某个
@@ -966,7 +967,7 @@ func TestModelGetDocIsMachineReadable(t *testing.T) {
 // 参数本身就不成立（缺 --model 一类），而要看到的是**不支持 json** 那条错
 // ——它证明守卫在参数解析与连库之前。
 func TestModelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	cases := []struct {
 		command string
@@ -986,8 +987,8 @@ func TestModelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
 				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -1008,7 +1009,7 @@ func TestModelListJSONStdoutIsPure(t *testing.T) {
 		}
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	stdout, _ := captureStreams(t, func() {
 		if err := runModelList(nil); err != nil {
 			t.Fatalf("model list 失败: %v", err)

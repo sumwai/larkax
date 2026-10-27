@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // withFormat 把这一次运行的输出格式换成 f，用例结束时复原。
@@ -15,11 +17,11 @@ import (
 // 复原到**进入时的那个值**而不是写死 table：一个用例里嵌套调用两次时，
 // 写死会让内层提前把外层的设置抹掉，而那种错在用例里表现为「另一条用例
 // 莫名其妙跑在 json 档」。
-func withFormat(t *testing.T, f formatKind) {
+func withFormat(t *testing.T, f cli.FormatKind) {
 	t.Helper()
-	saved := outputFormat
-	outputFormat = f
-	t.Cleanup(func() { outputFormat = saved })
+	saved := cli.OutputFormat
+	cli.OutputFormat = f
+	t.Cleanup(func() { cli.OutputFormat = saved })
 }
 
 // ── --format 的解析 ─────────────────────────────────────────────────────
@@ -34,33 +36,33 @@ func TestTakeFormatFlagAcceptsBothPositions(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		want formatKind
+		want cli.FormatKind
 		rest []string
 	}{
 		{
 			// 写在子命令之前：与 --env-file 一样，全局选项的老位置。
 			name: "写在前面",
 			args: []string{"--format", "json", "doctor"},
-			want: formatJSON,
+			want: cli.FormatJSON,
 			rest: []string{"doctor"},
 		},
 		{
 			// 写在子命令之后：这一条最要紧，它是人补选项时最自然的写法。
 			name: "写在后面",
 			args: []string{"doctor", "--format", "json"},
-			want: formatJSON,
+			want: cli.FormatJSON,
 			rest: []string{"doctor"},
 		},
 		{
 			name: "等号写法",
 			args: []string{"channel", "list", "--format=json"},
-			want: formatJSON,
+			want: cli.FormatJSON,
 			rest: []string{"channel", "list"},
 		},
 		{
 			name: "简写 -o",
 			args: []string{"-o", "json", "model", "list"},
-			want: formatJSON,
+			want: cli.FormatJSON,
 			rest: []string{"model", "list"},
 		},
 		{
@@ -69,13 +71,13 @@ func TestTakeFormatFlagAcceptsBothPositions(t *testing.T) {
 			// 会以「未知子命令」收场，那不是使用者能自己看明白的错。
 			name: "单横线长写法",
 			args: []string{"-format", "json", "doctor"},
-			want: formatJSON,
+			want: cli.FormatJSON,
 			rest: []string{"doctor"},
 		},
 		{
 			name: "显式 table",
 			args: []string{"doctor", "--format", "table"},
-			want: formatTable,
+			want: cli.FormatTable,
 			rest: []string{"doctor"},
 		},
 		{
@@ -83,21 +85,21 @@ func TestTakeFormatFlagAcceptsBothPositions(t *testing.T) {
 			// 人什么都不用改。
 			name: "不给",
 			args: []string{"doctor"},
-			want: formatTable,
+			want: cli.FormatTable,
 			rest: []string{"doctor"},
 		},
 		{
 			// 后写的赢：与 flag 包一致。
 			name: "出现两次",
 			args: []string{"--format", "table", "doctor", "-o", "json"},
-			want: formatJSON,
+			want: cli.FormatJSON,
 			rest: []string{"doctor"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, rest, err := takeFormatFlag(tc.args)
+			got, rest, err := cli.TakeFormatFlag(tc.args)
 			if err != nil {
 				t.Fatalf("解析失败: %v", err)
 			}
@@ -117,15 +119,15 @@ func TestTakeFormatFlagAcceptsBothPositions(t *testing.T) {
 // jq——看日志的人会去查 jq 的用法，而问题在命令行这一侧。
 func TestTakeFormatFlagRejectsUnknownValue(t *testing.T) {
 	for _, raw := range []string{"jsn", "yaml", "", "JSON", "table,json"} {
-		_, rest, err := takeFormatFlag([]string{"doctor", "--format", raw})
+		_, rest, err := cli.TakeFormatFlag([]string{"doctor", "--format", raw})
 		if err == nil {
 			t.Fatalf("--format %q 应当报错", raw)
 		}
 		if rest != nil {
 			t.Errorf("报错时不该返回剩下的参数，得到 %q", rest)
 		}
-		if code := exitCode(err); code != exitUsage {
-			t.Errorf("--format %q 的退出码 = %d，想要 %d（参数错）", raw, code, exitUsage)
+		if code := cli.ExitCode(err); code != cli.ExitUsage {
+			t.Errorf("--format %q 的退出码 = %d，想要 %d（参数错）", raw, code, cli.ExitUsage)
 		}
 		// 错误信息里要给出合法取值：只说「不认识」会让人去翻源码。
 		for _, want := range []string{"table", "json"} {
@@ -138,12 +140,12 @@ func TestTakeFormatFlagRejectsUnknownValue(t *testing.T) {
 
 // --format 后面没跟取值时报参数错，不会去把下一个参数当取值之外的别的东西。
 func TestTakeFormatFlagRequiresValue(t *testing.T) {
-	_, _, err := takeFormatFlag([]string{"doctor", "--format"})
+	_, _, err := cli.TakeFormatFlag([]string{"doctor", "--format"})
 	if err == nil {
 		t.Fatal("--format 后面没跟取值时应当报错")
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitUsage)
 	}
 }
 
@@ -158,12 +160,12 @@ func TestTakeFormatFlagRequiresValue(t *testing.T) {
 // 或者一段 ANSI 上色，都会让 Unmarshal 在这里失败——而人眼看那些输出时，
 // 一行提示语与 JSON 混在一起未必看得出来。
 func TestEmitJSONWritesNothingButJSON(t *testing.T) {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": 1}
 	doc["items"] = []map[string]any{{"id": 1, "name": "a<b>&c"}}
 
 	var buf bytes.Buffer
-	if err := emitJSON(&buf, doc, nil); err != nil {
+	if err := cli.EmitJSON(&buf, doc, nil); err != nil {
 		t.Fatalf("写出失败: %v", err)
 	}
 
@@ -172,7 +174,7 @@ func TestEmitJSONWritesNothingButJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("stdout 不是一份合法的 JSON: %v\n%s", err, out)
 	}
-	if strings.ContainsRune(out, escByte) {
+	if strings.ContainsRune(out, cli.EscByte) {
 		t.Errorf("json 模式的输出里不许有转义序列：%q", out)
 	}
 	// 不转义 HTML：原文里这几个字符不该变成 < 这类。它们仍是合法 JSON，
@@ -192,15 +194,15 @@ func TestEmitJSONFillsExitCodeFromCause(t *testing.T) {
 		cause error
 		want  int
 	}{
-		{"成功", nil, exitOK},
-		{"其他失败", errors.New("不通过"), exitFailure},
-		{"参数错", usageErr(errors.New("取值不认识")), exitUsage},
-		{"连不上库", dbErr(errors.New("连接数据库失败")), exitDBUnreach},
+		{"成功", nil, cli.ExitOK},
+		{"其他失败", errors.New("不通过"), cli.ExitFailure},
+		{"参数错", cli.UsageErr(errors.New("取值不认识")), cli.ExitUsage},
+		{"连不上库", cli.DBErr(errors.New("连接数据库失败")), cli.ExitDBUnreach},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := emitJSON(&buf, jsonDoc(jsonFailed), tc.cause); !errors.Is(err, tc.cause) {
+			if err := cli.EmitJSON(&buf, cli.JSONDoc(cli.JSONFailed), tc.cause); !errors.Is(err, tc.cause) {
 				t.Fatalf("emitJSON 应当把 cause 原样返回，得到 %v", err)
 			}
 			var got struct {
@@ -222,11 +224,11 @@ func TestEmitJSONFillsExitCodeFromCause(t *testing.T) {
 // 那一支下 stdout 必须是**空的**：留下一半比什么都不留更坏——下游的 jq
 // 会报一句语法错，而真正的原因在 stderr 上。
 func TestEmitJSONLeavesStdoutEmptyOnMarshalFailure(t *testing.T) {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["broken"] = make(chan int)
 
 	var buf bytes.Buffer
-	if err := emitJSON(&buf, doc, nil); err == nil {
+	if err := cli.EmitJSON(&buf, doc, nil); err == nil {
 		t.Fatal("编不出来的文档应当报错")
 	}
 	if buf.Len() != 0 {
@@ -240,18 +242,18 @@ func TestEmitJSONLeavesStdoutEmptyOnMarshalFailure(t *testing.T) {
 // 一段给人看的文本，报错的是 jq，看起来像 jq 的问题；而写类命令那时事情
 // 已经做完了，脚本只看到一句解析错误，于是重跑一次。
 func TestJSONUnsupportedOnlyFailsInJSONMode(t *testing.T) {
-	withFormat(t, formatTable)
-	if err := jsonUnsupported("apikey create"); err != nil {
+	withFormat(t, cli.FormatTable)
+	if err := cli.JSONUnsupported("apikey create"); err != nil {
 		t.Fatalf("table 档不该被拦下: %v", err)
 	}
 
-	withFormat(t, formatJSON)
-	err := jsonUnsupported("apikey create")
+	withFormat(t, cli.FormatJSON)
+	err := cli.JSONUnsupported("apikey create")
 	if err == nil {
 		t.Fatal("json 档应当把还没接的命令拦下")
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 	}
 	if !strings.Contains(err.Error(), "apikey create") {
 		t.Errorf("错误信息里要点名是哪条命令：%v", err)
@@ -299,7 +301,7 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.command, func(t *testing.T) {
-			withFormat(t, formatJSON)
+			withFormat(t, cli.FormatJSON)
 
 			// 输出要接住：guard 万一漏了，这条命令会去打表格或动库，
 			// 而那时用例看到的应当是「它没被拦下」，不是一片刷屏。
@@ -309,8 +311,8 @@ func TestUnsupportedCommandsRefuseJSONBeforeDoingAnything(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s 在 json 模式下应当被拦下，实际跑通了", tc.command)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("%s 的退出码 = %d，想要 %d（参数错）", tc.command, code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("%s 的退出码 = %d，想要 %d（参数错）", tc.command, code, cli.ExitUsage)
 			}
 			if !strings.Contains(err.Error(), tc.command) {
 				t.Errorf("%s 的错误信息要点名命令：%v", tc.command, err)
@@ -345,7 +347,7 @@ func TestRunVersionJSONIsMachineReadable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// run() 会按参数把 outputFormat 定下来，跑完要还原，
 			// 否则后面那些用例会跟着跑在 json 档上。
-			t.Cleanup(func() { outputFormat = formatTable })
+			t.Cleanup(func() { cli.OutputFormat = cli.FormatTable })
 
 			saved := os.Args
 			os.Args = tc.args
@@ -365,9 +367,9 @@ func TestRunVersionJSONIsMachineReadable(t *testing.T) {
 			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 				t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", err, stdout)
 			}
-			if got.Status != jsonOK || got.ExitCode != exitOK {
+			if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
 				t.Errorf("status=%q exit_code=%d，想要 %q / %d",
-					got.Status, got.ExitCode, jsonOK, exitOK)
+					got.Status, got.ExitCode, cli.JSONOK, cli.ExitOK)
 			}
 			// stdout 恰好一份文档：前后不许有别的行。
 			if strings.Count(stdout, "{") != 1 {
@@ -379,7 +381,7 @@ func TestRunVersionJSONIsMachineReadable(t *testing.T) {
 
 // 取值不合法时退出码是 2，stdout 上一个字节都不该有。
 func TestRunRejectsUnknownFormatWithoutWritingStdout(t *testing.T) {
-	t.Cleanup(func() { outputFormat = formatTable })
+	t.Cleanup(func() { cli.OutputFormat = cli.FormatTable })
 
 	saved := os.Args
 	os.Args = []string{"larkaxctl", "doctor", "--format", "jsn"}
@@ -390,8 +392,8 @@ func TestRunRejectsUnknownFormatWithoutWritingStdout(t *testing.T) {
 	if err == nil {
 		t.Fatal("取值不合法时应当报错")
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitUsage)
 	}
 	if stdout != "" {
 		t.Errorf("参数错时 stdout 应当为空，得到 %q", stdout)
@@ -404,7 +406,7 @@ func TestRunRejectsUnknownFormatWithoutWritingStdout(t *testing.T) {
 // **另一条**契约——外部的探针要能在库挂了的时候仍然解析 stdout，而不是
 // 拿到一份空输出、再去区分「库挂了」与「探针自己坏了」。
 func TestDoctorJSONWithoutDatabaseStillEmitsReport(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
 	var err error
@@ -423,16 +425,16 @@ func TestDoctorJSONWithoutDatabaseStillEmitsReport(t *testing.T) {
 	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
 		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, stdout)
 	}
-	if code := exitCode(err); code != exitDBUnreach {
-		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, exitDBUnreach)
+	if code := cli.ExitCode(err); code != cli.ExitDBUnreach {
+		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, cli.ExitDBUnreach)
 	}
-	if got.ExitCode != exitDBUnreach {
+	if got.ExitCode != cli.ExitDBUnreach {
 		t.Errorf("报告里的 exit_code = %d，与进程的退出码对不上", got.ExitCode)
 	}
 	// 九项都「没跑成」——这个 Status 不是 ok，也不是 failed：它说的是
 	// 「一项都没查成」，与「查了、都没问题」是两件事（见 LESSONS 第 16 条）。
-	if got.Status != jsonSkipped {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonSkipped)
+	if got.Status != cli.JSONSkipped {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONSkipped)
 	}
 	if got.Summary["total"] != 9 || got.Summary["skipped"] != 9 {
 		t.Errorf("summary 应当是九项全跳过，得到 %v", got.Summary)
@@ -481,16 +483,16 @@ func TestJSONTimeIsUTCWhateverTheProcessZone(t *testing.T) {
 	tm := instant.In(time.Local)
 
 	const want = "2026-01-02T03:04:05Z"
-	if got := jsonTime(tm); got != want {
+	if got := cli.JSONTime(tm); got != want {
 		t.Errorf("jsonTime = %q，想要 %q：机器读的时刻必须恒 UTC，与进程时区无关",
 			got, want)
 	}
 	// 可空那两档走的是同一个 jsonTime，一并钉住：将来把其中一档改成自己
 	// Format（绕开 jsonTime）时，这一条会把它照出来。
-	if got := jsonTimePtr(&tm); got != want {
+	if got := cli.JSONTimePtr(&tm); got != want {
 		t.Errorf("jsonTimePtr = %v，想要 %q", got, want)
 	}
-	if got := jsonTimeOrNull(tm); got != want {
+	if got := cli.JSONTimeOrNull(tm); got != want {
 		t.Errorf("jsonTimeOrNull = %v，想要 %q", got, want)
 	}
 }

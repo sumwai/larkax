@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/config"
 )
@@ -70,8 +71,8 @@ var adminActions = []string{"token"}
 func runAdmin(args []string) error {
 	if len(args) == 0 {
 		// 缺子命令才打整段用法：这时人还没开始用，用法正是他要的。
-		printUsage(os.Stderr, adminShortUsage)
-		return usageErr(errors.New("admin 需要子命令"))
+		cli.PrintUsage(os.Stderr, adminShortUsage)
+		return cli.UsageErr(errors.New("admin 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -79,11 +80,11 @@ func runAdmin(args []string) error {
 	case "token":
 		return runAdminToken(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, adminShortUsage)
+		cli.PrintUsage(os.Stdout, adminShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, adminShortUsage)
-		return usageErr(fmt.Errorf("未知的 admin 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, adminShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 admin 子命令 %q", action))
 	}
 }
 
@@ -93,8 +94,8 @@ var adminTokenActions = []string{"create", "revoke"}
 
 func runAdminToken(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, adminShortUsage)
-		return usageErr(errors.New("admin token 需要子命令"))
+		cli.PrintUsage(os.Stderr, adminShortUsage)
+		return cli.UsageErr(errors.New("admin token 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -104,30 +105,30 @@ func runAdminToken(args []string) error {
 	case "revoke":
 		return runAdminTokenRevoke(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, adminShortUsage)
+		cli.PrintUsage(os.Stdout, adminShortUsage)
 		return nil
 	case "help":
 		// admin token 由 admin 拆出来，读者要的仍是 admin 那一份里关于令牌的
 		// 那几行：这一组不另写文案，与「帮助文案只有一处来源」一致。
-		printUsage(os.Stdout, adminUsage)
+		cli.PrintUsage(os.Stdout, adminUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, adminShortUsage)
-		return usageErr(fmt.Errorf("未知的 admin token 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, adminShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 admin token 子命令 %q", action))
 	}
 }
 
 func runAdminTokenCreate(args []string) error {
-	if err := jsonUnsupported("admin token create"); err != nil {
+	if err := cli.JSONUnsupported("admin token create"); err != nil {
 		return err
 	}
-	fs := newFlagSet("admin token create", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, adminShortUsage) }
+	fs := cli.NewFlagSet("admin token create", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, adminShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("create 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), adminTimeout)
@@ -142,21 +143,21 @@ func runAdminTokenCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printAdminToken(humanStdout(), humanStderr(), token)
+	printAdminToken(cli.HumanStdout(), cli.HumanStderr(), token)
 	return nil
 }
 
 func runAdminTokenRevoke(args []string) error {
-	if err := jsonUnsupported("admin token revoke"); err != nil {
+	if err := cli.JSONUnsupported("admin token revoke"); err != nil {
 		return err
 	}
-	fs := newFlagSet("admin token revoke", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, adminShortUsage) }
+	fs := cli.NewFlagSet("admin token revoke", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, adminShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("revoke 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("revoke 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), adminTimeout)
@@ -170,7 +171,7 @@ func runAdminTokenRevoke(args []string) error {
 	if err := store.Revoke(ctx); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(humanStdout(), "已撤销管理令牌：从现在起，带旧令牌的请求一律 401。")
+	_, _ = fmt.Fprintln(cli.HumanStdout(), "已撤销管理令牌：从现在起，带旧令牌的请求一律 401。")
 	return nil
 }
 
@@ -183,7 +184,7 @@ func openTokenStore(ctx context.Context) (*adminapi.TokenStore, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -199,8 +200,8 @@ func openTokenStore(ctx context.Context) (*adminapi.TokenStore, func(), error) {
 //
 // 令牌加粗、说明置灰：这是这一页唯一需要看清的那一行，而它只在这一次出现。
 func printAdminToken(stdout, stderr io.Writer, token string) {
-	p := newPalette(stdout)
-	_, _ = fmt.Fprintln(stdout, p.bold(token))
+	p := cli.NewPalette(stdout)
+	_, _ = fmt.Fprintln(stdout, p.Bold(token))
 	_, _ = fmt.Fprintln(stderr, "这是这枚令牌唯一的明文：库里只存它的 SHA-256，丢了只能重新生成。")
 	_, _ = fmt.Fprintln(stderr, "请求里带 Authorization: Bearer <令牌>；撤销用 larkaxctl admin token revoke。")
 }

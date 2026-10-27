@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 )
 
@@ -68,8 +69,8 @@ var modelAliasActions = []string{"add", "remove", "list"}
 // runModelAlias 分发 model alias 的三个动作。
 func runModelAlias(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, modelAliasShortUsage)
-		return usageErr(errors.New("model alias 需要子命令"))
+		cli.PrintUsage(os.Stderr, modelAliasShortUsage)
+		return cli.UsageErr(errors.New("model alias 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -81,47 +82,47 @@ func runModelAlias(args []string) error {
 	case "list":
 		return runModelAliasList(rest)
 	case "help":
-		printUsage(os.Stdout, modelAliasHelp.long)
+		cli.PrintUsage(os.Stdout, modelAliasHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, modelAliasHelp.short)
+		cli.PrintUsage(os.Stdout, modelAliasHelp.short)
 		return nil
 	default:
-		printUsage(os.Stderr, modelAliasShortUsage)
-		return usageErr(fmt.Errorf("未知的 model alias 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, modelAliasShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 model alias 子命令 %q", action))
 	}
 }
 
 // runModelAliasAdd 新建一条入站别名。
 func runModelAliasAdd(args []string) error {
-	if err := jsonUnsupported("model alias add"); err != nil {
+	if err := cli.JSONUnsupported("model alias add"); err != nil {
 		return err
 	}
 
 	alias, canonical, err := parseModelAliasPair(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
 		if err := catalog.NewAdmin(db).CreateInboundAlias(ctx, alias, canonical); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已加入入站别名 %s → %s。\n", alias, canonical)
-		_, _ = fmt.Fprintln(humanStdout(), alias)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已加入入站别名 %s → %s。\n", alias, canonical)
+		_, _ = fmt.Fprintln(cli.HumanStdout(), alias)
 		return nil
 	})
 }
 
 // runModelAliasRemove 删除一条入站别名。
 func runModelAliasRemove(args []string) error {
-	fs := newFlagSet("model alias remove", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelAliasShortUsage) }
+	fs := cli.NewFlagSet("model alias remove", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelAliasShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf("remove 需要一个位置参数（别名），得到 %d 个", fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("remove 需要一个位置参数（别名），得到 %d 个", fs.NArg()))
 	}
 	alias := fs.Arg(0)
 
@@ -129,20 +130,20 @@ func runModelAliasRemove(args []string) error {
 		if err := catalog.NewAdmin(db).DeleteInboundAlias(ctx, alias); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已删除入站别名 %s。\n", alias)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除入站别名 %s。\n", alias)
 		return nil
 	})
 }
 
 // runModelAliasList 列出入站别名。
 func runModelAliasList(args []string) error {
-	fs := newFlagSet("model alias list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelAliasShortUsage) }
+	fs := cli.NewFlagSet("model alias list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelAliasShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -150,10 +151,10 @@ func runModelAliasList(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, modelAliasListDoc(aliases), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, modelAliasListDoc(aliases), nil)
 		}
-		printModelAliasList(humanStdout(), aliases)
+		printModelAliasList(cli.HumanStdout(), aliases)
 		return nil
 	})
 }
@@ -162,8 +163,8 @@ func runModelAliasList(args []string) error {
 //
 // 校验放在连库之前：少给一个参数是命令错（退出码 2），不该先连一次库再报。
 func parseModelAliasPair(args []string) (alias, canonical string, err error) {
-	fs := newFlagSet("model alias add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelAliasShortUsage) }
+	fs := cli.NewFlagSet("model alias add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelAliasShortUsage) }
 	if err = fs.Parse(args); err != nil {
 		return "", "", err
 	}
@@ -176,31 +177,31 @@ func parseModelAliasPair(args []string) (alias, canonical string, err error) {
 // printModelAliasList 打印入站别名清单。
 func printModelAliasList(w io.Writer, aliases []catalog.InboundAlias) {
 	if len(aliases) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("入站别名", "model alias add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("入站别名", "model alias add"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", p.bold("别名"), p.bold("规范名"), p.bold("创建于"))
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", p.Bold("别名"), p.Bold("规范名"), p.Bold("创建于"))
 	for _, a := range aliases {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
-			p.bold(a.Alias), a.CanonicalName, formatStampShort(a.CreatedAt))
+			p.Bold(a.Alias), a.CanonicalName, formatStampShort(a.CreatedAt))
 	}
 	_ = tw.Flush()
 }
 
 func modelAliasListDoc(aliases []catalog.InboundAlias) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(aliases)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(aliases))
 	for _, a := range aliases {
 		entries = append(entries, map[string]any{
 			"alias":          a.Alias,
 			"canonical_name": a.CanonicalName,
-			"created_at":     jsonTime(a.CreatedAt),
+			"created_at":     cli.JSONTime(a.CreatedAt),
 		})
 	}
 	doc["aliases"] = entries

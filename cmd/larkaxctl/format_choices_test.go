@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // 这一组用例钉住 `--format` 的取值清单：表里的条目、由表渲染出来的句子，
@@ -16,7 +18,7 @@ import (
 // TestFormatSpecsList 钉住表的条目与顺序。
 func TestFormatSpecsList(t *testing.T) {
 	want := []string{"table", "json"}
-	got := formatNames()
+	got := cli.FormatNames()
 	if len(got) != len(want) {
 		t.Fatalf("--format 的取值有 %d 项，想要 %d 项：%q", len(got), len(want), got)
 	}
@@ -34,7 +36,7 @@ func TestFormatSpecsList(t *testing.T) {
 // 空格写错在终端里几乎看不出来，只有逐字比才抓得住。
 func TestFormatChoicesRendering(t *testing.T) {
 	const want = "取值 table 或 json"
-	if got := formatChoices(); got != want {
+	if got := cli.FormatChoices(); got != want {
 		t.Errorf("formatChoices() = %q，想要 %q", got, want)
 	}
 }
@@ -56,7 +58,7 @@ func TestFormatFlagErrorMessages(t *testing.T) {
 			{"-o", []string{"doctor", "-o", "x"}},
 		}
 		for _, c := range cases {
-			_, _, err := takeFormatFlag(c.args)
+			_, _, err := cli.TakeFormatFlag(c.args)
 			if err == nil {
 				t.Fatalf("%s 给了不认识的取值时应当报错", c.name)
 			}
@@ -79,7 +81,7 @@ func TestFormatFlagErrorMessages(t *testing.T) {
 			{"-o", []string{"doctor", "-o"}, "-o 后面要跟 取值 table 或 json"},
 		}
 		for _, c := range cases {
-			_, _, err := takeFormatFlag(c.args)
+			_, _, err := cli.TakeFormatFlag(c.args)
 			if err == nil {
 				t.Fatalf("%s 后面没跟取值时应当报错", c.name)
 			}
@@ -99,7 +101,7 @@ var usageFormatEnumRE = regexp.MustCompile(`--format <([^>]+)>`)
 // 顺手改表，反之亦然），没有这条用例时「给表加了一档、帮助没改」不会红任何东西。
 // 期望值由表拼出来，实际值必须原样出现在帮助里，且恰好一处。
 func TestUsageFormatEnumMatchesTable(t *testing.T) {
-	want := strings.Join(formatNames(), "|")
+	want := strings.Join(cli.FormatNames(), "|")
 	matches := usageFormatEnumRE.FindAllStringSubmatch(usageNotes, -1)
 	if len(matches) != 1 {
 		t.Fatalf("帮助里 --format 的枚举写法应恰好一处，找到 %d 处", len(matches))

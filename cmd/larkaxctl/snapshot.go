@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/settings"
@@ -134,8 +135,8 @@ var snapshotActions = []string{"cleanup", "allowlist", "get", "access-log", "red
 // runSnapshot 处理 snapshot 子命令。
 func runSnapshot(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, snapshotShortUsage)
-		return usageErr(errors.New("snapshot 需要子命令"))
+		cli.PrintUsage(os.Stderr, snapshotShortUsage)
+		return cli.UsageErr(errors.New("snapshot 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -151,11 +152,11 @@ func runSnapshot(args []string) error {
 	case "redact":
 		return runSnapshotRedact(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, snapshotShortUsage)
+		cli.PrintUsage(os.Stdout, snapshotShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, snapshotShortUsage)
-		return usageErr(fmt.Errorf("未知的 snapshot 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, snapshotShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 snapshot 子命令 %q", action))
 	}
 }
 
@@ -213,35 +214,35 @@ func surfaceFor(name string, fallback snapshot.Surface) (snapshot.Surface, error
 // 它不连库、不读配置：允许表是代码里的数据，而这条命令的用途正是
 // 在一个连不上库的地方回答「你们存了我请求里的哪些字段」。
 func runSnapshotAllowlist(args []string) error {
-	fs := newFlagSet("snapshot allowlist", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
+	fs := cli.NewFlagSet("snapshot allowlist", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, snapshotShortUsage) }
 	direction := fs.String("direction", "", "")
 	surfaceName := fs.String("surface", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("snapshot allowlist 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("snapshot allowlist 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	roots, err := snapshotRootsFor(*direction)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	// 不填 --surface 时逐张表都打：只打一张的话，「有没有决策那张表」这件事
 	// 就变成要看帮助文本才知道的事，而这条命令的用途正是回答那个问题。
 	surface, err := surfaceFor(*surfaceName, "")
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	surfaces := snapshot.Surfaces()
 	if surface != "" {
 		surfaces = []snapshot.Surface{surface}
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, allowlistDoc(surfaces, roots), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, allowlistDoc(surfaces, roots), nil)
 	}
-	printAllowlists(humanStdout(), surfaces, roots)
+	printAllowlists(cli.HumanStdout(), surfaces, roots)
 	return nil
 }
 
@@ -277,7 +278,7 @@ func allowlistDoc(surfaces []snapshot.Surface, roots []snapshot.Root) map[string
 		}
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"groups": len(groups), "rules": rules}
 	doc["allowlist"] = groups
 	return doc
@@ -303,7 +304,7 @@ func allowlistDoc(surfaces []snapshot.Surface, roots []snapshot.Root) map[string
 // 于是「哪一段说明属于哪一条」仍然对得上——这份说明正是这条命令存在的理由，
 // 不能因为排版把它与规则拆散。
 func printAllowlists(w io.Writer, surfaces []snapshot.Surface, roots []snapshot.Root) {
-	p := newPalette(w)
+	p := cli.NewPalette(w)
 	for i, s := range surfaces {
 		if i > 0 {
 			_, _ = fmt.Fprintln(w)
@@ -320,19 +321,19 @@ func printAllowlists(w io.Writer, surfaces []snapshot.Surface, roots []snapshot.
 				continue
 			}
 
-			tw := newTableWriter(w)
+			tw := cli.NewTableWriter(w)
 			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
-				p.bold("路径"), p.bold("类型"), p.bold("上游值"))
+				p.Bold("路径"), p.Bold("类型"), p.Bold("上游值"))
 			for _, rule := range rules {
 				// 路径是这张表的主键，加粗。
 				_, _ = fmt.Fprintf(tw, "%s\t%s\t%t\n",
-					p.bold(rule.Path), rule.Kind, rule.UpstreamValue)
+					p.Bold(rule.Path), rule.Kind, rule.UpstreamValue)
 			}
 			_ = tw.Flush()
 
 			_, _ = fmt.Fprintln(w, "  说明：")
 			for _, rule := range rules {
-				_, _ = fmt.Fprintf(w, "    %s：%s\n", p.bold(rule.Path), rule.Note)
+				_, _ = fmt.Fprintf(w, "    %s：%s\n", p.Bold(rule.Path), rule.Note)
 			}
 		}
 	}
@@ -348,45 +349,45 @@ func runSnapshotRedact(args []string) error {
 	// status / exit_code 的信封，所以照 `-o json` 那一档的约定改不了它，
 	// 也不该改——那段骨架就是这个命令的结果本身。这里拒掉，免得让人以为
 	// `-o json` 能给它套上一层信封。
-	if err := jsonUnsupported("snapshot redact"); err != nil {
+	if err := cli.JSONUnsupported("snapshot redact"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("snapshot redact", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
+	fs := cli.NewFlagSet("snapshot redact", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, snapshotShortUsage) }
 	direction := fs.String("direction", "", "")
 	surfaceName := fs.String("surface", "", "")
 	maxBytes := fs.Int("max-bytes", snapshot.DefaultMaxBytes,
 		"")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"snapshot redact 不接受位置参数，得到 %q：报文从标准输入读", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*direction) == "" {
-		return usageErr(errors.New("缺少 --direction：request 与 response 各有一张允许表，必须指明"))
+		return cli.UsageErr(errors.New("缺少 --direction：request 与 response 各有一张允许表，必须指明"))
 	}
 	if *maxBytes <= 0 {
 		// 在构造脱敏器之前拦下：WithMaxBytes 也会拒，但那个错误的措辞是
 		// 「选项无效」，而这里的问题出在命令行参数上，退出码应当是 2。
-		return usageErr(fmt.Errorf("--max-bytes 必须为正数，得到 %d", *maxBytes))
+		return cli.UsageErr(fmt.Errorf("--max-bytes 必须为正数，得到 %d", *maxBytes))
 	}
 
 	roots, err := snapshotRootsFor(*direction)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	surface, err := surfaceFor(*surfaceName, snapshot.SurfaceChat)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	redactor, err := snapshot.NewFor(surface, roots[0], snapshot.WithMaxBytes(*maxBytes))
 	if err != nil {
 		// 走到这里说明允许表本身有问题（重复路径、空 Note 之类），
 		// 那不是参数错，是这份代码或这个二进制有问题。
-		return internalErr(fmt.Errorf("构造脱敏器失败: %w", err))
+		return cli.InternalErr(fmt.Errorf("构造脱敏器失败: %w", err))
 	}
 
 	data, err := readBoundedInput(os.Stdin, snapshotRedactMaxInput)
@@ -400,13 +401,13 @@ func runSnapshotRedact(args []string) error {
 	if err != nil {
 		// 按这条命令的用法，喂进来的是一段**已经采下来的**报文；它解不开说明
 		// 这一段本身坏了，不是使用者写错了参数——归「内部错误」。
-		return internalErr(fmt.Errorf("解析报文失败: %w", err))
+		return cli.InternalErr(fmt.Errorf("解析报文失败: %w", err))
 	}
 	res, err := redactor.RedactRaw(payload)
 	if err != nil {
-		return internalErr(fmt.Errorf("脱敏失败: %w", err))
+		return cli.InternalErr(fmt.Errorf("脱敏失败: %w", err))
 	}
-	return printRedaction(humanStdout(), humanStderr(), redactor, res, verboseOutput)
+	return printRedaction(cli.HumanStdout(), cli.HumanStderr(), redactor, res, cli.VerboseOutput)
 }
 
 // readBoundedInput 把 r 整个读进内存，超过 limit 字节就报错。
@@ -455,7 +456,7 @@ func printRedaction(out, info io.Writer, redactor *snapshot.Redactor, res *snaps
 	// MarshalIndent 对 map 的键是排序的，所以同一段报文两次跑出来逐行相同。
 	raw, err := json.MarshalIndent(res.Skeleton, "", "  ")
 	if err != nil {
-		return internalErr(fmt.Errorf("骨架无法序列化: %w", err))
+		return cli.InternalErr(fmt.Errorf("骨架无法序列化: %w", err))
 	}
 	_, _ = fmt.Fprintf(out, "%s\n", raw)
 
@@ -580,52 +581,52 @@ type snapshotRow struct {
 // 于是 `get <id> --actor X` 与 `get --actor X <id>` 两种写法都能用，
 // 而多余的位置参数照样会被拒——它们落在第二趟的 fs.Args() 里。
 func runSnapshotGet(args []string) error {
-	fs := newFlagSet("snapshot get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
+	fs := cli.NewFlagSet("snapshot get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, snapshotShortUsage) }
 	actor := fs.String("actor", "", "")
 	reason := fs.String("reason", "", "")
 	direction := fs.String("direction", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	// 第一趟 Parse 之后，fs.Args() 是「第一个位置参数 + 它后面的一切」。
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"用法：larkaxctl snapshot get <request_id> --actor <用户> --reason <文本>"))
 	}
 	requestID := strings.TrimSpace(rest[0])
 	if requestID == "" {
-		return usageErr(errors.New("request_id 不能为空"))
+		return cli.UsageErr(errors.New("request_id 不能为空"))
 	}
 	if len(rest) > 1 {
 		if err := fs.Parse(rest[1:]); err != nil {
-			return usageErr(err)
+			return cli.UsageErr(err)
 		}
 		if fs.NArg() > 0 {
-			return usageErr(fmt.Errorf(
+			return cli.UsageErr(fmt.Errorf(
 				"snapshot get 只接受一个位置参数（request_id），多余的：%q", fs.Arg(0)))
 		}
 	}
 	// 两个都不给默认值。理由见 snapshotUsage：「我写了 --reason」与
 	// 「我忘了写」在库里必须分得开，而一个默认值恰好让这两件事在库里长得一样。
 	if strings.TrimSpace(*actor) == "" {
-		return usageErr(errors.New("缺少 --actor：读一条快照要记下是谁读的"))
+		return cli.UsageErr(errors.New("缺少 --actor：读一条快照要记下是谁读的"))
 	}
 	if strings.TrimSpace(*reason) == "" {
-		return usageErr(errors.New("缺少 --reason：读一条别人的请求结构，理由必须留下"))
+		return cli.UsageErr(errors.New("缺少 --reason：读一条别人的请求结构，理由必须留下"))
 	}
 	// 理由原样落进 snapshot_access_log，随后由 `snapshot access-log` 打成表格的
 	// 最后一栏。这条写入路径就在本文件里（readSnapshotsWithAudit），没有别的
 	// 包可以承载判据，所以在连库之前判一次，写入那一步与这里用同一个函数。
-	if err := checkDisplayText("--reason", *reason); err != nil {
+	if err := cli.CheckDisplayText("--reason", *reason); err != nil {
 		return err
 	}
 
 	roots, err := snapshotRootsFor(*direction)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	dirs := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -644,10 +645,10 @@ func runSnapshotGet(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, snapshotsDoc(req.RequestID, rows), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, snapshotsDoc(req.RequestID, rows), nil)
 		}
-		printSnapshots(humanStdout(), humanStderr(), req.RequestID, rows)
+		printSnapshots(cli.HumanStdout(), cli.HumanStderr(), req.RequestID, rows)
 		return nil
 	})
 }
@@ -674,7 +675,7 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 			// created_at 走 format.go 的 jsonTime，不在这里手工 Format：机器读
 			// 的时刻只有那一条出口（恒 UTC、完整精度），多一处手工 Format 就多
 			// 一处要记得带 .UTC() 的地方（见 docs/cli-output.md 的「时刻与时区」）。
-			"created_at":       jsonTime(row.CreatedAt),
+			"created_at":       cli.JSONTime(row.CreatedAt),
 			"skeleton_version": row.SkeletonVersion,
 			"capture_mode":     row.CaptureMode,
 			// 被降级成摘要层的骨架与一份完整的骨架在肉眼下长得一样，所以这个
@@ -684,7 +685,7 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 			// 正文被扣下时 skeleton 是 null。没有这个布尔，null 与「这次什么
 			// 都没发」分不开，而两者要读的人做的事完全不同。
 			"raw_withheld":   row.RawWithheld,
-			"redacted_paths": jsonList(row.RedactedPaths),
+			"redacted_paths": cli.JSONList(row.RedactedPaths),
 			"skeleton":       row.Skeleton,
 		}
 		if row.UpstreamStatus.Valid {
@@ -700,7 +701,7 @@ func snapshotsDoc(requestID string, rows []snapshotRow) map[string]any {
 		items = append(items, item)
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(items)}
 	doc["request_id"] = requestID
 	doc["snapshots"] = items
@@ -817,12 +818,6 @@ func withholdInactiveRaw(ctx context.Context, db *sql.DB, requestID string, rows
 	}
 }
 
-// errSnapshotNotFound 是读路径上「要读的那一条快照不在库里」的哨兵。
-//
-// 它登记在 conflictErrors（exit.go）里，落 exitConflict：与「要改的那一行不
-// 在」是同一个形状——下一步都是先去看数据里现在是什么，而不是改一条命令重发。
-var errSnapshotNotFound = errors.New("要读的快照不存在")
-
 // snapshotNotFoundError 是「一条都没读到」时返回的具体错误。
 //
 // 单独一个类型而不是直接 fmt.Errorf：那句话要带上 request id 与方向（给读的人
@@ -842,8 +837,8 @@ func (e *snapshotNotFoundError) Error() string {
 	return fmt.Sprintf("请求 %q 没有存下来的快照", e.requestID)
 }
 
-// Is 让它等于哨兵 errSnapshotNotFound：conflictErrors 按哨兵分类，退出码 4。
-func (e *snapshotNotFoundError) Is(target error) bool { return target == errSnapshotNotFound }
+// Is 让它等于哨兵 cli.ErrSnapshotNotFound：conflictErrors 按哨兵分类，退出码 4。
+func (e *snapshotNotFoundError) Is(target error) bool { return target == cli.ErrSnapshotNotFound }
 
 // snapshotNotFound 说明一条都没读到。
 func snapshotNotFound(req snapshotRead) error {
@@ -963,11 +958,11 @@ func printSnapshots(out, note io.Writer, requestID string, rows []snapshotRow) {
 // 键值拼接。所以这里按清单那一条约定只做**视觉重心**：方向是这条快照的身份，
 // 加粗；时刻置灰。
 func printSnapshot(out, note io.Writer, seq int, row snapshotRow) {
-	p := newPalette(out)
+	p := cli.NewPalette(out)
 	_, _ = fmt.Fprintf(out, "\n第 %d 条\n", seq)
-	_, _ = fmt.Fprintf(out, "  direction=%s\n", p.bold(row.Direction))
+	_, _ = fmt.Fprintf(out, "  direction=%s\n", p.Bold(row.Direction))
 	_, _ = fmt.Fprintf(out, "  created_at=%s\n",
-		p.dim(row.CreatedAt.UTC().Format(time.RFC3339Nano)))
+		p.Dim(row.CreatedAt.UTC().Format(time.RFC3339Nano)))
 	_, _ = fmt.Fprintf(out, "  skeleton_version=%d\n", row.SkeletonVersion)
 	_, _ = fmt.Fprintf(out, "  capture_mode=%s\n", row.CaptureMode)
 	_, _ = fmt.Fprintf(out, "  upstream_status=%s\n", upstreamStatusCell(row.Direction, row.UpstreamStatus))
@@ -1138,37 +1133,37 @@ type snapshotAccessRow struct {
 // （读快照与记日志在同一个事务里，所以日志里的每一行都对应一次真的读过）。
 // 只写不读的话，「谁把快照读走了」这个问题在命令行上回答不了。
 func runSnapshotAccessLog(args []string) error {
-	fs := newFlagSet("snapshot access-log", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
+	fs := cli.NewFlagSet("snapshot access-log", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, snapshotShortUsage) }
 	requestID := fs.String("request-id", "", "")
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	from := fs.String("from", "", "")
 	to := fs.String("to", "", "")
 	limit := fs.Int("limit", snapshotAccessLogDefaultLimit, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"snapshot access-log 不接受位置参数，得到 %q：按请求筛用 --request-id", fs.Arg(0)))
 	}
 
 	fromAt, err := parseLedgerTime("--from", *from)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	toAt, err := parseLedgerTime("--to", *to)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if !fromAt.IsZero() && !toAt.IsZero() && !fromAt.Before(toAt) {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"--from 必须早于 --to（区间左闭右开），得到 %s 与 %s",
 			fromAt.Format(time.RFC3339), toAt.Format(time.RFC3339)))
 	}
 	if *limit < 0 {
-		return usageErr(fmt.Errorf("--limit 不能为负，得到 %d（0 表示不限）", *limit))
+		return cli.UsageErr(fmt.Errorf("--limit 不能为负，得到 %d（0 表示不限）", *limit))
 	}
 
 	return withDB(snapshotReadTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -1197,10 +1192,10 @@ func runSnapshotAccessLog(args []string) error {
 			return err
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, snapshotAccessLogDoc(rows, names, more, filter), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, snapshotAccessLogDoc(rows, names, more, filter), nil)
 		}
-		printSnapshotAccessLog(humanStdout(), rows, names, more)
+		printSnapshotAccessLog(cli.HumanStdout(), rows, names, more)
 		return nil
 	})
 }
@@ -1283,14 +1278,14 @@ func printSnapshotAccessLog(w io.Writer, rows []snapshotAccessRow,
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("时刻"), p.bold("request_id"), p.bold("快照 ID"), p.bold("用户 ID"),
-		p.bold("用户名"), p.bold("身份"), p.bold("理由"))
+		p.Bold("时刻"), p.Bold("request_id"), p.Bold("快照 ID"), p.Bold("用户 ID"),
+		p.Bold("用户名"), p.Bold("身份"), p.Bold("理由"))
 	for _, r := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.dim(r.AccessedAt.Format(longStampLayout)), p.bold(r.RequestID),
+			p.Dim(r.AccessedAt.Format(cli.LongStampLayout)), p.Bold(r.RequestID),
 			strconv.FormatInt(r.SnapshotID, 10), actorIDCell(r.ActorUserID),
 			names[r.ActorUserID.Int64], r.ActorKind, reasonCell(r.Reason))
 	}
@@ -1328,9 +1323,9 @@ func snapshotAccessLogDoc(rows []snapshotAccessRow, names map[int64]string,
 		"truncated": more,
 		// 这次筛的是什么，与其余清单的机器可读档一样带出来：一份只有总数的清单
 		// 说不清这几十条是哪一段、哪一个请求的。
-		"request_id": nullableString(f.RequestID),
-		"from":       jsonTimeOrNull(f.From),
-		"to":         jsonTimeOrNull(f.To),
+		"request_id": cli.NullableString(f.RequestID),
+		"from":       cli.JSONTimeOrNull(f.From),
+		"to":         cli.JSONTimeOrNull(f.To),
 	}
 	if f.ActorUserID != nil {
 		summary["user_id"] = *f.ActorUserID
@@ -1345,14 +1340,14 @@ func snapshotAccessLogDoc(rows []snapshotAccessRow, names map[int64]string,
 			"snapshot_id":   r.SnapshotID,
 			"request_id":    r.RequestID,
 			"actor_user_id": jsonNullInt64(r.ActorUserID),
-			"username":      nullableString(names[r.ActorUserID.Int64]),
+			"username":      cli.NullableString(names[r.ActorUserID.Int64]),
 			"actor_kind":    r.ActorKind,
-			"reason":        nullableString(r.Reason.String),
-			"accessed_at":   jsonTime(r.AccessedAt),
+			"reason":        cli.NullableString(r.Reason.String),
+			"accessed_at":   cli.JSONTime(r.AccessedAt),
 		})
 	}
 
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = summary
 	doc["accesses"] = entries
 	return doc
@@ -1371,15 +1366,15 @@ func jsonNullInt64(v sql.NullInt64) any {
 // 它是留存承诺的兑现方式，所以输出的是**被删除的分区名**而不是一句
 // 「完成」：一天都没到期时，命令的输出必须与「根本没跑成」区分得开。
 func runSnapshotCleanup(args []string) error {
-	if err := jsonUnsupported("snapshot cleanup"); err != nil {
+	if err := cli.JSONUnsupported("snapshot cleanup"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("snapshot cleanup", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, snapshotShortUsage) }
+	fs := cli.NewFlagSet("snapshot cleanup", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, snapshotShortUsage) }
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -1388,7 +1383,7 @@ func runSnapshotCleanup(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1406,7 +1401,7 @@ func runSnapshotCleanup(args []string) error {
 	// 采集关掉时清理照旧执行：已有的分区还要按留存期清掉，
 	// 「关掉」承诺的是不再写入新的，而不是把旧的留到永远。
 	// 打不打提示由 printCleanupHint 自己判（采集开着时一个字都不打）。
-	printCleanupHint(humanStderr(), snapCfg)
+	printCleanupHint(cli.HumanStderr(), snapCfg)
 
 	// 授权来源在这一条命令上用不到：清理只删分区，一条也不采。传「永远没有
 	// 授权」而不是 nil——nil 是「忘了接」，而这一个是一个明确的答案。
@@ -1462,10 +1457,10 @@ func printCleanupHint(w io.Writer, cfg snapshotwire.Config) {
 func printPartitions(verb string, names []string, retentionDays int, at time.Time) {
 	if len(names) == 0 {
 		cutoff := snapshotwire.RetentionCutoff(retentionDays, at)
-		_, _ = fmt.Fprintf(humanStdout(), "%s：0 个（留存期 %d 天，到期线 %s；没有到期的分区）\n",
+		_, _ = fmt.Fprintf(cli.HumanStdout(), "%s：0 个（留存期 %d 天，到期线 %s；没有到期的分区）\n",
 			verb, retentionDays, cutoff.Format("2006-01-02"))
 		return
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "%s %d 个分区：\n", verb, len(names))
-	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(names, "\n  "))
+	_, _ = fmt.Fprintf(cli.HumanStdout(), "%s %d 个分区：\n", verb, len(names))
+	_, _ = fmt.Fprintln(cli.HumanStdout(), "  "+strings.Join(names, "\n  "))
 }

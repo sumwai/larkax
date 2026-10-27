@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // 缺子命令与未知子命令都是参数错（退出码 2），而不是「其他失败」（1）：
@@ -16,16 +18,16 @@ func TestRunIdempotencyUnknownSubcommand(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "需要子命令") {
 		t.Fatalf("无子命令时应报错，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("缺子命令的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("缺子命令的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 
 	err = runCaptured(t, func() error { return runIdempotency([]string{"清理"}) })
 	if err == nil || !strings.Contains(err.Error(), "未知的 idempotency 子命令") {
 		t.Fatalf("未知子命令时应报错，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("未知子命令的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("未知子命令的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -43,7 +45,7 @@ func TestRunIdempotencyHelp(t *testing.T) {
 // 之后还要能透过 Unwrap 认出来。
 func TestRunIdempotencyCleanupHelp(t *testing.T) {
 	err := runCaptured(t, func() error { return runIdempotencyCleanup([]string{"--help"}) })
-	if !helpRequested(err) {
+	if !cli.HelpRequested(err) {
 		t.Errorf("--help 应当被认成「要帮助」（helpRequested），实际为 %v", err)
 	}
 }
@@ -54,8 +56,8 @@ func TestRunIdempotencyCleanupRejectsUnknownFlag(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("未知标志应当报错，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -75,8 +77,8 @@ func TestRunIdempotencyCleanupRejectsPositionalArgs(t *testing.T) {
 	if !strings.Contains(err.Error(), "--dry-run") {
 		t.Errorf("提示里要点出 --dry-run，实际为 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("位置参数的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("位置参数的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -96,8 +98,8 @@ func TestRunIdempotencyCleanupParsesFlagsBeforeConnecting(t *testing.T) {
 		if !strings.Contains(err.Error(), "LARKAX_DB_DSN") {
 			t.Errorf("%v：失败应当发生在 config.Load（点出 LARKAX_DB_DSN），实际为 %v", args, err)
 		}
-		if got := exitCode(err); got == exitUsage {
-			t.Errorf("%v：不该被当成参数错（退出码 %d），实际为 %v", args, exitUsage, err)
+		if got := cli.ExitCode(err); got == cli.ExitUsage {
+			t.Errorf("%v：不该被当成参数错（退出码 %d），实际为 %v", args, cli.ExitUsage, err)
 		}
 	}
 }
@@ -189,8 +191,8 @@ func TestRunIdempotencyCleanupPositionalArgDeletesNothing(t *testing.T) {
 
 	var err error
 	captureStreams(t, func() { err = runIdempotencyCleanup([]string{"dry-run"}) })
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("`dry-run` 的退出码应当是 %d，得到 %d（err=%v）", exitUsage, got, err)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("`dry-run` 的退出码应当是 %d，得到 %d（err=%v）", cli.ExitUsage, got, err)
 	}
 	if !keyExists(t, db, apiKeyID, expiredKey) {
 		t.Error("位置参数写错时一行都不该删")

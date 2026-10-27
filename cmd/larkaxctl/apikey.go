@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/money"
@@ -158,16 +159,16 @@ const apiKeyTimeout = 30 * time.Second
 var apiKeyActions = []string{"create", "update", "get", "list"}
 
 func runAPIKey(args []string) error {
-	fs := newFlagSet("apikey", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
+	fs := cli.NewFlagSet("apikey", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, apiKeyShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return usageErr(errors.New("apikey 需要子命令"))
+		return cli.UsageErr(errors.New("apikey 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -186,47 +187,47 @@ func runAPIKey(args []string) error {
 		}
 		return runAPIKeyList(rest)
 	default:
-		return usageErr(fmt.Errorf("未知的 apikey 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 apikey 子命令 %q", action))
 	}
 }
 
 func runAPIKeyCreate(args []string) error {
 	// 在**函数体第一行**拦下来，早于 flag 解析、更早于连库：写类命令在 json
 	// 模式下必须一个字节都不写库。放在写库之后就成了「先把 key 建出来，再报
-	// 不支持」——而调用方只看到一句参数错，于是重跑一次（见 format.go）。
-	if err := jsonUnsupported("apikey create"); err != nil {
+	// 不支持」——而调用方只看到一句参数错，于是重跑一次（见 cli 包的 format.go）。
+	if err := cli.JSONUnsupported("apikey create"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("apikey create", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
+	fs := cli.NewFlagSet("apikey create", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	name := fs.String("name", "", "")
 	expiresAt := fs.String("expires-at", "", "")
 	ttl := fs.String("ttl", "", "")
 	forever := fs.Bool("forever", false, "")
-	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
-	quota := legacyStringFlag(fs, "quota", "quota-limit", "")
+	rpm := cli.LegacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
+	quota := cli.LegacyStringFlag(fs, "quota", "quota-limit", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
 	}
 	if *user == "" {
 		// 不打整段用法：人已经会用这条命令了，只是漏了一个必填项。用法留给
 		// 「还没有开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 	// 备注会进 apikey list / get 的「备注」那一栏，形状判据在 auth
 	// （见 ValidateKeyName），在连库之前判。空串照收：那是「没有备注」。
 	if err := auth.ValidateKeyName(*name); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
-	expiresAtValue, hasExpiry, err := optionalExpiry(providedFlags(fs),
-		expiryFlags{expiresAt: *expiresAt, ttl: *ttl, forever: *forever}, expiryNow(),
+	expiresAtValue, hasExpiry, err := cli.OptionalExpiry(providedFlags(fs),
+		cli.ExpiryFlags{ExpiresAt: *expiresAt, TTL: *ttl, Forever: *forever}, cli.ExpiryNow(),
 		func(v string) (time.Time, error) {
 			// 已过去的时刻直接拒绝，而不是建一把立刻不可用的 key：那种情况几乎
 			// 只可能是写错了年份（2025 写成 2024），而它的表现是「刚建好的 key
@@ -236,7 +237,7 @@ func runAPIKeyCreate(args []string) error {
 			return parseFutureExpiresAt(v, "这样的 key 建出来就是不可用的")
 		})
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	var expires *time.Time
 	if hasExpiry {
@@ -245,7 +246,7 @@ func runAPIKeyCreate(args []string) error {
 
 	limits, err := parseLimits(fs, *rpm, *quota)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -268,19 +269,19 @@ func runAPIKeyCreate(args []string) error {
 			return err
 		}
 
-		printCreatedKey(humanStdout(), humanStderr(), owner, created, expires, limits)
+		printCreatedKey(cli.HumanStdout(), cli.HumanStderr(), owner, created, expires, limits)
 		return nil
 	})
 }
 
 func runAPIKeyUpdate(args []string) error {
 	// 与 create 同一条：必须在改任何一列之前拦下来。
-	if err := jsonUnsupported("apikey update"); err != nil {
+	if err := cli.JSONUnsupported("apikey update"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("apikey update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
+	fs := cli.NewFlagSet("apikey update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要改的 API Key 的 id（apikey list 里能看到）")
 	status := fs.String("status", "", "")
 	name := fs.String("name", "", "")
@@ -289,23 +290,23 @@ func runAPIKeyUpdate(args []string) error {
 	forever := fs.Bool("forever", false, "")
 	// --clear-expires-at 是 --forever 的旧名，两个写同一个变量：它们说的是
 	// 同一件事（写远期上限），不是「设值 / 清空」那一对。
-	boolAlias(fs, forever, "clear-expires-at")
-	rpm := legacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
+	cli.BoolAlias(fs, forever, "clear-expires-at")
+	rpm := cli.LegacyStringFlag(fs, "rpm", "rate-limit-rpm", "")
 	clearRPM := fs.Bool("clear-rpm", false, "")
-	boolAlias(fs, clearRPM, "clear-rate-limit-rpm")
-	quota := legacyStringFlag(fs, "quota", "quota-limit", "")
+	cli.BoolAlias(fs, clearRPM, "clear-rate-limit-rpm")
+	quota := cli.LegacyStringFlag(fs, "quota", "quota-limit", "")
 	clearQuota := fs.Bool("clear-quota", false, "")
-	boolAlias(fs, clearQuota, "clear-quota-limit")
+	cli.BoolAlias(fs, clearQuota, "clear-quota-limit")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("update 不接受位置参数，得到 %q：要改哪一把 key 用 --id 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("update 不接受位置参数，得到 %q：要改哪一把 key 用 --id 指定", fs.Arg(0)))
 	}
 
 	seen := providedFlags(fs)
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id：要改哪一把 key"))
+		return cli.UsageErr(errors.New("缺少 --id：要改哪一把 key"))
 	}
 
 	params, err := updateParams(seen,
@@ -317,7 +318,7 @@ func runAPIKeyUpdate(args []string) error {
 		// 这几条错误（负数、小数位过多、两个旗标打架、状态取值不认识、没有要改
 		// 的东西）都在信息里点了名，已经够看懂，不再附带整段用法——与 create /
 		// user 一样，用法只在「还没开始用」时打。
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -337,23 +338,23 @@ func runAPIKeyUpdate(args []string) error {
 			return err
 		}
 
-		printUpdatedKey(humanStderr(), before, after, params)
+		printUpdatedKey(cli.HumanStderr(), before, after, params)
 		return nil
 	})
 }
 
 func runAPIKeyGet(args []string) error {
-	fs := newFlagSet("apikey get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
+	fs := cli.NewFlagSet("apikey get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, apiKeyShortUsage) }
 	id := fs.Int64("id", 0, "要看的 API Key 的 id（apikey list 里能看到）")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q：要看哪一把 key 用 --id 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("get 不接受位置参数，得到 %q：要看哪一把 key 用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id：要看哪一把 key"))
+		return cli.UsageErr(errors.New("缺少 --id：要看哪一把 key"))
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -362,25 +363,25 @@ func runAPIKeyGet(args []string) error {
 			return err
 		}
 		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把上面那张表转成 JSON
-		// （见 format.go 开头）。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, apiKeyGetDoc(key), nil)
+		// （见 cli 包的 format.go 开头）。
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, apiKeyGetDoc(key), nil)
 		}
-		printKeyDetail(humanStdout(), key)
+		printKeyDetail(cli.HumanStdout(), key)
 		return nil
 	})
 }
 
 func runAPIKeyList(args []string) error {
-	fs := newFlagSet("apikey list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, apiKeyShortUsage) }
+	fs := cli.NewFlagSet("apikey list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, apiKeyShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0)))
 	}
 
 	return withDB(apiKeyTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -403,11 +404,11 @@ func runAPIKeyList(args []string) error {
 		}
 		// JSON 是**另一条渲染路径**，不是把上面那张表转成 JSON：表格那一档
 		// 用 `-`、「继承」铺空栏，转出来的 JSON 里金额会变成字符串、空值会
-		// 变成占位符（见 format.go 开头）。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, apiKeyListDoc(keys), nil)
+		// 变成占位符（见 cli 包的 format.go 开头）。
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, apiKeyListDoc(keys), nil)
 		}
-		printKeyList(humanStdout(), keys)
+		printKeyList(cli.HumanStdout(), keys)
 		return nil
 	})
 }
@@ -462,7 +463,7 @@ var (
 func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (auth.KeyParams, error) {
 	var params auth.KeyParams
 
-	switch rpmGiven := flagGiven(seen, rpmFlagNames...); {
+	switch rpmGiven := cli.FlagGiven(seen, rpmFlagNames...); {
 	case rpm.clear && rpmGiven:
 		return auth.KeyParams{}, errors.New("--rpm 与 --clear-rpm 不能同时给：" +
 			"一个是设值，一个是写回 NULL")
@@ -477,7 +478,7 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 		params.SetRateLimit, params.RateLimitRPM = true, parsed
 	}
 
-	switch quotaGiven := flagGiven(seen, quotaFlagNames...); {
+	switch quotaGiven := cli.FlagGiven(seen, quotaFlagNames...); {
 	case quota.clear && quotaGiven:
 		return auth.KeyParams{}, errors.New("--quota 与 --clear-quota 不能同时给：" +
 			"一个是设值，一个是写回 NULL")
@@ -491,13 +492,13 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 		params.SetQuota, params.QuotaLimit = true, parsed
 	}
 
-	expires, err := resolveExpiry(seen, expiryFlags{
-		expiresAt: meta.expiresAt, ttl: meta.ttl, forever: meta.forever,
-	}, expiryNow(), func(v string) (time.Time, error) {
+	expires, err := cli.ResolveExpiry(seen, cli.ExpiryFlags{
+		ExpiresAt: meta.expiresAt, TTL: meta.ttl, Forever: meta.forever,
+	}, cli.ExpiryNow(), func(v string) (time.Time, error) {
 		return parseFutureExpiresAt(v, "改完就不可用了")
 	})
 	switch {
-	case errors.Is(err, errExpiryNotGiven):
+	case errors.Is(err, cli.ErrExpiryNotGiven):
 		// 不给就不改，与两项额度同一条。
 	case err != nil:
 		return auth.KeyParams{}, err
@@ -505,7 +506,7 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 		params.SetExpiresAt, params.ExpiresAt = true, &expires
 	}
 
-	if flagGiven(seen, "status") {
+	if cli.FlagGiven(seen, "status") {
 		status, err := validateKeyStatus(meta.status)
 		if err != nil {
 			return auth.KeyParams{}, err
@@ -513,7 +514,7 @@ func updateParams(seen map[string]bool, rpm, quota limitFlag, meta metaFlags) (a
 		params.SetStatus, params.Status = true, status
 	}
 
-	if flagGiven(seen, "name") {
+	if cli.FlagGiven(seen, "name") {
 		// 空串照收：它表示「没有备注」，与 create 不给 --name 是同一件事。
 		// 把它当成「没给」会让清空备注变成一条改不动任何东西的命令。
 		// 形状判据与 create 共用 auth.ValidateKeyName：这一栏会进清单与单条
@@ -565,7 +566,7 @@ func parseFutureExpiresAt(plain, consequence string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf(
 			"--expires-at 不是 RFC3339 时间（例如 2026-12-31T00:00:00Z）: %w", err)
 	}
-	if !t.After(expiryNow()) {
+	if !t.After(cli.ExpiryNow()) {
 		return time.Time{}, fmt.Errorf("--expires-at %s 已经过去了：%s",
 			t.Format(time.RFC3339), consequence)
 	}
@@ -584,11 +585,11 @@ type keyLimits struct {
 // 也没有值），update 不填是「不改这一项」。所以这里只处理前者，后者的
 // 三态判断留在 runAPIKeyUpdate 里——把两套语义塞进同一个函数，读的人
 // 就得先想清楚自己在看哪一套。
-func parseLimits(fs *flagSet, rpm, quota string) (keyLimits, error) {
+func parseLimits(fs *cli.FlagSet, rpm, quota string) (keyLimits, error) {
 	var out keyLimits
 	seen := providedFlags(fs)
 
-	if flagGiven(seen, rpmFlagNames...) {
+	if cli.FlagGiven(seen, rpmFlagNames...) {
 		parsed, err := parseRateLimitRPM(rpm)
 		if err != nil {
 			return keyLimits{}, err
@@ -596,7 +597,7 @@ func parseLimits(fs *flagSet, rpm, quota string) (keyLimits, error) {
 		out.rpm = parsed
 	}
 
-	if flagGiven(seen, quotaFlagNames...) {
+	if cli.FlagGiven(seen, quotaFlagNames...) {
 		parsed, err := parseQuotaLimit(quota)
 		if err != nil {
 			return keyLimits{}, err
@@ -613,7 +614,7 @@ func parseLimits(fs *flagSet, rpm, quota string) (keyLimits, error) {
 // （一个都不放行），它与「没给这个旗标」必须分得开，而两者的字符串表示
 // 分别是 "0" 与 ""——后者又与「给了空串」撞在一起。flag 包自己记着谁
 // 出现过，问它比猜可靠。
-func providedFlags(fs *flagSet) map[string]bool {
+func providedFlags(fs *cli.FlagSet) map[string]bool {
 	seen := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
 	return seen
@@ -745,10 +746,10 @@ func printUpdatedKey(w io.Writer, before, after auth.Key, p auth.KeyParams) {
 // 用过」，这里是「这一把到底什么时候建的、什么时候到期」，秒是它要回答的
 // 问题的一部分。
 func printKeyDetail(w io.Writer, k auth.Key) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("ID", strconv.FormatInt(k.ID, 10))
 	row("KEY 前缀", k.Prefix)
@@ -769,7 +770,7 @@ func printKeyDetail(w io.Writer, k auth.Key) {
 // 字段名时，对读它的脚本来说那就是两件事。这里是 list 收成一条，不是另一种
 // 详情。
 func apiKeyGetDoc(k auth.Key) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["key"] = apiKeyEntry(k)
 	return doc
 }
@@ -792,41 +793,41 @@ func apiKeyGetDoc(k auth.Key) map[string]any {
 // NULL 打成「继承」而不是留空——留空与「这一栏不存在」长得一样，而这一列
 // 恰恰是「没设过」的意思。
 func printKeyList(w io.Writer, keys []auth.Key) {
-	p := newPalette(w)
+	p := cli.NewPalette(w)
 	if len(keys) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("API Key", "apikey create"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("API Key", "apikey create"))
 		return
 	}
 
-	tw := newTableWriter(w)
+	tw := cli.NewTableWriter(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("ID"), p.bold("KEY 前缀"), p.bold("所属用户"), p.bold("备注"), p.bold("状态"),
-		p.bold("每分钟"), p.bold("额度"), p.bold("创建"), p.bold("过期"), p.bold("最近使用"))
+		p.Bold("ID"), p.Bold("KEY 前缀"), p.Bold("所属用户"), p.Bold("备注"), p.Bold("状态"),
+		p.Bold("每分钟"), p.Bold("额度"), p.Bold("创建"), p.Bold("过期"), p.Bold("最近使用"))
 	for _, k := range keys {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.FormatInt(k.ID, 10)), p.bold(k.Prefix),
+			p.Bold(strconv.FormatInt(k.ID, 10)), p.Bold(k.Prefix),
 			k.Username, orDash(k.Name), k.Status,
 			formatRPM(k.RateLimitRPM), formatQuota(k.QuotaLimit),
-			p.dim(formatStampShort(k.CreatedAt)),
-			p.dim(formatTimeShort(k.ExpiresAt, "不过期")),
-			p.dim(formatTimeShort(k.LastUsedAt, "从未")))
+			p.Dim(formatStampShort(k.CreatedAt)),
+			p.Dim(formatTimeShort(k.ExpiresAt, "不过期")),
+			p.Dim(formatTimeShort(k.LastUsedAt, "从未")))
 	}
 	_ = tw.Flush()
 }
 
 // apiKeyListDoc 组装 apikey list 的机器可读输出。
 //
-// 与 printKeyList 是同一份数据的另一条渲染路径（见 format.go 开头）：那一档
+// 与 printKeyList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）：那一档
 // 打表、把缺值铺成「-」「继承」「不过期」「从未」，这一档给 null。
 //
 // **这一份里没有、也不会有 key 的明文或哈希**：auth.Key 里根本没有这两样
 // （见 limits.go），所以这里能给的只有 prefix——它本来就够在列表里认出是
 // 哪一把钥匙，而认出是哪一把正是这一栏的用途。
 func apiKeyListDoc(keys []auth.Key) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(keys)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(keys))
 	for _, k := range keys {
 		entries = append(entries, apiKeyEntry(k))
@@ -849,7 +850,7 @@ func apiKeyEntry(k auth.Key) map[string]any {
 	// 金额走 jsonAmount：money.Amount 的字段不导出，直接塞进来编出来是 `{}`。
 	var quota any
 	if k.QuotaLimit != nil {
-		quota = jsonAmount(*k.QuotaLimit)
+		quota = cli.JSONAmount(*k.QuotaLimit)
 	}
 
 	return map[string]any{
@@ -858,7 +859,7 @@ func apiKeyEntry(k auth.Key) map[string]any {
 		"username": k.Username,
 		// 空串是「创建时没给 --name」（列是 NOT NULL DEFAULT ''），
 		// 与表格那一栏打 `-` 是同一件事。
-		"name":           nullableString(k.Name),
+		"name":           cli.NullableString(k.Name),
 		"status":         k.Status,
 		"rate_limit_rpm": rpm,
 		"quota_limit":    quota,
@@ -867,9 +868,9 @@ func apiKeyEntry(k auth.Key) map[string]any {
 		// 库里那几列是 timestamptz，驱动交回来的是带会话时区的 time.Time，
 		// 直接 Format 出来的是「同一行在两台机器上是两个字符串」。机器读的
 		// 那一份必须与机器无关（见 docs/cli-output.md 的「值的约定」）。
-		"created_at":   jsonTime(k.CreatedAt),
-		"expires_at":   jsonTimePtr(k.ExpiresAt),
-		"last_used_at": jsonTimePtr(k.LastUsedAt),
+		"created_at":   cli.JSONTime(k.CreatedAt),
+		"expires_at":   cli.JSONTimePtr(k.ExpiresAt),
+		"last_used_at": cli.JSONTimePtr(k.LastUsedAt),
 	}
 }
 

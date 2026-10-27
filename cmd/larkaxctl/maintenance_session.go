@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/settings"
@@ -58,28 +59,28 @@ revoked_at 早于「现在减去留存期」的。窗口内被吊销的会话留
 // 输出的是**删了多少条**而不是一句「完成」：一条都没删时，命令的输出必须与
 // 「根本没跑成」区分得开（见 LESSONS.md 第 16 条）。
 func runMaintenanceSession(args []string) error {
-	if err := jsonUnsupported("maintenance session"); err != nil {
+	if err := cli.JSONUnsupported("maintenance session"); err != nil {
 		return err
 	}
 
 	// `maintenance session help` 给长版；`-h` / `--help` 归下面的 flag
 	// 解析，给短版。
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, maintenanceSessionHelp.long)
+		cli.PrintUsage(os.Stdout, maintenanceSessionHelp.long)
 		return nil
 	}
 
-	fs := newFlagSet("maintenance session", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, maintenanceSessionHelp.short) }
+	fs := cli.NewFlagSet("maintenance session", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, maintenanceSessionHelp.short) }
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	// 位置参数一律拒掉：`dry-run`（漏了横线）会被 flag 当成位置参数留在
 	// fs.Args() 里，不拦的话它就成了一条**真删**命令——而写它的人以为在干跑。
 	if fs.NArg() > 0 {
 		fs.Usage()
-		return usageErr(fmt.Errorf("maintenance session 不接收位置参数，多余的 %q（干跑请写 --dry-run）", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("maintenance session 不接收位置参数，多余的 %q（干跑请写 --dry-run）", fs.Arg(0)))
 	}
 
 	cfg, err := config.LoadOps()
@@ -88,7 +89,7 @@ func runMaintenanceSession(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}

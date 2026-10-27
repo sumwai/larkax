@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channels"
 )
 
@@ -111,8 +112,8 @@ var accountActions = []string{"add", "list", "update", "remove"}
 
 func runAccount(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, accountShortUsage)
-		return usageErr(errors.New("account 需要子命令"))
+		cli.PrintUsage(os.Stderr, accountShortUsage)
+		return cli.UsageErr(errors.New("account 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -126,24 +127,24 @@ func runAccount(args []string) error {
 	case "remove":
 		return runAccountRemove(rest)
 	case "help":
-		printUsage(os.Stdout, accountHelp.long)
+		cli.PrintUsage(os.Stdout, accountHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, accountHelp.short)
+		cli.PrintUsage(os.Stdout, accountHelp.short)
 		return nil
 	default:
-		printUsage(os.Stderr, accountShortUsage)
-		return usageErr(fmt.Errorf("未知的 account 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, accountShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 account 子命令 %q", action))
 	}
 }
 
 func runAccountAdd(args []string) error {
-	if err := jsonUnsupported("account add"); err != nil {
+	if err := cli.JSONUnsupported("account add"); err != nil {
 		return err
 	}
 	name, channelRef, weight, plaintext, err := parseAccountAdd(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -171,22 +172,22 @@ func runAccountAdd(args []string) error {
 
 		// stdout 恰好一行、只放能被直接接走的值，与 channel create 同一条契约：
 		//   larkaxctl account update "$(larkaxctl account add ...)"
-		_, _ = fmt.Fprintln(humanStdout(), info.Name)
+		_, _ = fmt.Fprintln(cli.HumanStdout(), info.Name)
 		// 其余信息走 stderr。挂在哪把主密钥下要当场说：轮换时「新写进去的
 		// 密文挂在旧钥匙下」是一个需要立刻看见的事实。
 		if err := info.CredentialErr; err != nil {
-			_, _ = fmt.Fprintf(humanStderr(), "注意：账号 %s 的凭证密文不合法：%v\n", info.Name, err)
+			_, _ = fmt.Fprintf(cli.HumanStderr(), "注意：账号 %s 的凭证密文不合法：%v\n", info.Name, err)
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已创建账号 %s（主密钥 %s）。\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已创建账号 %s（主密钥 %s）。\n",
 			info.Name, strings.Join(info.CredentialKeys, ","))
 		for _, ch := range info.Channels {
-			_, _ = fmt.Fprintf(humanStderr(), "已挂到渠道 %d（%s）。\n", ch.ID, ch.Name)
+			_, _ = fmt.Fprintf(cli.HumanStderr(), "已挂到渠道 %d（%s）。\n", ch.ID, ch.Name)
 		}
 		// 与 account remove 的「这条渠道因此没有账号了」对称：权重 0 不会让
 		// 渠道下线，但它同样意味着这次挂载不给池子增加任何可用账号。不说
 		// 这一句，人会以为它已经在分担流量。
 		if weight != nil && *weight == 0 {
-			_, _ = fmt.Fprintln(humanStderr(),
+			_, _ = fmt.Fprintln(cli.HumanStderr(),
 				"注意：权重 0 表示先别用这个账号——关联已经建好，但选路会跳过它。")
 		}
 		return nil
@@ -208,8 +209,8 @@ func parseAccountAdd(args []string) (name, channelRef string, weight *int, plain
 		positional, args = args[0], args[1:]
 	}
 
-	fs := newFlagSet("account add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
+	fs := cli.NewFlagSet("account add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, accountShortUsage) }
 	channel := fs.String("channel", "", "")
 	credentialEnv := fs.String("credential-env", "", "")
 	weightFlag := fs.Int("weight", 0, "")
@@ -230,7 +231,7 @@ func parseAccountAdd(args []string) (name, channelRef string, weight *int, plain
 
 	name = strings.TrimSpace(positional)
 	if name != "" {
-		if err = checkDisplayText("账号名", name); err != nil {
+		if err = cli.CheckDisplayText("账号名", name); err != nil {
 			return "", "", nil, "", err
 		}
 	}
@@ -260,14 +261,14 @@ func parseAccountAdd(args []string) (name, channelRef string, weight *int, plain
 }
 
 func runAccountList(args []string) error {
-	fs := newFlagSet("account list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
+	fs := cli.NewFlagSet("account list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, accountShortUsage) }
 	channelRef := fs.String("channel", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -286,21 +287,21 @@ func runAccountList(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, accountListDoc(infos), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, accountListDoc(infos), nil)
 		}
-		printAccountList(humanStdout(), infos)
+		printAccountList(cli.HumanStdout(), infos)
 		return nil
 	})
 }
 
 func runAccountUpdate(args []string) error {
-	if err := jsonUnsupported("account update"); err != nil {
+	if err := cli.JSONUnsupported("account update"); err != nil {
 		return err
 	}
 	parsed, err := parseAccountUpdate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	// 只改权重时不读标准输入：这条命令的缺省凭证来源是标准输入，而
 	// `... --weight 0` 后面根本没有人在等着粘一把 key。读了它就卡在那儿。
@@ -308,7 +309,7 @@ func runAccountUpdate(args []string) error {
 	if parsed.setCredential {
 		plaintext, err = readAccountCredential(parsed.credentialEnv)
 		if err != nil {
-			return usageErr(err)
+			return cli.UsageErr(err)
 		}
 	}
 
@@ -334,7 +335,7 @@ func runAccountUpdate(args []string) error {
 			return err
 		}
 		// stdout 不放回显：要改的是哪一条由调用方自己给，没有新值要接走。
-		_, _ = fmt.Fprintf(humanStderr(), "已更新账号 %s（挂在 %d 条渠道上）。\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已更新账号 %s（挂在 %d 条渠道上）。\n",
 			info.Name, len(info.Channels))
 		return nil
 	})
@@ -355,14 +356,14 @@ func updateAccountWeight(ctx context.Context, db *sql.DB, args accountUpdateArgs
 		// 账号没挂在那条渠道上：补救动作是改命令（换一条渠道，或者换一个
 		// 账号），与 remove 少写 --force 同一档。
 		if errors.Is(err, channels.ErrAccountNotOnChannel) {
-			return usageErr(err)
+			return cli.UsageErr(err)
 		}
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "已把账号 %s 在渠道 %d（%s）上的权重设为 %d。\n",
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已把账号 %s 在渠道 %d（%s）上的权重设为 %d。\n",
 		args.name, channel.ID, channel.Name, channel.Weight)
 	if channel.Weight == 0 {
-		_, _ = fmt.Fprintf(humanStderr(),
+		_, _ = fmt.Fprintf(cli.HumanStderr(),
 			"权重 0 表示先别用：这条渠道的选路会跳过它，账号、凭证与健康记录都留着。"+
 				"要恢复就把权重改回非 0。\n")
 	}
@@ -379,12 +380,12 @@ func updateAccountWeight(ctx context.Context, db *sql.DB, args accountUpdateArgs
 //   - **渠道因此空了**：删完把那些渠道打出来。零账号是合法的中间态，但
 //     「删掉一个账号」与「有一条渠道从此退出选路」不是同一个后果。
 func runAccountRemove(args []string) error {
-	if err := jsonUnsupported("account remove"); err != nil {
+	if err := cli.JSONUnsupported("account remove"); err != nil {
 		return err
 	}
 	name, force, err := parseAccountRemove(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -392,18 +393,18 @@ func runAccountRemove(args []string) error {
 		if err != nil {
 			// 还挂在多条渠道上时，补救动作是改命令加 --force：归 usageErr。
 			if errors.Is(err, channels.ErrAccountInUse) {
-				return usageErr(err)
+				return cli.UsageErr(err)
 			}
 			return err
 		}
 		// stdout 不放东西：删掉的是调用方自己点的名字，没有新值要接走。
-		_, _ = fmt.Fprintf(humanStderr(), "已删除账号 %s。\n", res.Name)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除账号 %s。\n", res.Name)
 		if len(res.Channels) > 0 {
-			_, _ = fmt.Fprintf(humanStderr(), "已从这 %d 条渠道的凭证池里摘掉：%s。\n",
+			_, _ = fmt.Fprintf(cli.HumanStderr(), "已从这 %d 条渠道的凭证池里摘掉：%s。\n",
 				len(res.Channels), accountChannelList(res.Channels))
 		}
 		for _, ch := range res.EmptiedChannels {
-			_, _ = fmt.Fprintf(humanStderr(),
+			_, _ = fmt.Fprintf(cli.HumanStderr(),
 				"渠道 %d（%s）现在没有账号了，选路会跳过它，直到挂上新账号。\n", ch.ID, ch.Name)
 		}
 		return nil
@@ -417,8 +418,8 @@ func parseAccountRemove(args []string) (name string, force bool, err error) {
 		positional, args = args[0], args[1:]
 	}
 
-	fs := newFlagSet("account remove", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
+	fs := cli.NewFlagSet("account remove", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, accountShortUsage) }
 	forceFlag := fs.Bool("force", false, "")
 	if err = fs.Parse(args); err != nil {
 		return "", false, err
@@ -434,7 +435,7 @@ func parseAccountRemove(args []string) (name string, force bool, err error) {
 	if name == "" {
 		return "", false, errors.New("缺少账号名：把它写成位置参数")
 	}
-	if err = checkDisplayText("账号名", name); err != nil {
+	if err = cli.CheckDisplayText("账号名", name); err != nil {
 		return "", false, err
 	}
 	return name, *forceFlag, nil
@@ -480,8 +481,8 @@ func parseAccountUpdate(args []string) (accountUpdateArgs, error) {
 		positional, args = args[0], args[1:]
 	}
 
-	fs := newFlagSet("account update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, accountShortUsage) }
+	fs := cli.NewFlagSet("account update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, accountShortUsage) }
 	credentialEnv := fs.String("credential-env", "", "")
 	channel := fs.String("channel", "", "")
 	weightFlag := fs.Int("weight", 0, "")
@@ -499,7 +500,7 @@ func parseAccountUpdate(args []string) (accountUpdateArgs, error) {
 	if name == "" {
 		return accountUpdateArgs{}, errors.New("缺少账号名：把它写成位置参数")
 	}
-	if err := checkDisplayText("账号名", name); err != nil {
+	if err := cli.CheckDisplayText("账号名", name); err != nil {
 		return accountUpdateArgs{}, err
 	}
 
@@ -554,7 +555,7 @@ func readAccountCredential(envName string) (string, error) {
 	// 混进下游的输出。判的是 os.Stdin 本身，测试替换 credentialInput 之后
 	// 就不该再提示。
 	if credentialInput == os.Stdin && stdinIsTerminal() {
-		_, _ = fmt.Fprint(humanStderr(), "粘贴凭证，Ctrl-D 结束：\n")
+		_, _ = fmt.Fprint(cli.HumanStderr(), "粘贴凭证，Ctrl-D 结束：\n")
 	}
 	raw, err := io.ReadAll(credentialInput)
 	if err != nil {
@@ -585,21 +586,21 @@ func stdinIsTerminal() bool {
 func printAccountList(w io.Writer, infos []channels.AccountInfo) {
 	if len(infos) == 0 {
 		// 空清单与「命令没跑起来」在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
-		_, _ = fmt.Fprintln(w, emptyListNote("账号", "account add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("账号", "account add"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-		p.bold("名称"), p.bold("提示"), p.bold("主密钥"), p.bold("渠道"), p.bold("更新于"))
+		p.Bold("名称"), p.Bold("提示"), p.Bold("主密钥"), p.Bold("渠道"), p.Bold("更新于"))
 	for _, info := range infos {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.bold(info.Name),
+			p.Bold(info.Name),
 			accountHintLabel(info),
 			accountKeysLabel(info),
 			accountChannelsLabel(info),
-			p.dim(formatTimeValue(info.UpdatedAt)))
+			p.Dim(formatTimeValue(info.UpdatedAt)))
 	}
 	_ = tw.Flush()
 
@@ -659,10 +660,10 @@ func accountChannelsLabel(info channels.AccountInfo) string {
 // 这一档给 null。**这一份里没有、也不会有凭证密文**：AccountInfo 根本没有
 // 那一栏，这里能给的只有「挂在哪些主密钥下」与末四位提示。
 func accountListDoc(infos []channels.AccountInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(infos)}
 
-	// 从空切片起：一个账号都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一个账号都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(infos))
 	for _, info := range infos {
 		entries = append(entries, accountEntry(info))
@@ -683,11 +684,11 @@ func accountEntry(info channels.AccountInfo) map[string]any {
 	return map[string]any{
 		"id":               info.ID,
 		"name":             info.Name,
-		"hint":             nullableString(info.Hint),
-		"credential_keys":  jsonList(info.CredentialKeys),
-		"credential_error": nullableError(info.CredentialErr),
+		"hint":             cli.NullableString(info.Hint),
+		"credential_keys":  cli.JSONList(info.CredentialKeys),
+		"credential_error": cli.NullableError(info.CredentialErr),
 		"channels":         channelsJSON,
-		"created_at":       jsonTimeOrNull(info.CreatedAt),
-		"updated_at":       jsonTimeOrNull(info.UpdatedAt),
+		"created_at":       cli.JSONTimeOrNull(info.CreatedAt),
+		"updated_at":       cli.JSONTimeOrNull(info.UpdatedAt),
 	}
 }

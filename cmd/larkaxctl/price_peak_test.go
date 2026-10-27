@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/billing"
 	"github.com/sumwai/larkax/internal/billing/expr"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -205,8 +206,8 @@ func TestPricePeakRejectsTZConflict(t *testing.T) {
 	if err == nil {
 		t.Fatal("--tz 与表里的时区不一致时应当被拒")
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 	}
 	for _, want := range []string{"UTC", "Asia/Shanghai", "不一致"} {
 		if !strings.Contains(err.Error(), want) {
@@ -338,7 +339,7 @@ func TestPricePeakCombinedOverrideSharesSegment(t *testing.T) {
 		t.Fatalf("组合档的段号 = %d，期望 1", segment)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	peakOut, _ := captureStreams(t, func() {
 		if err := runPricePeak([]string{"list", idArg}); err != nil {
 			t.Fatalf("price peak list 失败: %v", err)
@@ -481,8 +482,8 @@ func TestPricePeakRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息里没有 %q：%v", tc.want, err)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}

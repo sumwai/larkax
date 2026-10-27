@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/adminapi"
 	"github.com/sumwai/larkax/internal/settings"
 )
@@ -62,7 +63,7 @@ func TestAdminTokenRejectsExtraArgs(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "不接受位置参数") {
 				t.Fatalf("期望「不接受位置参数」，得到 %v", err)
 			}
-			if code := exitCode(err); code != 2 {
+			if code := cli.ExitCode(err); code != 2 {
 				t.Errorf("退出码 = %d，期望 2（用法错）", code)
 			}
 		})
@@ -190,12 +191,12 @@ func TestAdminTokenCreateAndRevoke(t *testing.T) {
 func TestAdminTokenRejectsJSONOutput(t *testing.T) {
 	for _, sub := range []string{"create", "revoke"} {
 		t.Run(sub, func(t *testing.T) {
-			withFormat(t, formatJSON)
+			withFormat(t, cli.FormatJSON)
 			err := runCaptured(t, func() error { return runAdmin([]string{"token", sub}) })
 			if err == nil || !strings.Contains(err.Error(), "--format json") {
 				t.Fatalf("期望「不支持 --format json」，得到 %v", err)
 			}
-			if code := exitCode(err); code != 2 {
+			if code := cli.ExitCode(err); code != 2 {
 				t.Errorf("退出码 = %d，期望 2（参数错）", code)
 			}
 		})
@@ -219,7 +220,7 @@ func TestAdminTokenRevokeWithoutToken(t *testing.T) {
 	if !errors.Is(err, adminapi.ErrNoTokenConfigured) {
 		t.Fatalf("期望 ErrNoTokenConfigured，得到 %v", err)
 	}
-	if code := exitCode(err); code != 4 {
+	if code := cli.ExitCode(err); code != 4 {
 		t.Errorf("退出码 = %d，期望 4（要先去创建一枚）", code)
 	}
 
@@ -268,7 +269,7 @@ func TestPrintAdminTokenKeepsStdoutSingleLine(t *testing.T) {
 // 令牌存储的两种错误要能走到退出码：缺那一行时提示先跑迁移，
 // 而不是让运维面对一句驱动原文。
 func TestAdminTokenMissingRowIsClassified(t *testing.T) {
-	if got := exitCode(adminapi.ErrNoTokenRow); got != 4 {
+	if got := cli.ExitCode(adminapi.ErrNoTokenRow); got != 4 {
 		t.Errorf("ErrNoTokenRow 的退出码 = %d，期望 4", got)
 	}
 }

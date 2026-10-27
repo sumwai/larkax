@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -226,8 +227,8 @@ var priceActions = []string{"add", "list", "show", "update", "enable", "disable"
 
 func runPrice(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, priceShortUsage)
-		return usageErr(errors.New("price 需要子命令"))
+		cli.PrintUsage(os.Stderr, priceShortUsage)
+		return cli.UsageErr(errors.New("price 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -261,24 +262,24 @@ func runPrice(args []string) error {
 		// 收进 price：这些数据是计价规则的输入，离开规则没有别的用处。
 		return runPriceCalendar(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, priceShortUsage)
+		cli.PrintUsage(os.Stdout, priceShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, priceShortUsage)
-		return usageErr(fmt.Errorf("未知的 price 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, priceShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 price 子命令 %q", action))
 	}
 }
 
 func runPriceCreate(args []string) error {
 	// 命令名写正式名 add：jsonUnsupported 那句会把命令名打给人看，而 create
 	// 是旧写法（见 priceUsage 的「旧名仍可用」）。
-	if err := jsonUnsupported("price add"); err != nil {
+	if err := cli.JSONUnsupported("price add"); err != nil {
 		return err
 	}
 
 	req, refs, err := parsePriceCreate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if refs.scheduleFile != "" {
 		sched, schedErr := readScheduleFile(refs.scheduleFile)
@@ -294,7 +295,7 @@ func runPriceCreate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -309,7 +310,7 @@ func runPriceCreate(args []string) error {
 	req.CreatedBy = actor.ID
 
 	if refs.owner != "" {
-		ownerID, resolveErr := resolveOwnerID(ctx, db, refs.owner)
+		ownerID, resolveErr := cli.ResolveOwnerID(ctx, db, refs.owner)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -320,8 +321,8 @@ func runPriceCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedRule(humanStdout(), humanStderr(), id, req)
-	printPriceCoverageHint(humanStderr(), req.Expr, req.Schedule)
+	printCreatedRule(cli.HumanStdout(), cli.HumanStderr(), id, req)
+	printPriceCoverageHint(cli.HumanStderr(), req.Expr, req.Schedule)
 	return nil
 }
 
@@ -354,27 +355,27 @@ type priceRefs struct {
 func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	// 规则名是第一个位置参数，且必须写在旗标前面：flag 包遇到第一个非旗标词就
 	// 停止解析，写在后面的一整段都会落进 NArg（下面按「多给了参数」报）。
-	operand, rest, takeErr := takeLeadingOperand(args, priceRuleNameOperand)
+	operand, rest, takeErr := cli.TakeLeadingOperand(args, priceRuleNameOperand)
 	if takeErr != nil {
 		return pricing.CreateRequest{}, priceRefs{}, takeErr
 	}
 	args = rest
 
-	fs := newFlagSet("price add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	fs := cli.NewFlagSet("price add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceShortUsage) }
 	scope := fs.String("scope", "", "")
 	name := fs.String("name", "", "")
 	expression := fs.String("expr", "", "")
 	scheduleFile := fs.String("schedule-file", "", "")
-	owner := legacyStringFlag(fs, "user", "owner", "")
-	stringAlias(fs, owner, "u")
+	owner := cli.LegacyStringFlag(fs, "user", "owner", "")
+	cli.StringAlias(fs, owner, "u")
 	channelID := fs.Int64("channel", 0, "渠道 ID，channel 作用域必填")
 	models := fs.String("models", "", "")
 	priority := fs.Int("priority", 0, "")
 	effectiveFrom := fs.String("effective-from", "", "")
-	stringAlias(fs, effectiveFrom, "from")
+	cli.StringAlias(fs, effectiveFrom, "from")
 	effectiveTo := fs.String("effective-to", "", "")
-	stringAlias(fs, effectiveTo, "to")
+	cli.StringAlias(fs, effectiveTo, "to")
 	disabled := fs.Bool("disabled", false, "")
 	by := fs.String("by", "", "")
 	slots := newPriceSlotFlags(fs)
@@ -391,16 +392,16 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 	if strings.TrimSpace(*scope) == "" {
 		return pricing.CreateRequest{}, priceRefs{}, errors.New("缺少 --scope（platform / merchant / channel）")
 	}
-	ruleName, nameErr := resolveOperand(operand, *name, given["name"], priceRuleNameOperand)
+	ruleName, nameErr := cli.ResolveOperand(operand, *name, given["name"], priceRuleNameOperand)
 	if nameErr != nil {
 		return pricing.CreateRequest{}, priceRefs{}, nameErr
 	}
 	// 规则名与模型名单进 price list / explain 的表格：控制字符在连库之前
 	// 拒掉（判据在 pricing 的写入路径，见 normalizeName / normalizePatterns）。
-	if err := checkDisplayText("--name（规则名）", ruleName); err != nil {
+	if err := cli.CheckDisplayText("--name（规则名）", ruleName); err != nil {
 		return pricing.CreateRequest{}, priceRefs{}, err
 	}
-	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+	if err := cli.CheckDisplayList("--models", splitOptionalList(*models)); err != nil {
 		return pricing.CreateRequest{}, priceRefs{}, err
 	}
 	exprGiven := strings.TrimSpace(*expression) != ""
@@ -472,30 +473,30 @@ func parsePriceCreate(args []string) (pricing.CreateRequest, priceRefs, error) {
 }
 
 // priceLocatorOperand 是 price update 的位置参数：规则名或规则 ID。
-var priceLocatorOperand = operandSpec{
-	what:  "定位符",
-	flag:  "id",
-	usage: "写成第一个位置参数（larkaxctl price update <规则名 或 ID> …）",
+var priceLocatorOperand = cli.OperandSpec{
+	What:  "定位符",
+	Flag:  "id",
+	Usage: "写成第一个位置参数（larkaxctl price update <规则名 或 ID> …）",
 }
 
 // priceRuleNameOperand 是 price add 的位置参数：规则名。
 //
-// 与 user / plan / model 的 add 同一个形状（见 operand.go）：第一个位置参数是
+// 与 user / plan / model 的 add 同一个形状（见 cli 包的 operand.go）：第一个位置参数是
 // 正式写法，--name 是旧写法。
-var priceRuleNameOperand = operandSpec{
-	what:  "规则名",
-	flag:  "name",
-	usage: "写成第一个位置参数（larkaxctl price add <规则名> …）",
+var priceRuleNameOperand = cli.OperandSpec{
+	What:  "规则名",
+	Flag:  "name",
+	Usage: "写成第一个位置参数（larkaxctl price add <规则名> …）",
 }
 
 func runPriceUpdate(args []string) error {
-	if err := jsonUnsupported("price update"); err != nil {
+	if err := cli.JSONUnsupported("price update"); err != nil {
 		return err
 	}
 
 	req, refs, err := parsePriceUpdate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if refs.scheduleFile != "" {
 		sched, schedErr := readScheduleFile(refs.scheduleFile)
@@ -511,7 +512,7 @@ func runPriceUpdate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -527,7 +528,7 @@ func runPriceUpdate(args []string) error {
 	req.ChangedBy = actor.ID
 
 	if refs.owner != "" {
-		ownerID, resolveErr := resolveOwnerID(ctx, db, refs.owner)
+		ownerID, resolveErr := cli.ResolveOwnerID(ctx, db, refs.owner)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -540,7 +541,7 @@ func runPriceUpdate(args []string) error {
 	if refs.locator != "" {
 		id, resolveErr := resolvePriceRuleLocator(ctx, db, refs.locator, req.Scope)
 		if resolveErr != nil {
-			return usageErr(resolveErr)
+			return cli.UsageErr(resolveErr)
 		}
 		req.ID = id
 	}
@@ -548,14 +549,14 @@ func runPriceUpdate(args []string) error {
 	if err := pricing.NewAdmin(db).Update(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "已更新计价规则 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已更新计价规则 %d。\n", req.ID)
 	// 只在这次真的写了计价时提示：只改优先级、名字或只清表的那次更新没有
 	// 新的单价可看，提示会变成一句与本次操作无关的话。
 	expression := ""
 	if req.Expr != nil {
 		expression = *req.Expr
 	}
-	printPriceCoverageHint(humanStderr(), expression, req.Schedule)
+	printPriceCoverageHint(cli.HumanStderr(), expression, req.Schedule)
 	return nil
 }
 
@@ -583,23 +584,23 @@ func runPriceSetEnabled(args []string, enable bool) error {
 	// 命令名按 enable 算出来：这两条命令共用这一个入口，写死一个会让其中一条
 	// 在不支持 json 时报出兄弟命令的名字。拦在**函数体第一行**、连库之前——
 	// 它会改 rules.enabled，做完再报不支持就成了一次静默的启停。
-	if err := jsonUnsupported("price " + verb); err != nil {
+	if err := cli.JSONUnsupported("price " + verb); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("price "+verb, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	fs := cli.NewFlagSet("price "+verb, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"%s 需要一个规则 ID，得到 %d 个参数：用法 larkaxctl price %s <规则 ID>",
 			verb, fs.NArg(), verb))
 	}
 	id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
 	if err != nil || id <= 0 {
-		return usageErr(fmt.Errorf("%s 的规则 ID 必须是正整数，当前为 %q", verb, fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("%s 的规则 ID 必须是正整数，当前为 %q", verb, fs.Arg(0)))
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -612,7 +613,7 @@ func runPriceSetEnabled(args []string, enable bool) error {
 		}); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "计价规则 %d %s。\n", id, done)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "计价规则 %d %s。\n", id, done)
 		return nil
 	})
 }
@@ -631,19 +632,19 @@ var (
 func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	// 定位符是第一个位置参数，规则名或规则 ID。与 add 的规则名同一个形状：
 	// flag 包遇到第一个非旗标词就停，所以它必须写在旗标前面。
-	operand, rest, takeErr := takeLeadingOperand(args, priceLocatorOperand)
+	operand, rest, takeErr := cli.TakeLeadingOperand(args, priceLocatorOperand)
 	if takeErr != nil {
 		return pricing.UpdateRequest{}, priceRefs{}, takeErr
 	}
 	args = rest
 
-	fs := newFlagSet("price update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	fs := cli.NewFlagSet("price update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceShortUsage) }
 	id := fs.Int64("id", 0, "要改的规则 ID（与位置参数只能给一个）")
 	scope := fs.String("scope", "", "")
 	name := fs.String("name", "", "")
-	owner := legacyStringFlag(fs, "user", "owner", "")
-	stringAlias(fs, owner, "u")
+	owner := cli.LegacyStringFlag(fs, "user", "owner", "")
+	cli.StringAlias(fs, owner, "u")
 	channelID := fs.Int64("channel", 0, "渠道 ID；0 表示改成不挂渠道")
 	models := fs.String("models", "", "")
 	expression := fs.String("expr", "", "")
@@ -651,11 +652,11 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	clearSchedule := fs.Bool("clear-schedule", false, "")
 	priority := fs.Int("priority", 0, "")
 	effectiveFrom := fs.String("effective-from", "", "")
-	stringAlias(fs, effectiveFrom, "from")
+	cli.StringAlias(fs, effectiveFrom, "from")
 	effectiveTo := fs.String("effective-to", "", "")
-	stringAlias(fs, effectiveTo, "to")
+	cli.StringAlias(fs, effectiveTo, "to")
 	clearEffectiveTo := fs.Bool("clear-effective-to", false, "")
-	boolAlias(fs, clearEffectiveTo, "no-expire")
+	cli.BoolAlias(fs, clearEffectiveTo, "no-expire")
 	by := fs.String("by", "", "")
 	// --enable / --disable 是**旧形态**（见 priceUsage 的「启停是独立的二级
 	// 动词」那一节）：留着是为了不让已经在跑的脚本坏掉，新写的命令用
@@ -743,7 +744,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	// --user 给了空串就拒，而不是当成 0：它多半是一个没展开的 shell 变量，
 	// 而 0 在这里是有含义的（改成不挂商家）——静默地按 0 处理会把
 	// 「我本来想挂某个商家」变成一条平台价，而那条规则照样匹配得上。
-	if flagGiven(given, userFlagNames...) && strings.TrimSpace(*owner) == "" {
+	if cli.FlagGiven(given, cli.UserFlagNames...) && strings.TrimSpace(*owner) == "" {
 		return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 			"--user 不能是空串（多半是变量没展开）：要改成不挂商家写 --user 0")
 	}
@@ -757,7 +758,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 		req.Scope = scope
 		changes++
 	}
-	if flagGiven(given, userFlagNames...) {
+	if cli.FlagGiven(given, cli.UserFlagNames...) {
 		ownerRef = *owner
 		changes++
 	}
@@ -766,7 +767,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 		changes++
 	}
 	if given["name"] {
-		if err := checkDisplayText("--name（规则名）", strings.TrimSpace(*name)); err != nil {
+		if err := cli.CheckDisplayText("--name（规则名）", strings.TrimSpace(*name)); err != nil {
 			return pricing.UpdateRequest{}, priceRefs{}, err
 		}
 		req.Name = name
@@ -774,7 +775,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	}
 	if given["models"] {
 		list := splitOptionalList(*models)
-		if err := checkDisplayList("--models", list); err != nil {
+		if err := cli.CheckDisplayList("--models", list); err != nil {
 			return pricing.UpdateRequest{}, priceRefs{}, err
 		}
 		req.ModelPatterns = &list
@@ -815,7 +816,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 	// 生效下界清不掉（那一栏非空），所以给了空串要当场拒：静默地当成
 	// 「不改这一项」会让一次只想改下界的调用变成「什么都没改」，
 	// 而它看起来像一次成功的修改。
-	if flagGiven(given, effectiveFromFlagNames...) {
+	if cli.FlagGiven(given, effectiveFromFlagNames...) {
 		if strings.TrimSpace(*effectiveFrom) == "" {
 			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 				"--effective-from 不能为空（表上那一栏非空）：这一栏清不掉")
@@ -827,7 +828,7 @@ func parsePriceUpdate(args []string) (pricing.UpdateRequest, priceRefs, error) {
 		req.EffectiveFrom = from
 		changes++
 	}
-	if flagGiven(given, effectiveToFlagNames...) {
+	if cli.FlagGiven(given, effectiveToFlagNames...) {
 		if strings.TrimSpace(*effectiveTo) == "" {
 			return pricing.UpdateRequest{}, priceRefs{}, errors.New(
 				"--effective-to 不能为空：要清成不过期用 --clear-effective-to")
@@ -936,30 +937,30 @@ func resolvePriceRuleLocator(ctx context.Context, db *sql.DB, locator string, sc
 
 // runPriceExplain 回答「这次请求按哪条规则计价」。
 func runPriceExplain(args []string) error {
-	fs := newFlagSet("price explain", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	fs := cli.NewFlagSet("price explain", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceShortUsage) }
 	model := fs.String("model", "", "")
-	stringAlias(fs, model, "m")
-	owner := legacyStringFlag(fs, "user", "owner", "")
-	stringAlias(fs, owner, "u")
+	cli.StringAlias(fs, model, "m")
+	owner := cli.LegacyStringFlag(fs, "user", "owner", "")
+	cli.StringAlias(fs, owner, "u")
 	channelID := fs.Int64("channel", 0, "这次请求的渠道 ID，留空表示未选定")
 	at := fs.String("at", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"explain 不接受位置参数，得到 %q：模型用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*model) == "" {
-		return usageErr(errors.New("缺少 --model（这次请求的规范模型名）"))
+		return cli.UsageErr(errors.New("缺少 --model（这次请求的规范模型名）"))
 	}
 	if *channelID < 0 {
-		return usageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
+		return cli.UsageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
 	}
 	when, err := parseTimeFlag("--at", *at)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	// 时刻在这里定下来再交给包：包在零值时会自己取当前时刻，而那样打出来的
 	// 表头与真正用的那一刻是两个数（差几毫秒，但「问的是哪一刻」正是这张表
@@ -975,7 +976,7 @@ func runPriceExplain(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -983,7 +984,7 @@ func runPriceExplain(args []string) error {
 
 	q := pricing.ExplainQuery{CanonicalModel: *model, ChannelID: *channelID, At: *when}
 	if strings.TrimSpace(*owner) != "" {
-		ownerID, resolveErr := resolveOwnerID(ctx, db, *owner)
+		ownerID, resolveErr := cli.ResolveOwnerID(ctx, db, *owner)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -994,21 +995,21 @@ func runPriceExplain(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, priceExplainDoc(q, rules), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, priceExplainDoc(q, rules), nil)
 	}
-	printRuleExplain(humanStdout(), q, rules)
+	printRuleExplain(cli.HumanStdout(), q, rules)
 	return nil
 }
 
 func runPriceList(args []string) error {
-	fs := newFlagSet("price list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	fs := cli.NewFlagSet("price list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	cfg, err := config.LoadOps()
@@ -1017,7 +1018,7 @@ func runPriceList(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1027,10 +1028,10 @@ func runPriceList(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, priceListDoc(rules), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, priceListDoc(rules), nil)
 	}
-	printRuleList(humanStdout(), rules)
+	printRuleList(cli.HumanStdout(), rules)
 	return nil
 }
 
@@ -1060,18 +1061,18 @@ func readScheduleFile(path string) (*pricing.Schedule, error) {
 // 带结构化定价表的规则打那张表：它是可枚举的那一份，也是运维要改的那一份。
 // 手写表达式的规则打源码——没有表可打，源码就是全部。
 func runPriceShow(args []string) error {
-	fs := newFlagSet("price show", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceShortUsage) }
+	fs := cli.NewFlagSet("price show", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"show 需要一个规则 ID，得到 %d 个参数：用法 larkaxctl price show <规则 ID>", fs.NArg()))
 	}
 	id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
 	if err != nil || id <= 0 {
-		return usageErr(fmt.Errorf("show 的规则 ID 必须是正整数，当前为 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("show 的规则 ID 必须是正整数，当前为 %q", fs.Arg(0)))
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -1079,8 +1080,8 @@ func runPriceShow(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, priceShowDoc(info), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, priceShowDoc(info), nil)
 		}
 		printRuleShow(os.Stdout, info)
 		return nil
@@ -1092,11 +1093,11 @@ func runPriceShow(args []string) error {
 // expr 与 schedule 都给：表是给人改的那一份，表达式是求值真正用的那一份，
 // 让脚本能同时核对两者（不变式是 schedule 非 null 时 expr 等于它编译的结果）。
 func priceShowDoc(r pricing.RuleInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["rule"] = ruleEntry(r)
 	doc["expr"] = r.Expr
 	doc["schedule"] = r.Schedule
-	doc["schedule_error"] = nullableError(r.ScheduleErr)
+	doc["schedule_error"] = cli.NullableError(r.ScheduleErr)
 	return doc
 }
 
@@ -1131,10 +1132,10 @@ func printRuleShow(w io.Writer, r pricing.RuleInfo) {
 // 与 printRuleList 是同一份数据的另一条渲染路径：那一档把「生效/停用」、
 // 「不过期」、商家栏的 `-` 铺成给人扫的表，这一档给布尔、null 与原始值。
 func priceListDoc(rules []pricing.RuleInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(rules)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rules))
 	for _, r := range rules {
 		entries = append(entries, ruleEntry(r))
@@ -1149,12 +1150,12 @@ func priceListDoc(rules []pricing.RuleInfo) map[string]any {
 // query 里那两个外键同样用 null 表示「这次没选定」，与请求路径上
 // OwnerUserID / ChannelID 为 0 的含义一致（见 pricing.ExplainQuery）。
 func priceExplainDoc(q pricing.ExplainQuery, rules []pricing.RuleInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["query"] = map[string]any{
 		"canonical_model": q.CanonicalModel,
-		"owner_user_id":   jsonID(q.OwnerUserID),
-		"channel_id":      jsonID(q.ChannelID),
-		"at":              jsonTime(q.At),
+		"owner_user_id":   cli.JSONID(q.OwnerUserID),
+		"channel_id":      cli.JSONID(q.ChannelID),
+		"at":              cli.JSONTime(q.At),
 	}
 
 	entries := make([]map[string]any, 0, len(rules))
@@ -1178,17 +1179,17 @@ func ruleEntry(r pricing.RuleInfo) map[string]any {
 		"id": r.ID,
 		// 0 表示不挂商家 / 不挂渠道（平台价），库里存的是 NULL。
 		"scope":          r.Scope,
-		"owner_user_id":  jsonID(r.OwnerUserID),
-		"channel_id":     jsonID(r.ChannelID),
+		"owner_user_id":  cli.JSONID(r.OwnerUserID),
+		"channel_id":     cli.JSONID(r.ChannelID),
 		"name":           r.Name,
-		"model_patterns": jsonList(r.ModelPatterns),
+		"model_patterns": cli.JSONList(r.ModelPatterns),
 		"priority":       r.Priority,
 		"enabled":        r.Enabled,
-		"effective_from": jsonTime(r.EffectiveFrom),
-		"effective_to":   jsonTimePtr(r.EffectiveTo),
-		"quota_keys":     jsonList(r.DeclaredKeys),
-		"expr_error":     nullableError(r.ExprErr),
-		"schedule_error": nullableError(r.ScheduleErr),
+		"effective_from": cli.JSONTime(r.EffectiveFrom),
+		"effective_to":   cli.JSONTimePtr(r.EffectiveTo),
+		"quota_keys":     cli.JSONList(r.DeclaredKeys),
+		"expr_error":     cli.NullableError(r.ExprErr),
+		"schedule_error": cli.NullableError(r.ScheduleErr),
 	}
 }
 
@@ -1267,7 +1268,7 @@ func printPriceCoverageHint(w io.Writer, expression string, schedule *pricing.Sc
 // 声明了哪几项单价由最后一栏给出。
 func printRuleList(w io.Writer, rules []pricing.RuleInfo) {
 	if len(rules) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("计价规则", "price add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("计价规则", "price add"))
 		return
 	}
 	printRuleTable(w, rules, nil)
@@ -1301,24 +1302,24 @@ func printRuleExplain(w io.Writer, q pricing.ExplainQuery, rules []pricing.RuleI
 //
 // verdictOf 非 nil 时多一栏「裁决」，按行号取那一栏的值。
 func printRuleTable(w io.Writer, rules []pricing.RuleInfo, verdictOf func(int) string) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"ID", "作用域", "商家", "渠道", "名称", "模型", "优先级", "状态", "生效自", "生效至", "单价键"}
 	if verdictOf != nil {
 		headers = append(headers, "裁决")
 	}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 
 	for i, r := range rules {
 		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s",
-			p.bold(strconv.FormatInt(r.ID, 10)), r.Scope,
+			p.Bold(strconv.FormatInt(r.ID, 10)), r.Scope,
 			priceOwnerLabel(r.OwnerUserID), priceChannelLabel(r.ChannelID),
-			p.bold(r.Name), joinOrDash(r.ModelPatterns), r.Priority, enabledLabel(r),
-			p.dim(r.EffectiveFrom.Format(time.RFC3339)), p.dim(effectiveToLabel(r.EffectiveTo)),
+			p.Bold(r.Name), joinOrDash(r.ModelPatterns), r.Priority, enabledLabel(r),
+			p.Dim(r.EffectiveFrom.Format(time.RFC3339)), p.Dim(effectiveToLabel(r.EffectiveTo)),
 			declaredKeysLabel(r))
 		if verdictOf != nil {
 			line += "\t" + verdictOf(i)

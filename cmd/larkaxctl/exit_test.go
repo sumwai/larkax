@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/dberr"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -35,7 +36,7 @@ func TestExitCodeUsageIsTwo(t *testing.T) {
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
-			if got := exitCode(err); got != 2 {
+			if got := cli.ExitCode(err); got != 2 {
 				t.Errorf("参数错的退出码应当是 2，得到 %d（%v）", got, err)
 			}
 		})
@@ -50,15 +51,15 @@ func TestExitCodeUsageIsTwo(t *testing.T) {
 // 在 usageErrors 里登记过才有退出码 2——漏登记的那一天它会安静地退回 1，
 // 而 1 与 2 在脚本里是两种处置。
 func TestExitCodeUsageForIDRefUsername(t *testing.T) {
-	if got := exitCode(auth.ErrUsernameIsIDRef); got != exitUsage {
-		t.Errorf("auth.ErrUsernameIsIDRef 的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(auth.ErrUsernameIsIDRef); got != cli.ExitUsage {
+		t.Errorf("auth.ErrUsernameIsIDRef 的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 
 	// 包返回的是包了一层的那一个（ValidateNewUsername 用 %w 接上原因），
 	// 链上仍然要认得出。
 	wrapped := fmt.Errorf("建用户失败: %w", auth.ErrUsernameIsIDRef)
-	if got := exitCode(wrapped); got != exitUsage {
-		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(wrapped); got != cli.ExitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -70,15 +71,15 @@ func TestExitCodeUsageForIDRefUsername(t *testing.T) {
 // 它，而从包直接上来的错误只有在 usageErrors 里登记过才有退出码 2：漏登记的那一天
 // 它会安静地退回 1，而 1 与 2 在脚本里是两种处置。
 func TestExitCodeUsageForControlCharUsername(t *testing.T) {
-	if got := exitCode(auth.ErrUsernameHasControlChar); got != exitUsage {
-		t.Errorf("auth.ErrUsernameHasControlChar 的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(auth.ErrUsernameHasControlChar); got != cli.ExitUsage {
+		t.Errorf("auth.ErrUsernameHasControlChar 的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 
 	// 包返回的是包了一层的那一个（ValidateNewUsername 用 %w 接上「哪个字符、
 	// 为什么不行」那两句），链上仍然要认得出。
 	wrapped := fmt.Errorf("建用户失败: %w", auth.ErrUsernameHasControlChar)
-	if got := exitCode(wrapped); got != exitUsage {
-		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(wrapped); got != cli.ExitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -89,15 +90,15 @@ func TestExitCodeUsageForControlCharUsername(t *testing.T) {
 // 它会安静地退回 1，而 1 与 2 在脚本里是两种处置（重发一次就能过，还是要去看
 // 环境）。
 func TestExitCodeUsageForInvalidEmail(t *testing.T) {
-	if got := exitCode(auth.ErrInvalidEmail); got != exitUsage {
-		t.Errorf("auth.ErrInvalidEmail 的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(auth.ErrInvalidEmail); got != cli.ExitUsage {
+		t.Errorf("auth.ErrInvalidEmail 的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 
 	// 包返回的是包了一层的那一个（ValidateEmail 用 %w 接上「哪里不对」那一句），
 	// 链上仍然要认得出。
 	wrapped := fmt.Errorf("建用户失败: %w", auth.ErrInvalidEmail)
-	if got := exitCode(wrapped); got != exitUsage {
-		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(wrapped); got != cli.ExitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -113,7 +114,7 @@ func TestExitCodeDBUnreachableIsThree(t *testing.T) {
 	if err == nil {
 		t.Fatal("连不上库时应当报错")
 	}
-	if got := exitCode(err); got != 3 {
+	if got := cli.ExitCode(err); got != 3 {
 		t.Errorf("连不上库的退出码应当是 3，得到 %d（%v）", got, err)
 	}
 }
@@ -132,7 +133,7 @@ func TestExitCodeConflictIsFour(t *testing.T) {
 	if err == nil {
 		t.Fatal("启用一个不存在的渠道应当报错")
 	}
-	if got := exitCode(err); got != 4 {
+	if got := cli.ExitCode(err); got != 4 {
 		t.Errorf("约束冲突的退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
@@ -161,7 +162,7 @@ func TestExitCodeConflictForUnknownUser(t *testing.T) {
 	if !errors.Is(err, auth.ErrUserNotFound) {
 		t.Errorf("错误链里没有 auth.ErrUserNotFound：%v", err)
 	}
-	if got := exitCode(err); got != 4 {
+	if got := cli.ExitCode(err); got != 4 {
 		t.Errorf("要查的那一行不存在时退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
@@ -206,7 +207,7 @@ func TestExitCodeConflictForTakenUsernameAndEmail(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Errorf("错误链里没有 %v：%v", tc.want, err)
 			}
-			if got := exitCode(err); got != 4 {
+			if got := cli.ExitCode(err); got != 4 {
 				t.Errorf("撞唯一键的退出码应当是 4，得到 %d（%v）", got, err)
 			}
 		})
@@ -222,7 +223,7 @@ func TestExitCodeConflictForTakenUsernameAndEmail(t *testing.T) {
 func TestExitCodeConflictForGenericConstraint(t *testing.T) {
 	err := fmt.Errorf("%w: 写预留记录失败: %w",
 		store.ErrConstraintViolation, errors.New("driver error"))
-	if got := exitCode(err); got != 4 {
+	if got := cli.ExitCode(err); got != 4 {
 		t.Errorf("通用约束冲突的退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
@@ -249,7 +250,7 @@ func TestExitCodeConflictForUnnamedForeignKey(t *testing.T) {
 	if !errors.Is(err, dberr.ErrConstraintViolation) {
 		t.Fatalf("错误链里没有 dberr.ErrConstraintViolation：%v", err)
 	}
-	if got := exitCode(err); got != 4 {
+	if got := cli.ExitCode(err); got != 4 {
 		t.Errorf("没被具名认出来的外键冲突，退出码应当是 4，得到 %d（%v）", got, err)
 	}
 }
@@ -269,14 +270,14 @@ func TestHelpIsNotAFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("叶子命令的 -h 应当由 flag 包返回 ErrHelp")
 	}
-	if !helpRequested(err) {
+	if !cli.HelpRequested(err) {
 		t.Errorf("-h 应当被认成「要帮助」，得到 %v", err)
 	}
 }
 
 // TestExitCodeOfNilIsZero 钉住成功。
 func TestExitCodeOfNilIsZero(t *testing.T) {
-	if got := exitCode(nil); got != 0 {
+	if got := cli.ExitCode(nil); got != 0 {
 		t.Errorf("没有错误时退出码应当是 0，得到 %d", got)
 	}
 }

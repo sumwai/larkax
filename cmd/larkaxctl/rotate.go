@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/config"
 )
@@ -97,34 +98,34 @@ const rotateRowLimit = 100
 // 旧路径 larkaxctl rotate 接的也是这个函数（见 main.go 的 legacyCommands）：
 // 两条路径走的是同一段代码，输出因此逐字相同。
 func runRotate(args []string) error {
-	if err := jsonUnsupported("secret rotate"); err != nil {
+	if err := cli.JSONUnsupported("secret rotate"); err != nil {
 		return err
 	}
 
 	// `secret rotate help`（以及旧写法 `rotate help`）给长版：那一份完整的
 	// 顺序说明才是这条命令的正文，短版只是一屏摘要。
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, rotateUsage)
+		cli.PrintUsage(os.Stdout, rotateUsage)
 		return nil
 	}
 
-	fs := newFlagSet("secret rotate", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, rotateShortUsage) }
+	fs := cli.NewFlagSet("secret rotate", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, rotateShortUsage) }
 	apply := fs.Bool("apply", false, "")
 	verify := fs.Bool("verify", false, "")
 	batchSize := fs.Int("batch-size", channels.DefaultRotateBatch, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"secret rotate 不接受位置参数，得到 %q：模式用 --apply 或 --verify 指定", fs.Arg(0)))
 	}
 	if *apply && *verify {
-		return usageErr(errors.New("--apply 与 --verify 不能同时用：一个改写密文，一个只读"))
+		return cli.UsageErr(errors.New("--apply 与 --verify 不能同时用：一个改写密文，一个只读"))
 	}
 	if *batchSize <= 0 {
-		return usageErr(fmt.Errorf("--batch-size 必须是正整数，当前为 %d", *batchSize))
+		return cli.UsageErr(fmt.Errorf("--batch-size 必须是正整数，当前为 %d", *batchSize))
 	}
 
 	cfg, err := config.LoadOps()
@@ -145,7 +146,7 @@ func runRotate(args []string) error {
 	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
 	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
 	// 不同的退出码，而脚本对它们的处置是不一样的。
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -170,7 +171,7 @@ func runRotatePlan(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	printRotateReport(humanStdout(), humanStderr(), report)
+	printRotateReport(cli.HumanStdout(), cli.HumanStderr(), report)
 	return nil
 }
 
@@ -183,22 +184,22 @@ func runRotatePlan(ctx context.Context, rotator *channels.Rotator) error {
 // 的时刻是第一次跑，而那时用法文本（rotateUsage 的「跑 --apply 之前先备份
 // accounts 表」那一节）正摆在眼前。所以它跟着 -v 走：要动手的人按需多问一句。
 func runRotateApply(ctx context.Context, rotator *channels.Rotator) error {
-	if verboseOutput {
-		_, _ = fmt.Fprintln(humanStderr(),
+	if cli.VerboseOutput {
+		_, _ = fmt.Fprintln(cli.HumanStderr(),
 			"提示：本命令会改写 accounts.credential_enc，开始前请确认已经备份。")
 	}
 
-	report, err := rotator.Apply(ctx, rotateProgressPrinter(humanStdout()))
-	printRotateReport(humanStdout(), humanStderr(), report)
+	report, err := rotator.Apply(ctx, rotateProgressPrinter(cli.HumanStdout()))
+	printRotateReport(cli.HumanStdout(), cli.HumanStderr(), report)
 	if report != nil && len(report.Problems) > 0 {
-		_, _ = fmt.Fprintf(humanStderr(), "有 %d 行没能轮换，见上面的清单：它们要么密文坏了、要么缺一把主密钥，再跑一次也还是这样。\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "有 %d 行没能轮换，见上面的清单：它们要么密文坏了、要么缺一把主密钥，再跑一次也还是这样。\n",
 			len(report.Problems))
 	}
 	if err != nil {
 		return err
 	}
 	// 下一步走 stderr：它是附注，不是这一轮的结果——结果在上面那份报告里。
-	_, _ = fmt.Fprintln(humanStderr(), "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
+	_, _ = fmt.Fprintln(cli.HumanStderr(), "跑 larkaxctl secret rotate --verify 确认全库都补上了，再退役旧主密钥。")
 	return nil
 }
 
@@ -211,7 +212,7 @@ func runRotateVerify(ctx context.Context, rotator *channels.Rotator) error {
 	if err != nil {
 		return err
 	}
-	printVerifyReport(humanStdout(), humanStderr(), report)
+	printVerifyReport(cli.HumanStdout(), cli.HumanStderr(), report)
 	return rotateVerifyErr(report)
 }
 
@@ -224,7 +225,7 @@ func rotateVerifyErr(report *channels.VerifyReport) error {
 	if report == nil || report.OK() {
 		return nil
 	}
-	return reportedErr(fmt.Errorf("有 %d 行不含当前主密钥 %q：现在还不能退役旧主密钥（见上面的清单）",
+	return cli.ReportedErr(fmt.Errorf("有 %d 行不含当前主密钥 %q：现在还不能退役旧主密钥（见上面的清单）",
 		len(report.Missing), report.PrimaryKeyID))
 }
 
@@ -284,17 +285,17 @@ func printVerifyReport(out, note io.Writer, r *channels.VerifyReport) {
 		return
 	}
 
-	line := statusLine{kind: glyphPass, title: "主密钥覆盖"}
+	line := cli.StatusLine{Kind: cli.GlyphPass, Title: "主密钥覆盖"}
 	if r.OK() {
-		line.conclusion = fmt.Sprintf("扫过 %d 行，每一行都含当前主密钥 %q，可以退役旧主密钥了",
+		line.Conclusion = fmt.Sprintf("扫过 %d 行，每一行都含当前主密钥 %q，可以退役旧主密钥了",
 			r.Scanned, r.PrimaryKeyID)
 	} else {
-		line.kind = glyphFail
-		line.conclusion = fmt.Sprintf(
+		line.Kind = cli.GlyphFail
+		line.Conclusion = fmt.Sprintf(
 			"扫过 %d 行，含当前主密钥 %q 的 %d 行、不含的 %d 行；现在还不能退役旧主密钥（清单见下）",
 			r.Scanned, r.PrimaryKeyID, r.Wrapped, len(r.Missing))
 	}
-	printStatusLines(out, []statusLine{line}, false)
+	cli.PrintStatusLines(out, []cli.StatusLine{line}, false)
 
 	if r.RotationRunning {
 		// 这一句必须默认就打（只是改走 stderr）：它改的是「上面那个结论怎么读」

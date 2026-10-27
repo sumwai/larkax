@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channels"
 )
 
@@ -270,9 +271,9 @@ func TestAccountUpdateWeight(t *testing.T) {
 	// 只切这一条命令的档，切完复原：同一轮里后面的命令里有写类命令，
 	// 它们在 json 档下会直接报错（见 jsonUnsupported）。
 	listed := func() string {
-		saved := outputFormat
-		outputFormat = formatJSON
-		defer func() { outputFormat = saved }()
+		saved := cli.OutputFormat
+		cli.OutputFormat = cli.FormatJSON
+		defer func() { cli.OutputFormat = saved }()
 		out, _ := captureStreams(t, func() {
 			if err := runAccountList([]string{"--channel", strconv.FormatInt(channelID, 10)}); err != nil {
 				t.Fatalf("account list --format json 失败: %v", err)
@@ -341,7 +342,7 @@ func TestAccountUpdateWeight(t *testing.T) {
 		t.Fatalf("期望 ErrAccountNotOnChannel，得到 %v", err)
 	}
 	// 字面量 2，与 docs/cli-reference.md 的退出码表对得上：补救动作是改命令。
-	if got := exitCode(err); got != 2 {
+	if got := cli.ExitCode(err); got != 2 {
 		t.Errorf("退出码 = %d，期望 2（%v）", got, err)
 	}
 	if !strings.Contains(err.Error(), secondName(t, db, channelID)) {
@@ -372,8 +373,8 @@ func TestAccountUpdateWeightRejectsBadArgs(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误 = %v，期望包含 %q", err, tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -745,8 +746,8 @@ func TestAccountRemoveInUseNeedsForce(t *testing.T) {
 	if !errors.Is(err, channels.ErrAccountInUse) {
 		t.Fatalf("期望 ErrAccountInUse，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（改命令加 --force 就能过）", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（改命令加 --force 就能过）", got, cli.ExitUsage)
 	}
 	if !strings.Contains(err.Error(), secondName(t, db, second)) {
 		t.Errorf("错误里没带回另一条渠道的名字：%v", err)
@@ -779,7 +780,7 @@ func secondName(t *testing.T, db *sql.DB, channelID int64) string {
 
 // TestAccountUpdateMissing 钉住「换 key 时名字打错」的退出码也是 4。
 //
-// ErrAccountNotFound 在 conflictErrors 里（见 exit.go），所以 update / remove
+// ErrAccountNotFound 在 conflictErrors 里（见 cli 包的 exit.go），所以 update / remove
 // 两条路都落在「要查的那一行不存在」那一档。update 先有这个行为、后来才被
 // 记成用例：没有它时，把那条分类去掉照样全绿，而用户拿到的会是 1。
 func TestAccountUpdateMissing(t *testing.T) {
@@ -793,8 +794,8 @@ func TestAccountUpdateMissing(t *testing.T) {
 	if !errors.Is(err, channels.ErrAccountNotFound) {
 		t.Fatalf("期望 ErrAccountNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 
@@ -812,8 +813,8 @@ func TestAccountRemoveMissing(t *testing.T) {
 	if !errors.Is(err, channels.ErrAccountNotFound) {
 		t.Fatalf("期望 ErrAccountNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 
@@ -834,8 +835,8 @@ func TestAccountRemoveRejectsBadArgs(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误 = %v，期望包含 %q", err, tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -899,7 +900,7 @@ func TestAccountAddResolvesChannelByName(t *testing.T) {
 	if !errors.Is(addErr, channels.ErrChannelNotFound) {
 		t.Fatalf("错误链里没有 channels.ErrChannelNotFound：%v", addErr)
 	}
-	if got := exitCode(addErr); got != 4 {
+	if got := cli.ExitCode(addErr); got != 4 {
 		t.Fatalf("渠道名找不到的退出码 = %d，期望 4（%v）", got, addErr)
 	}
 }

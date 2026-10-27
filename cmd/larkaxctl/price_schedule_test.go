@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -136,8 +137,8 @@ func TestPriceShowRejectsBadID(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -187,7 +188,7 @@ func TestPriceCreateScheduleThenShow(t *testing.T) {
 	}
 
 	// 机器可读的那一档两栏都给：脚本要能核对「expr 是这张表的编译结果」。
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	jsonOut, _ := captureStreams(t, func() {
 		if err := runPriceShow([]string{idArg}); err != nil {
 			t.Fatalf("price show --format json 失败: %v", err)

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 )
 
@@ -89,8 +90,8 @@ func TestUserCreateRejectsControlCharsInName(t *testing.T) {
 			if err == nil {
 				t.Fatal("带控制字符的名字应当报错")
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, cli.ExitUsage)
 			}
 			// 三样都要说清：是名字的哪一类问题、哪个字符、改哪个参数。
 			for _, want := range []string{"控制字符", tc.want, "--name"} {
@@ -119,8 +120,8 @@ func TestUserCreateRejectsNumericNameLeavesNoRow(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("纯数字的用户名应当报错")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, cli.ExitUsage, r.err)
 	}
 	// 报错要说清为什么，不是一句「名字不合法」：这个名字用 --user 找不回来。
 	if !strings.Contains(r.err.Error(), "--user") {
@@ -152,8 +153,8 @@ func TestUserCreateRejectsControlCharNameLeavesNoRow(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("带控制字符的用户名应当报错")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, cli.ExitUsage, r.err)
 	}
 	if !strings.Contains(r.err.Error(), "控制字符") {
 		t.Errorf("报错没说清原因：%v", r.err)
@@ -214,8 +215,8 @@ func TestUserCreateRejectsBadEmailLeavesNoRow(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("写错的邮箱应当报错")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, cli.ExitUsage, r.err)
 	}
 	if !strings.Contains(r.err.Error(), "不是一个邮箱地址") {
 		t.Errorf("报错没说清原因：%v", r.err)
@@ -357,8 +358,8 @@ func TestUserListRejectsBadFilters(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -590,8 +591,8 @@ func TestUserGetMissingUserIsAConflict(t *testing.T) {
 	if !errors.Is(r.err, auth.ErrUserNotFound) {
 		t.Errorf("错误 %v 不是 ErrUserNotFound", r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitConflict)
 	}
 }
 
@@ -604,7 +605,7 @@ func TestUserListJSONShape(t *testing.T) {
 	name := uniqueName("json")
 	id := createUserWithRole(t, name, "", "user")
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runUser, []string{"list"})
 	if r.err != nil {
 		t.Fatalf("user list -o json 失败: %v", r.err)
@@ -624,8 +625,8 @@ func TestUserListJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
 	}
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 
 	var found bool
@@ -656,7 +657,7 @@ func TestUserGetJSONShape(t *testing.T) {
 	name := uniqueName("jsonget")
 	id := createUserWithRole(t, name, name+"@example.com", "merchant")
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runUser, []string{"get", "--user", strconv.FormatInt(id, 10)})
 	if r.err != nil {
 		t.Fatalf("user get -o json 失败: %v", r.err)
@@ -698,7 +699,7 @@ func TestUserGetJSONShape(t *testing.T) {
 // TestUserListEmptyJSONIsAnArray 钉住空清单在机器可读那一档是 `[]` 而不是 null。
 //
 // nil 切片编出来是 null，读起来像「这一栏没有」；空切片才是「这一栏有，一条
-// 都没有」（见 format.go 的 jsonList）。库里清空不了（同一个包别的用例正在建
+// 都没有」（见 cli 包的 format.go 的 jsonList）。库里清空不了（同一个包别的用例正在建
 // 用户），所以直接喂 nil 给组装文档的那个纯函数——它正是决定这个形状的地方。
 func TestUserListEmptyJSONIsAnArray(t *testing.T) {
 	doc := userListDoc(nil)
@@ -903,8 +904,8 @@ func TestUserUpdateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -928,8 +929,8 @@ func TestUserUpdateRejectsBadEmailLeavesTheRowUntouched(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("写错的邮箱应当报错")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, exitUsage, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）：%v", code, cli.ExitUsage, r.err)
 	}
 	if !strings.Contains(r.err.Error(), "不是一个邮箱地址") {
 		t.Errorf("报错没说清原因：%v", r.err)
@@ -966,7 +967,7 @@ func readUserEmail(t *testing.T, db *sql.DB, id int64) userEmail {
 // 支持」的实现在这里会拿到一句「连接数据库失败」（退出码 3），而不是「还不支持
 // --format json」（退出码 2）——而写类命令上先做后报，意味着库里那一行已经改了。
 func TestUserUpdateRejectsJSONFormatBeforeTouchingTheDB(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
 	var err error
@@ -982,8 +983,8 @@ func TestUserUpdateRejectsJSONFormatBeforeTouchingTheDB(t *testing.T) {
 	if !strings.Contains(err.Error(), "user update") {
 		t.Errorf("错误信息里要点名是哪条命令：%v", err)
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 	}
 	if stdout != "" {
 		t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
@@ -1069,8 +1070,8 @@ func TestUserUpdateMissingUserIsAConflict(t *testing.T) {
 	if !errors.Is(r.err, auth.ErrUserNotFound) {
 		t.Errorf("错误 %v 不是 ErrUserNotFound", r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitConflict)
 	}
 }
 
@@ -1097,8 +1098,8 @@ func TestUserUpdateEmailConflictIsAConflict(t *testing.T) {
 	if !strings.Contains(r.err.Error(), taken) {
 		t.Errorf("错误信息里要带上撞上的那个值（%q）：%v", taken, r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitConflict)
 	}
 	if r.stdout != "" {
 		t.Errorf("失败时 stdout 应当为空，得到 %q", r.stdout)
@@ -1255,8 +1256,8 @@ func TestUserUpdateNoMerchantOnAdminIsRefused(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("--no-merchant 打在 admin 上应当报错，却通过了")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（这是参数错，重发一次就能成）", code, exitUsage)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（这是参数错，重发一次就能成）", code, cli.ExitUsage)
 	}
 	// 文案要把出路说出来：只讲「矛盾」的话，手上这条命令还是不知道该怎么发。
 	// 两条路都要在：分两次发（先撤称呼），或者两个旗标一起给。

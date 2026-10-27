@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -62,8 +63,8 @@ func TestWalletOpenRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -265,8 +266,8 @@ func TestWalletOpenUnknownUserExitCode(t *testing.T) {
 	if !errors.Is(err, auth.ErrUserNotFound) {
 		t.Errorf("错误链里没有 auth.ErrUserNotFound：%v", err)
 	}
-	if code := exitCode(err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	if code := cli.ExitCode(err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, cli.ExitConflict)
 	}
 }
 
@@ -292,8 +293,8 @@ func TestWalletOpenStoreMissingUserExitCode(t *testing.T) {
 	if !errors.Is(err, store.ErrNoSuchUser) {
 		t.Fatalf("错误链里没有 store.ErrNoSuchUser：%v", err)
 	}
-	if code := exitCode(err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要写的那一行引用的用户不存在）", code, exitConflict)
+	if code := cli.ExitCode(err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要写的那一行引用的用户不存在）", code, cli.ExitConflict)
 	}
 }
 
@@ -346,8 +347,8 @@ func TestWalletCreditRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -376,8 +377,8 @@ func TestParseCreditAmountTrailingZeros(t *testing.T) {
 		if !strings.Contains(badErr.Error(), "最多 8 位小数") {
 			t.Errorf("%q 的错误信息 %q 里没有「最多 8 位小数」", plain, badErr)
 		}
-		if code := exitCode(badErr); code != exitUsage {
-			t.Errorf("%q 的退出码 = %d，期望 %d（参数错）", plain, code, exitUsage)
+		if code := cli.ExitCode(badErr); code != cli.ExitUsage {
+			t.Errorf("%q 的退出码 = %d，期望 %d（参数错）", plain, code, cli.ExitUsage)
 		}
 	}
 }
@@ -385,7 +386,7 @@ func TestParseCreditAmountTrailingZeros(t *testing.T) {
 // 来源名归一成小写：科目按字符串比对，MANUAL 与 manual 不能是两个科目。
 func TestParseGatewayFlagLowercases(t *testing.T) {
 	for _, given := range []string{"manual", "MANUAL", "Manual", "  MANUAL  "} {
-		fs := newFlagSet("wallet credit", flag.ContinueOnError)
+		fs := cli.NewFlagSet("wallet credit", flag.ContinueOnError)
 		gateway := fs.String("gateway", manualGateway, "")
 		if err := fs.Parse([]string{"--gateway", given}); err != nil {
 			t.Fatalf("解析 %q 失败: %v", given, err)
@@ -488,8 +489,8 @@ func TestWalletCreditCommand(t *testing.T) {
 	if !errors.Is(noWalletErr, store.ErrNoWallet) {
 		t.Fatalf("没有钱包时应当返回 store.ErrNoWallet，得到 %v", noWalletErr)
 	}
-	if code := exitCode(noWalletErr); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要改的那一行不存在）", code, exitConflict)
+	if code := cli.ExitCode(noWalletErr); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要改的那一行不存在）", code, cli.ExitConflict)
 	}
 	if rows := txnRows(t, db, txnID); len(rows) != 0 {
 		t.Fatalf("被拒的入账留下了 %d 条分录：%v", len(rows), rows)
@@ -568,8 +569,8 @@ func TestWalletCreditCommand(t *testing.T) {
 	if !errors.Is(conflictErr, store.ErrTxnConflict) {
 		t.Fatalf("同键异参应当返回 store.ErrTxnConflict，得到 %v", conflictErr)
 	}
-	if code := exitCode(conflictErr); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（去看库里那笔是什么）", code, exitConflict)
+	if code := cli.ExitCode(conflictErr); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（去看库里那笔是什么）", code, cli.ExitConflict)
 	}
 	if balance := walletBalance(t, db, userID); balance != "100.00000000" {
 		t.Errorf("冲突之后余额 = %s，期望仍是 100.00000000", balance)
@@ -642,8 +643,8 @@ func TestWalletCreditUnknownUserExitCode(t *testing.T) {
 	if !errors.Is(err, auth.ErrUserNotFound) {
 		t.Errorf("错误链里没有 auth.ErrUserNotFound：%v", err)
 	}
-	if code := exitCode(err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	if code := cli.ExitCode(err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, cli.ExitConflict)
 	}
 }
 
@@ -712,8 +713,8 @@ func TestWalletAdjustRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -811,8 +812,8 @@ func TestWalletAdjustUnknownUserExitCode(t *testing.T) {
 	if !strings.Contains(byErr.Error(), "--by") {
 		t.Errorf("错误信息 %q 里没有点出 --by", byErr)
 	}
-	if code := exitCode(byErr); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	if code := cli.ExitCode(byErr); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, cli.ExitConflict)
 	}
 
 	ownerErr := runCaptured(t, func() error {
@@ -827,8 +828,8 @@ func TestWalletAdjustUnknownUserExitCode(t *testing.T) {
 	if !strings.Contains(ownerErr.Error(), "--user") {
 		t.Errorf("错误信息 %q 里没有点出 --user", ownerErr)
 	}
-	if code := exitCode(ownerErr); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, exitConflict)
+	if code := cli.ExitCode(ownerErr); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要查的那一行不存在）", code, cli.ExitConflict)
 	}
 }
 
@@ -878,8 +879,8 @@ func TestWalletAdjustCommand(t *testing.T) {
 	if !errors.Is(noWalletErr, store.ErrNoWallet) {
 		t.Fatalf("没有钱包时应当返回 store.ErrNoWallet，得到 %v", noWalletErr)
 	}
-	if code := exitCode(noWalletErr); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（要改的那一行不存在）", code, exitConflict)
+	if code := cli.ExitCode(noWalletErr); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（要改的那一行不存在）", code, cli.ExitConflict)
 	}
 	if rows := txnRows(t, db, txnID); len(rows) != 0 {
 		t.Fatalf("被拒的调账留下了 %d 条分录：%v", len(rows), rows)
@@ -969,8 +970,8 @@ func TestWalletAdjustCommand(t *testing.T) {
 	if !errors.Is(conflictErr, store.ErrTxnConflict) {
 		t.Fatalf("同键异参应当返回 store.ErrTxnConflict，得到 %v", conflictErr)
 	}
-	if code := exitCode(conflictErr); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（去看库里那笔是什么）", code, exitConflict)
+	if code := cli.ExitCode(conflictErr); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（去看库里那笔是什么）", code, cli.ExitConflict)
 	}
 	if balance := walletBalance(t, db, userID); balance != "60.00000000" {
 		t.Errorf("冲突之后余额 = %s，期望仍是 60.00000000", balance)
@@ -1068,8 +1069,8 @@ func TestWalletAdjustAmountEdges(t *testing.T) {
 	if !strings.Contains(zeroErr.Error(), "为零") {
 		t.Errorf("错误信息 %q 里没有提到金额为零", zeroErr)
 	}
-	if code := exitCode(zeroErr); code != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d（这条判据在账本那一层，不是参数错）", code, exitFailure)
+	if code := cli.ExitCode(zeroErr); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d（这条判据在账本那一层，不是参数错）", code, cli.ExitFailure)
 	}
 }
 
@@ -1157,8 +1158,8 @@ func TestWalletAdjustOverflowAtAmountBoundary(t *testing.T) {
 	if !strings.Contains(overErr.Error(), "超出金额可表示的范围") {
 		t.Errorf("错误信息 %q 里没有说明是超出表示范围", overErr)
 	}
-	if code := exitCode(overErr); code != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（这一条判的是参数量级）", code, exitUsage)
+	if code := cli.ExitCode(overErr); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（这一条判的是参数量级）", code, cli.ExitUsage)
 	}
 	if rows := txnRows(t, db, txnIDForAdjustment(overRef)); len(rows) != 0 {
 		t.Errorf("被拒的调账留下了 %d 条分录：%v", len(rows), rows)
@@ -1196,8 +1197,8 @@ func TestWalletAdjustOverflowAtAmountBoundary(t *testing.T) {
 		t.Errorf("错误链里没有 money.ErrOverflow：%v", pastErr)
 	}
 	// 退出码 1 而不是 2：这一条不是参数错，是库里的数读不出来。
-	if code := exitCode(pastErr); code != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d（读余额失败，不是参数错）", code, exitFailure)
+	if code := cli.ExitCode(pastErr); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d（读余额失败，不是参数错）", code, cli.ExitFailure)
 	}
 	// 连重放也走不到重放判定：它同样在这一步失败，库里一行都不该多出来。
 	pastReplayErr := adjust(firstAmount, "先调一笔", replayRef)
@@ -1221,8 +1222,8 @@ func TestWalletListRejectsPositionalArgs(t *testing.T) {
 	if !strings.Contains(err.Error(), "不接受位置参数") {
 		t.Fatalf("错误信息 %q 里没有「不接受位置参数」", err.Error())
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 	}
 }
 
@@ -1326,7 +1327,7 @@ func TestWalletListForUserWithoutWalletIsEmpty(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("没开户的用户上也应当成功（列出来是空的）: %v", r.err)
 	}
-	if want := emptyListNote("钱包", "wallet create"); !strings.Contains(r.stdout, want) {
+	if want := cli.EmptyListNote("钱包", "wallet create"); !strings.Contains(r.stdout, want) {
 		t.Errorf("空清单的输出里没有 %q：%q", want, r.stdout)
 	}
 }
@@ -1343,8 +1344,8 @@ func TestWalletListUnknownUserIsAConflict(t *testing.T) {
 	if !errors.Is(r.err, auth.ErrUserNotFound) {
 		t.Errorf("错误 %v 不是 ErrUserNotFound", r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitConflict)
 	}
 }
 
@@ -1361,10 +1362,10 @@ func TestWalletListJSONShape(t *testing.T) {
 	}
 	// 另一个用户不建钱包：它是下面「空清单」那一档的输入。
 	// 两个用户都在切到 json 之前建好——写类的命令会拒掉 --format json
-	// （见 format.go 的 jsonUnsupported），在那一档里建不了。
+	// （见 cli 包的 format.go 的 jsonUnsupported），在那一档里建不了。
 	withoutWallet := strconv.FormatInt(createTestUser(t), 10)
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runWallet, []string{"list", "--user", ref})
 	if r.err != nil {
 		t.Fatalf("wallet list -o json 失败: %v", r.err)
@@ -1387,7 +1388,7 @@ func TestWalletListJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
 	}
-	if got.Status != jsonOK || got.Summary.Total != 1 || len(got.Wallets) != 1 {
+	if got.Status != cli.JSONOK || got.Summary.Total != 1 || len(got.Wallets) != 1 {
 		t.Fatalf("形状不对：status=%q total=%d 行数=%d\n%s",
 			got.Status, got.Summary.Total, len(got.Wallets), r.stdout)
 	}
@@ -1513,8 +1514,8 @@ func TestWalletListKeepsRowsWhenOneBalanceIsUnreadable(t *testing.T) {
 	if r.err == nil {
 		t.Fatalf("有一格读不出来时命令应当退出非零，stdout=\n%s", r.stdout)
 	}
-	if code := exitCode(r.err); code != exitFailure {
-		t.Errorf("退出码 = %d，想要 %d", code, exitFailure)
+	if code := cli.ExitCode(r.err); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitFailure)
 	}
 
 	// 好行照打：这正是 #777 要的那件事。用户名那一栏也照旧来自 users 表。
@@ -1572,8 +1573,8 @@ func TestWalletListKeepsRowsWhenOneBalanceIsUnreadable(t *testing.T) {
 	if other.err != nil {
 		t.Fatalf("筛一个读得出来的用户不该失败: %v", other.err)
 	}
-	if code := exitCode(other.err); code != exitOK {
-		t.Errorf("没有坏行时退出码 = %d，想要 %d", code, exitOK)
+	if code := cli.ExitCode(other.err); code != cli.ExitOK {
+		t.Errorf("没有坏行时退出码 = %d，想要 %d", code, cli.ExitOK)
 	}
 }
 
@@ -1605,13 +1606,13 @@ func TestWalletListJSONMarksUnreadableCells(t *testing.T) {
 	seedOverRangeWallet(t, db, badBalanceID, "balance")
 	seedOverRangeWallet(t, db, badFrozenID, "frozen")
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runWallet, []string{"list"})
 	if r.err == nil {
 		t.Fatal("有读不出来的格子时应当退出非零")
 	}
-	if code := exitCode(r.err); code != exitFailure {
-		t.Errorf("退出码 = %d，想要 %d", code, exitFailure)
+	if code := cli.ExitCode(r.err); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitFailure)
 	}
 	// 清单照打：报告比退出码更先被看到，而「退 1」不该同时意味着「stdout 是空的」。
 	assertOnlyJSON(t, r.stdout)
@@ -1633,12 +1634,12 @@ func TestWalletListJSONMarksUnreadableCells(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
 	}
-	if got.Status != jsonFailed {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonFailed)
+	if got.Status != cli.JSONFailed {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONFailed)
 	}
 	// exit_code 与进程真正退出的那个码必须是同一个数（见 docs/cli-output.md）。
-	if got.Exit != exitFailure {
-		t.Errorf("exit_code = %d，想要 %d", got.Exit, exitFailure)
+	if got.Exit != cli.ExitFailure {
+		t.Errorf("exit_code = %d，想要 %d", got.Exit, cli.ExitFailure)
 	}
 	if got.Summary.UnreadableRows != 2 {
 		t.Errorf("unreadable_rows = %d，想要 2（一行坏余额、一行坏冻结额）", got.Summary.UnreadableRows)
@@ -1675,7 +1676,7 @@ func TestWalletListJSONMarksUnreadableCells(t *testing.T) {
 				t.Errorf("好行的余额 = %v，想要 0.00000000", w.Balance)
 			}
 			// 好行的 unreadable 是空数组而不是 null 或省略：键在、值是空，
-			// 「这一栏有，一个都没有」（见 format.go 的 jsonList）。
+			// 「这一栏有，一个都没有」（见 cli 包的 format.go 的 jsonList）。
 			if w.Unreadable == nil || len(w.Unreadable) != 0 {
 				t.Errorf("好行的 unreadable = %v，想要空数组", w.Unreadable)
 			}
@@ -1701,13 +1702,13 @@ func TestWalletListJSONNarrowQueryOnUnreadableRow(t *testing.T) {
 	}
 	seedOverRangeWallet(t, db, badID, "balance")
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runWallet, []string{"list", "--user", bad})
 	if r.err == nil {
 		t.Fatal("窄查询撞上读不出来的那一格时应当失败")
 	}
-	if code := exitCode(r.err); code != exitFailure {
-		t.Errorf("退出码 = %d，想要 %d", code, exitFailure)
+	if code := cli.ExitCode(r.err); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitFailure)
 	}
 	// 半个 JSON 文档比没有更难用：解析器拿到的是截断的输入，而该说的那件事
 	// （哪一行、哪一栏、原文是什么）本来也不在文档里。

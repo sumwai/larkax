@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -65,8 +66,8 @@ func TestModelAliasRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -91,8 +92,8 @@ func TestModelAliasAddRejects(t *testing.T) {
 		if !strings.Contains(r.err.Error(), name) {
 			t.Errorf("错误 %q 没有点名冲突的名字 %q", r.err, name)
 		}
-		if got := exitCode(r.err); got != exitConflict {
-			t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+		if got := cli.ExitCode(r.err); got != cli.ExitConflict {
+			t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 		}
 	})
 
@@ -105,8 +106,8 @@ func TestModelAliasAddRejects(t *testing.T) {
 		if !strings.Contains(r.err.Error(), missing) {
 			t.Errorf("错误 %q 没有点名不存在的规范名 %q", r.err, missing)
 		}
-		if got := exitCode(r.err); got != exitConflict {
-			t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+		if got := cli.ExitCode(r.err); got != cli.ExitConflict {
+			t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 		}
 	})
 
@@ -125,8 +126,8 @@ func TestModelAliasAddRejects(t *testing.T) {
 		if !strings.Contains(r.err.Error(), alias) {
 			t.Errorf("错误 %q 没有点名别名 %q", r.err, alias)
 		}
-		if got := exitCode(r.err); got != exitConflict {
-			t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+		if got := cli.ExitCode(r.err); got != cli.ExitConflict {
+			t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 		}
 	})
 
@@ -139,8 +140,8 @@ func TestModelAliasAddRejects(t *testing.T) {
 		if !strings.Contains(r.err.Error(), alias) {
 			t.Errorf("错误 %q 没有点名别名 %q", r.err, alias)
 		}
-		if got := exitCode(r.err); got != exitConflict {
-			t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+		if got := cli.ExitCode(r.err); got != cli.ExitConflict {
+			t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 		}
 	})
 }
@@ -183,7 +184,7 @@ func TestModelAliasAddThenList(t *testing.T) {
 //
 // 这一条走渲染函数而不是命令：别名表是全局的，别的用例建过的行会让真表非空，
 // 而这里要钉的是「一条都没有时打哪句话」。命令那一侧的空表行为由同一份
-// 渲染函数回答，没有第二处会拼这句话（见 style.go 的 emptyListNote）。
+// 渲染函数回答，没有第二处会拼这句话（见 cli 包的 style.go 的 emptyListNote）。
 func TestModelAliasListEmptyWording(t *testing.T) {
 	var buf strings.Builder
 	printModelAliasList(&buf, nil)
@@ -496,8 +497,8 @@ func TestModelTraceTableAndJSONAgree(t *testing.T) {
 	if err := json.Unmarshal(raw, &back); err != nil {
 		t.Fatalf("反序列化失败: %v", err)
 	}
-	if back["status"] != jsonOK {
-		t.Errorf("status = %v，期望 %s", back["status"], jsonOK)
+	if back["status"] != cli.JSONOK {
+		t.Errorf("status = %v，期望 %s", back["status"], cli.JSONOK)
 	}
 	if back["requested"] != "fast" || back["canonical"] != "m-1" {
 		t.Errorf("json 里的名字 = (%v, %v)，期望 (fast, m-1)", back["requested"], back["canonical"])
@@ -536,8 +537,8 @@ func TestModelTraceJSONBroken(t *testing.T) {
 		t.Fatalf("诊断出错: %v", err)
 	}
 	doc := modelTraceDoc(tr)
-	if doc["status"] != jsonFailed {
-		t.Errorf("status = %v，期望 %s", doc["status"], jsonFailed)
+	if doc["status"] != cli.JSONFailed {
+		t.Errorf("status = %v，期望 %s", doc["status"], cli.JSONFailed)
 	}
 	if doc["broken_at"] != traceSegmentUpstream {
 		t.Errorf("broken_at = %v，期望 %s", doc["broken_at"], traceSegmentUpstream)
@@ -564,10 +565,10 @@ func TestModelTraceCauseCarriesExitCode(t *testing.T) {
 	if cause == nil {
 		t.Fatal("断链时没有退出码：把断点当成了一次成功")
 	}
-	if got := exitCode(cause); got != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+	if got := cli.ExitCode(cause); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitFailure)
 	}
-	if !reportedOnly(cause) {
+	if !cli.ReportedOnly(cause) {
 		t.Error("断链的结论已经由报告说清楚了，不该让 main 再补打一行")
 	}
 

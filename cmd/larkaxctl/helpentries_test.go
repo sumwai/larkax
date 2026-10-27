@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // ── 帮助入口：清单从注册表派生，不手抄 ──────────────────────────────────
@@ -141,7 +143,7 @@ func runHelpForm(t *testing.T, path, form string) (bool, string) {
 	stdout, stderr := captureStreams(t, func() {
 		err = dispatch(append(strings.Fields(path), form))
 	})
-	if err != nil && !helpRequested(err) {
+	if err != nil && !cli.HelpRequested(err) {
 		return false, stdout + stderr
 	}
 	return true, stdout + stderr

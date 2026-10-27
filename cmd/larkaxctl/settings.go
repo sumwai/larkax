@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/settings"
 )
@@ -78,10 +79,10 @@ const settingsTimeout = 30 * time.Second
 var settingsActions = []string{"list", "get", "set"}
 
 func runSettings(args []string) error {
-	fs := newFlagSet("settings", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
+	fs := cli.NewFlagSet("settings", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, settingsShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	rest := fs.Args()
@@ -89,7 +90,7 @@ func runSettings(args []string) error {
 		// 缺子命令才打整段用法：这时人还没开始用，用法正是他要的。写错一个
 		// 值的那些分支不打——用法会把他真正要看的那一句挤走。
 		fs.Usage()
-		return usageErr(errors.New("settings 需要子命令"))
+		return cli.UsageErr(errors.New("settings 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -101,27 +102,18 @@ func runSettings(args []string) error {
 	case "set":
 		return runSettingsSet(rest)
 	default:
-		return usageErr(fmt.Errorf("未知的 settings 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 settings 子命令 %q", action))
 	}
 }
 
-// errSettingsNotFound 表示要看的那个键在 settings 表里没有行。
-//
-// 由命令自己造，不是从包里拿：internal/settings 有一个 ErrUnknownKey，但它是
-// **写入路径**的哨兵——`settings set` 撞上它时给的退出码是 1（键名与取值由
-// settings 包校验的那一档，见 docs/cli-reference.md 的退出码一节）。读这一侧
-// 要的是「要查的那一行不在」，那是 4。两者共用一个错误值的话，改其中一个的
-// 分类就把另一个的退出码也带跑了（与 errSnapshotNotFound 同一个位置）。
-var errSettingsNotFound = errors.New("settings 里没有这一行")
-
 func runSettingsList(args []string) error {
-	fs := newFlagSet("settings list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
+	fs := cli.NewFlagSet("settings list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, settingsShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withSettingsDB(func(ctx context.Context, _ *sql.DB, src *settings.PgSource) error {
@@ -130,8 +122,8 @@ func runSettingsList(args []string) error {
 			return fmt.Errorf("读取 settings 失败: %w", err)
 		}
 		// 表先打出来。json 那一档在这里什么都不打，它打的是下面那份文档。
-		if !jsonOutput() {
-			printSettingsList(humanStdout(), entries, verboseOutput)
+		if !cli.JSONOutput() {
+			printSettingsList(cli.HumanStdout(), entries, cli.VerboseOutput)
 		}
 
 		// 列完之后再让 Load 校验一遍。它跑的是**服务启动时那一份**校验
@@ -155,8 +147,8 @@ func runSettingsList(args []string) error {
 			loadErr = fmt.Errorf("这套配置服务加载不起来: %w", loadErr)
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, settingsListDoc(entries), loadErr)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, settingsListDoc(entries), loadErr)
 		}
 		return loadErr
 	})
@@ -166,17 +158,17 @@ func runSettingsList(args []string) error {
 //
 // 只读，不要主密钥：它不改任何东西，与 list 同一条。
 func runSettingsGet(args []string) error {
-	fs := newFlagSet("settings get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
+	fs := cli.NewFlagSet("settings get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, settingsShortUsage) }
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q：键用 --key 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("get 不接受位置参数，得到 %q：键用 --key 指定", fs.Arg(0)))
 	}
 	if *key == "" {
-		return usageErr(errors.New("缺少 --key：要看哪一个配置项"))
+		return cli.UsageErr(errors.New("缺少 --key：要看哪一个配置项"))
 	}
 
 	return withSettingsDB(func(ctx context.Context, _ *sql.DB, src *settings.PgSource) error {
@@ -188,11 +180,11 @@ func runSettingsGet(args []string) error {
 			return settingsMissing(*key)
 		}
 		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把上面那张表转成 JSON
-		// （见 format.go 开头）。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, settingsGetDoc(e), nil)
+		// （见 cli 包的 format.go 开头）。
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, settingsGetDoc(e), nil)
 		}
-		printSettingsDetail(humanStdout(), e, verboseOutput)
+		printSettingsDetail(cli.HumanStdout(), e, cli.VerboseOutput)
 		return nil
 	})
 }
@@ -205,10 +197,10 @@ func runSettingsGet(args []string) error {
 func settingsMissing(key string) error {
 	if _, declared := settings.Lookup(key); declared {
 		return fmt.Errorf("%w：settings.%s 在 Registry 里声明过，库里却没有这一行——"+
-			"写它的那条迁移跑到了吗", errSettingsNotFound, key)
+			"写它的那条迁移跑到了吗", cli.ErrSettingsNotFound, key)
 	}
 	return fmt.Errorf("%w：settings.%s 在 Registry 里也没有声明，先看键名有没有写错",
-		errSettingsNotFound, key)
+		cli.ErrSettingsNotFound, key)
 }
 
 // printSettingsDetail 打出一个配置项。
@@ -220,7 +212,7 @@ func settingsMissing(key string) error {
 // get 里都会出现，属于「每一次成功运行都有的解释」（见 docs/cli-output.md 的
 // 「提示与警告」）。
 func printSettingsDetail(w io.Writer, e settings.Entry, verbose bool) {
-	p := newPalette(w)
+	p := cli.NewPalette(w)
 	if verbose {
 		_, _ = fmt.Fprintln(w, "值打的是 settings.value 的 jsonb 原文：字符串带引号，布尔与整数不带。")
 	}
@@ -244,9 +236,9 @@ func printSettingsDetail(w io.Writer, e settings.Entry, verbose bool) {
 		by = strconv.FormatInt(*e.UpdatedBy, 10)
 	}
 
-	tw := newTableWriter(w)
+	tw := cli.NewTableWriter(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("键", e.Key)
 	row("值", string(e.Value))
@@ -273,7 +265,7 @@ func printSettingsDetail(w io.Writer, e settings.Entry, verbose bool) {
 // 字段名时，对读它的脚本来说那就是两件事。这里是 list 收成一条，不是另一种详情
 // （与 apikey get 同一条理由）。
 func settingsGetDoc(e settings.Entry) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["setting"] = settingsEntry(e)
 	return doc
 }
@@ -292,33 +284,33 @@ func settingsGetDoc(e settings.Entry) map[string]any {
 // 是安全的，走位置参数会被当成一个旗标。
 func runSettingsSet(args []string) error {
 	// 在**函数体第一行**拦下来，早于 flag 解析、更早于连库：这条命令会写进
-	// settings 表，做完再报不支持就成了一次没人知道的写入（见 format.go）。
-	if err := jsonUnsupported("settings set"); err != nil {
+	// settings 表，做完再报不支持就成了一次没人知道的写入（见 cli 包的 format.go）。
+	if err := cli.JSONUnsupported("settings set"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("settings set", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, settingsShortUsage) }
+	fs := cli.NewFlagSet("settings set", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, settingsShortUsage) }
 	keyFlag := fs.String("key", "", "")
 	valueFlag := fs.String("value", "", "")
 	by := fs.String("by", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	// 参数检查全部发生在连库之前（与 apikey / user 同一条约定）：
 	// 一个写错的命令不该先连上生产库再报错，而「连上库之后才发现参数不对」
 	// 还有一个更坏的可能——它没报错。
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q：键用 --key、值用 --value", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("set 不接受位置参数，得到 %q：键用 --key、值用 --value", fs.Arg(0)))
 	}
 	key, plain := *keyFlag, *valueFlag
 
 	if key == "" {
-		return usageErr(errors.New("缺少 --key：要改哪一个配置项"))
+		return cli.UsageErr(errors.New("缺少 --key：要改哪一个配置项"))
 	}
 	if *by == "" {
-		return usageErr(errors.New("缺少 --by：这条命令要记下是谁改的配置"))
+		return cli.UsageErr(errors.New("缺少 --by：这条命令要记下是谁改的配置"))
 	}
 
 	// 键名与值的类型都在这里就校验掉（见 settings.EncodeValue）。
@@ -340,7 +332,7 @@ func runSettingsSet(args []string) error {
 			return err
 		}
 
-		printSettingsSetResult(humanStderr(), key, value, actor.Username)
+		printSettingsSetResult(cli.HumanStderr(), key, value, actor.Username)
 		return nil
 	})
 }
@@ -390,7 +382,7 @@ func printSettingsList(w io.Writer, entries []settings.Entry, verbose bool) {
 		return
 	}
 
-	p := newPalette(w)
+	p := cli.NewPalette(w)
 	if verbose {
 		_, _ = fmt.Fprintln(w, "值打的是 settings.value 的 jsonb 原文：字符串带引号，布尔与整数不带。")
 	}
@@ -415,7 +407,7 @@ func printSettingsList(w io.Writer, entries []settings.Entry, verbose bool) {
 		}
 
 		_, _ = fmt.Fprintf(w, "%s = %s  [%s]  可改 %s  改自 %s  改于 %s\n",
-			p.bold(e.Key), e.Value, kind, editable, by, p.dim(e.UpdatedAt.Format(time.RFC3339)))
+			p.Bold(e.Key), e.Value, kind, editable, by, p.Dim(e.UpdatedAt.Format(time.RFC3339)))
 		if e.Description != "" {
 			_, _ = fmt.Fprintf(w, "  说明：%s\n", e.Description)
 		}
@@ -434,15 +426,15 @@ func printSettingsList(w io.Writer, entries []settings.Entry, verbose bool) {
 
 // settingsListDoc 组装 settings list 的机器可读输出。
 //
-// 与 printSettingsList 是同一份数据的另一条渲染路径（见 format.go 开头）。
+// 与 printSettingsList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）。
 // 那句「值打的是 settings.value 的 jsonb 原文」（表格那一档只在 -v 下打）不进
 // 这里：它是给终端里看表的人的一句说明，而 JSON 里值本身就是原文，没有第二种
 // 读法要交代。
 func settingsListDoc(entries []settings.Entry) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(entries)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	rows := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
 		rows = append(rows, settingsEntry(e))
@@ -466,7 +458,7 @@ func settingsEntry(e settings.Entry) map[string]any {
 	var kind, unwired any
 	if spec, ok := settings.Lookup(e.Key); ok {
 		kind = string(spec.Kind)
-		unwired = nullableString(spec.Unwired)
+		unwired = cli.NullableString(spec.Unwired)
 	}
 
 	var updatedBy any
@@ -484,10 +476,10 @@ func settingsEntry(e settings.Entry) map[string]any {
 		"updated_by": updatedBy,
 		// 走 jsonTime（恒 UTC、完整精度），不走表格那一档的 Format：库里
 		// 交回来的是带会话时区的时刻，直接打出来同一行在两台机器上不一样。
-		"updated_at": jsonTime(e.UpdatedAt),
+		"updated_at": cli.JSONTime(e.UpdatedAt),
 		// 空说明给 null 而不给空串：那一列是 NOT NULL DEFAULT ''，所以空串就是
 		// 「这一行没有说明」，而 null 才是机器读得懂的那个「没有值」。
-		"description": nullableString(e.Description),
+		"description": cli.NullableString(e.Description),
 		"unwired":     unwired,
 	}
 }

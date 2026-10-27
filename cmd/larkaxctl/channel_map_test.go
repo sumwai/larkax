@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 )
 
@@ -289,8 +290,8 @@ func TestChannelMapRemoveBothScopes(t *testing.T) {
 	if !errors.Is(err, catalog.ErrAliasNotFound) {
 		t.Errorf("重复删除期望 ErrAliasNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("重复删除的退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("重复删除的退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 
 	if err := remove("--all-channels", canonical); err != nil {
@@ -374,8 +375,8 @@ func TestChannelMapRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -459,10 +460,10 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 	}
 
 	// -v：多打那一句，按行逐字相等（不只看包含关系）。
-	savedVerbose := verboseOutput
-	verboseOutput = true
+	savedVerbose := cli.VerboseOutput
+	cli.VerboseOutput = true
 	verboseOut, verboseErr := resolve(t)
-	verboseOutput = savedVerbose
+	cli.VerboseOutput = savedVerbose
 	if strings.TrimSpace(verboseOut) != upstream {
 		t.Errorf("resolve -v 的 stdout = %q，期望 %q", verboseOut, upstream)
 	}
@@ -478,13 +479,13 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 	}
 
 	// -q：默认与 -v 两种都不打（人读那一档整档丢弃）。
-	savedQuiet := quietOutput
-	quietOutput = true
+	savedQuiet := cli.QuietOutput
+	cli.QuietOutput = true
 	_, quietErr := resolve(t)
-	verboseOutput = true
+	cli.VerboseOutput = true
 	_, quietVerboseErr := resolve(t)
-	verboseOutput = savedVerbose
-	quietOutput = savedQuiet
+	cli.VerboseOutput = savedVerbose
+	cli.QuietOutput = savedQuiet
 	for name, stderr := range map[string]string{
 		"默认": quietErr,
 		"-v": quietVerboseErr,
@@ -495,10 +496,10 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 	}
 
 	// --format json：stdout 是原来那份信封，逐字节不变；stderr 不出现这句。
-	savedFormat := outputFormat
-	outputFormat = formatJSON
+	savedFormat := cli.OutputFormat
+	cli.OutputFormat = cli.FormatJSON
 	jsonOut, jsonErr := resolve(t)
-	outputFormat = savedFormat
+	cli.OutputFormat = savedFormat
 	wantJSON := "{\n" +
 		"  \"canonical\": \"" + canonical + "\",\n" +
 		"  \"channel_id\": null,\n" +
@@ -532,9 +533,9 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 	if missingDeleteErr == nil {
 		t.Fatal("删除不存在的别名应当报错")
 	}
-	if got := exitCode(missingDeleteErr); got != exitConflict {
+	if got := cli.ExitCode(missingDeleteErr); got != cli.ExitConflict {
 		t.Errorf("删除不存在的别名的退出码应当是 %d，得到 %d（%v）",
-			exitConflict, got, missingDeleteErr)
+			cli.ExitConflict, got, missingDeleteErr)
 	}
 	if !strings.Contains(missingStderr, "larkaxctl channel unmap") {
 		t.Errorf("失败路径没有点名新命令：%q", missingStderr)
@@ -546,8 +547,8 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 		if parseErr == nil {
 			t.Fatal("缺少 --upstream 应当被拒")
 		}
-		if got := exitCode(parseErr); got != exitUsage {
-			t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+		if got := cli.ExitCode(parseErr); got != cli.ExitUsage {
+			t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 		}
 	})
 	if strings.Contains(usageStderr, "larkaxctl channel map") {
@@ -556,7 +557,7 @@ func TestLegacyAliasPathsPointToChannelMap(t *testing.T) {
 
 	// 帮助页也要点名。
 	helpOut, _ := captureStreams(t, func() {
-		if err := runAlias([]string{"-h"}); err != nil && !helpRequested(err) {
+		if err := runAlias([]string{"-h"}); err != nil && !cli.HelpRequested(err) {
 			t.Fatalf("alias -h 失败: %v", err)
 		}
 	})
@@ -582,8 +583,8 @@ func TestChannelMapAddRejectsControlChars(t *testing.T) {
 	if err == nil {
 		t.Fatal("上游模型名里的控制字符应当被拒")
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码应当是 %d，得到 %d（%v）", exitUsage, got, err)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码应当是 %d，得到 %d（%v）", cli.ExitUsage, got, err)
 	}
 }
 

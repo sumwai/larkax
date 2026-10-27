@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 )
 
@@ -84,8 +85,8 @@ func TestAliasCreateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -102,8 +103,8 @@ func TestAliasListRejectsBothModes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "只能给一个") {
 		t.Fatalf("两个都给应当被拒，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -250,8 +251,8 @@ func TestAliasCreateRejectsDuplicateCanonicalInScope(t *testing.T) {
 	if err == nil {
 		t.Fatal("同一个范围里第二个上游名应当被拒")
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码应当是 %d，得到 %d（%v）", exitConflict, got, err)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码应当是 %d，得到 %d（%v）", cli.ExitConflict, got, err)
 	}
 }
 
@@ -276,8 +277,8 @@ func TestAliasUpdateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -304,8 +305,8 @@ func TestAliasResolveRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -381,8 +382,8 @@ func TestAliasUpdateAndDelete(t *testing.T) {
 	if !errors.Is(err, catalog.ErrAliasIDNotFound) {
 		t.Errorf("重复删除期望 ErrAliasIDNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("重复删除的退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("重复删除的退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 
@@ -537,8 +538,8 @@ func TestAliasResolveMissingForThisChannel(t *testing.T) {
 	if !errors.Is(err, catalog.ErrAliasNotFound) {
 		t.Errorf("期望 catalog.ErrAliasNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 
@@ -584,7 +585,7 @@ func TestAliasListDocIsMachineReadable(t *testing.T) {
 	}
 
 	got := jsonRoundTrip(t, aliasListDoc(aliases))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
 
 	list := jsonEntries(t, got, "aliases")
@@ -615,7 +616,7 @@ func TestAliasListDocIsMachineReadable(t *testing.T) {
 func TestAliasResolveDocIsMachineReadable(t *testing.T) {
 	t.Run("平台级", func(t *testing.T) {
 		got := jsonRoundTrip(t, aliasResolveDoc("m1", 0, "up-1"))
-		assertJSONField(t, got, "status", jsonOK)
+		assertJSONField(t, got, "status", cli.JSONOK)
 		assertJSONField(t, got, "canonical", "m1")
 		// 表格那一档把范围打成「平台级」；机器读的那一档是 null。
 		assertJSONField(t, got, "channel_id", nil)
@@ -631,7 +632,7 @@ func TestAliasResolveDocIsMachineReadable(t *testing.T) {
 
 // TestAliasWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
 func TestAliasWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	cases := []struct {
 		command string
@@ -651,8 +652,8 @@ func TestAliasWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
 				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 			}
 		})
 	}

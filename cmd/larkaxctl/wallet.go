@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -345,8 +346,8 @@ var walletActions = []string{"create", "credit", "adjust", "refund", "payout", "
 // runWallet 处理 wallet 子命令。
 func runWallet(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, walletShortUsage)
-		return usageErr(errors.New("wallet 需要子命令"))
+		cli.PrintUsage(os.Stderr, walletShortUsage)
+		return cli.UsageErr(errors.New("wallet 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -373,33 +374,33 @@ func runWallet(args []string) error {
 		}
 		return runWalletList(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, walletShortUsage)
+		cli.PrintUsage(os.Stdout, walletShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, walletShortUsage)
-		return usageErr(fmt.Errorf("未知的 wallet 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, walletShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 wallet 子命令 %q", action))
 	}
 }
 
 // runWalletCreate 给一个用户开通钱包。
 func runWalletCreate(args []string) error {
-	if err := jsonUnsupported("wallet create"); err != nil {
+	if err := cli.JSONUnsupported("wallet create"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("wallet create", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
+	fs := cli.NewFlagSet("wallet create", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	asset := fs.String("asset", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("create 不接受位置参数，得到 %q：用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 
 	explicitAsset, assetErr := parseAssetFlag(fs, *asset)
@@ -425,7 +426,7 @@ func runWalletCreate(args []string) error {
 			return openErr
 		}
 
-		printOpenedWallet(humanStdout(), owner, assetValue, created)
+		printOpenedWallet(cli.HumanStdout(), owner, assetValue, created)
 		return nil
 	})
 }
@@ -436,35 +437,35 @@ func runWalletCreate(args []string) error {
 // 交给 store.PostTransaction 落库。记账逻辑一行都不在这里——见
 // internal/ledger 的包注释与 store.PostTransaction 的幂等说明。
 func runWalletCredit(args []string) error {
-	if err := jsonUnsupported("wallet credit"); err != nil {
+	if err := cli.JSONUnsupported("wallet credit"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("wallet credit", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
+	fs := cli.NewFlagSet("wallet credit", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
-	ref := legacyStringFlag(fs, "ref", "idempotency-key", "")
-	stringAlias(fs, ref, "order")
-	autoRef := autoRefFlag(fs)
+	ref := cli.LegacyStringFlag(fs, "ref", "idempotency-key", "")
+	cli.StringAlias(fs, ref, "order")
+	autoRef := cli.AutoRefFlag(fs)
 	gateway := fs.String("gateway", manualGateway, "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"credit 不接受位置参数，得到 %q：用户、金额与幂等键都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 	// 外部单据号必填且**没有默认值**：默认值会把「操作者忘了给单号」变成两笔
 	// 互不相干的入账，而这两笔在账面上都合法——正是最难事后发现的那种错。
-	// --auto-ref 是唯一的例外，而且必须由操作者显式写出来（见 autoref.go）。
-	orderKey, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+	// --auto-ref 是唯一的例外，而且必须由操作者显式写出来（见 cli 包的 autoref.go）。
+	orderKey, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError(
 		"它是这笔入账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经入过账」"))
 	if refErr != nil {
 		return refErr
@@ -510,12 +511,12 @@ func runWalletCredit(args []string) error {
 		}
 
 		if *dryRun {
-			return inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			return cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				applied, postErr := store.New(db).PostTransactionTx(ctx, tx, txn)
 				if postErr != nil {
 					return postErr
 				}
-				printCreditedWallet(humanStdout(), owner, txn, orderKey, applied, true)
+				printCreditedWallet(cli.HumanStdout(), owner, txn, orderKey, applied, true)
 				return nil
 			})
 		}
@@ -525,7 +526,7 @@ func runWalletCredit(args []string) error {
 			return postErr
 		}
 
-		printCreditedWallet(humanStdout(), owner, txn, orderKey, applied, false)
+		printCreditedWallet(cli.HumanStdout(), owner, txn, orderKey, applied, false)
 		return nil
 	})
 }
@@ -536,31 +537,31 @@ func runWalletCredit(args []string) error {
 // ledger.Adjustment 造分录、交给 store.PostTransaction 落库。记账逻辑一行都不在
 // 这里——「一笔调账算哪个科目、对家是谁」是 internal/ledger 已经定好的语义。
 func runWalletAdjust(args []string) error {
-	if err := jsonUnsupported("wallet adjust"); err != nil {
+	if err := cli.JSONUnsupported("wallet adjust"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("wallet adjust", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
+	fs := cli.NewFlagSet("wallet adjust", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	memo := fs.String("memo", "", "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	by := fs.String("by", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"adjust 不接受位置参数，得到 %q：用户、金额、原因、单据号与操作人都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
-	adjustRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+	adjustRef, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError(
 		"它是这笔调账对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经调过账」"))
 	if refErr != nil {
 		return refErr
@@ -573,7 +574,7 @@ func runWalletAdjust(args []string) error {
 	// 看不出少了什么，落库的会是一条只有操作人、没有原因的备注。
 	reason := strings.TrimSpace(*memo)
 	if reason == "" {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"缺少 --memo：调账是唯一没有业务依据的分录，不写清原因，这笔钱事后解释不了"))
 	}
 	// 控制字符在这里挡掉，理由见 checkMemo：回显打的是原样的原因，而库里那一份
@@ -582,7 +583,7 @@ func runWalletAdjust(args []string) error {
 		return memoErr
 	}
 	if strings.TrimSpace(*by) == "" {
-		return usageErr(errors.New("缺少 --by：这条命令要记下是谁调的账"))
+		return cli.UsageErr(errors.New("缺少 --by：这条命令要记下是谁调的账"))
 	}
 	// 与 credit 走同一个解析，只是不判正负：调账的金额**带符号**，负数是
 	// 「把记多的钱扣回来」，零由 ledger.Adjustment 自己拒。
@@ -643,7 +644,7 @@ func runWalletAdjust(args []string) error {
 		// 更贵。
 		after, fits := money.SumChecked(before, amountValue)
 		if !fits {
-			return usageErr(fmt.Errorf(
+			return cli.UsageErr(fmt.Errorf(
 				"这次调账会让用户 %s 的 %s 余额超出金额可表示的范围（现值 %s 加上 %s）：拆成两笔，或先确认那个余额是不是对的",
 				owner.Username, assetValue, before, amountValue))
 		}
@@ -668,7 +669,7 @@ func runWalletAdjust(args []string) error {
 
 		if *dryRun {
 			var applied bool
-			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			dryErr := cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				var postErr error
 				applied, postErr = store.New(db).PostTransactionTx(ctx, tx, txn)
 				return postErr
@@ -676,7 +677,7 @@ func runWalletAdjust(args []string) error {
 			if dryErr != nil {
 				return adjustPostError(owner, assetValue, dryErr)
 			}
-			printAdjustedWallet(humanStdout(), walletAdjustment{
+			printAdjustedWallet(cli.HumanStdout(), walletAdjustment{
 				Owner:    owner,
 				Operator: operator,
 				Asset:    assetValue,
@@ -695,7 +696,7 @@ func runWalletAdjust(args []string) error {
 			return adjustPostError(owner, assetValue, postErr)
 		}
 
-		printAdjustedWallet(humanStdout(), walletAdjustment{
+		printAdjustedWallet(cli.HumanStdout(), walletAdjustment{
 			Owner:    owner,
 			Operator: operator,
 			Asset:    assetValue,
@@ -745,9 +746,9 @@ func adjustPostError(owner auth.User, assetValue ledger.Asset, postErr error) er
 // 显式给的资产在连库之前校验（与 user create / apikey create 同一条约定：
 // 一个写错的命令不该先连上生产库再报错）。留空时只能连库之后读 settings，
 // 那时再校验（见 resolveWalletAsset）。
-func parseAssetFlag(fs *flagSet, asset string) (ledger.Asset, error) {
+func parseAssetFlag(fs *cli.FlagSet, asset string) (ledger.Asset, error) {
 	if providedFlags(fs)["asset"] && strings.TrimSpace(asset) == "" {
-		return "", usageErr(errors.New(
+		return "", cli.UsageErr(errors.New(
 			"--asset 不能为空：不给这个旗标才表示取 settings 的 billing.default_asset"))
 	}
 	if strings.TrimSpace(asset) == "" {
@@ -755,7 +756,7 @@ func parseAssetFlag(fs *flagSet, asset string) (ledger.Asset, error) {
 	}
 	explicit := ledger.Asset(strings.TrimSpace(asset))
 	if !explicit.Valid() {
-		return "", usageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", asset, ledger.AssetCNY))
+		return "", cli.UsageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", asset, ledger.AssetCNY))
 	}
 	return explicit, nil
 }
@@ -826,7 +827,7 @@ func hasControlChar(s string) (rune, bool) {
 // adjust 上没有的 --idempotency-key）等于把人指去一条走不通的路。
 func checkOrderKey(flagName, order string) error {
 	if r, bad := hasControlChar(order); bad {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"%s 不能含控制字符（这里是 %q）：它同时是幂等键与备注里的单据号，"+
 				"带控制字符会让两笔不同的入账在账面上看起来一样",
 			flagName, r))
@@ -848,7 +849,7 @@ func checkOrderKey(flagName, order string) error {
 // 判据比 sanitizeMemo 宽（它只处理 \r\n\t）：\x07 这类照样会原样进终端。
 func checkMemo(flagName, memo string) error {
 	if r, bad := hasControlChar(memo); bad {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"%s 不能含控制字符（这里是 %q）：回显打的是原样的原因，落库那一份会把"+
 				"控制字符换成空格，两边就不是同一个串了",
 			flagName, r))
@@ -866,7 +867,7 @@ func parseCreditAmount(plain string) (money.Amount, error) {
 		return money.Zero, err
 	}
 	if !amount.IsPositive() {
-		return money.Zero, usageErr(fmt.Errorf(
+		return money.Zero, cli.UsageErr(fmt.Errorf(
 			"--amount 必须为正数，得到 %s：入账不带负号，方向由分录决定", amount))
 	}
 	return amount, nil
@@ -889,20 +890,20 @@ func parseAmountFlag(plain string) (money.Amount, error) {
 func parseNamedAmountFlag(flagName, plain string) (money.Amount, error) {
 	trimmed := strings.TrimSpace(plain)
 	if trimmed == "" {
-		return money.Zero, usageErr(fmt.Errorf("缺少 %s", flagName))
+		return money.Zero, cli.UsageErr(fmt.Errorf("缺少 %s", flagName))
 	}
 	// 末尾的 0 不算位数：`1.000000000` 与 `1` 是同一个数，列存得下，没有
 	// 任何东西会被舍掉。不先去尾就拒，会让人以为库有问题。
 	if _, frac, hasDot := strings.Cut(trimmed, "."); hasDot {
 		if kept := strings.TrimRight(frac, "0"); len(kept) > money.Scale {
-			return money.Zero, usageErr(fmt.Errorf(
+			return money.Zero, cli.UsageErr(fmt.Errorf(
 				"%s 最多 %d 位小数，得到 %q：金额列是 numeric(20, %d)，多出来的位存不进去",
 				flagName, money.Scale, plain, money.Scale))
 		}
 	}
 	amount, err := money.Parse(trimmed)
 	if err != nil {
-		return money.Zero, usageErr(fmt.Errorf("%s 不是金额（例如 12.34）: %w", flagName, err))
+		return money.Zero, cli.UsageErr(fmt.Errorf("%s 不是金额（例如 12.34）: %w", flagName, err))
 	}
 	return amount, nil
 }
@@ -916,14 +917,14 @@ func parseNamedAmountFlag(flagName, plain string) (money.Amount, error) {
 // **拼错的那一半不在这里挡**（`manul` 照样会开出新科目）：来源名是自由取值，
 // 没有一份已知来源的清单可以比。真接上支付通道时它应当换成枚举（那时通道由
 // 系统而不是操作者决定），在那之前靠的是 `--help` 里那句「来源是操作者说的」。
-func parseGatewayFlag(fs *flagSet, gateway string) (string, error) {
+func parseGatewayFlag(fs *cli.FlagSet, gateway string) (string, error) {
 	if providedFlags(fs)["gateway"] && strings.TrimSpace(gateway) == "" {
-		return "", usageErr(errors.New(
+		return "", cli.UsageErr(errors.New(
 			"--gateway 不能为空：不给这个旗标才表示 manual（线下到账）"))
 	}
 	name := strings.ToLower(strings.TrimSpace(gateway))
 	if _, err := ledger.ParseAccount(ledger.PaymentGatewayAccount(name).String()); err != nil {
-		return "", usageErr(fmt.Errorf("--gateway %q 不是合法的通道标识: %w", gateway, err))
+		return "", cli.UsageErr(fmt.Errorf("--gateway %q 不是合法的通道标识: %w", gateway, err))
 	}
 	return name, nil
 }
@@ -1034,7 +1035,7 @@ func printCreditedWallet(w io.Writer, owner auth.User, txn ledger.Transaction,
 
 	printEntryLines(w, txn.Entries)
 	if dryRun {
-		printDryRunNote(w)
+		cli.PrintDryRunNote(w)
 	}
 }
 
@@ -1096,20 +1097,20 @@ func printAdjustedWallet(w io.Writer, adj walletAdjustment, applied, dryRun bool
 		_, _ = fmt.Fprintln(w, "此前写入的分录：")
 		printEntryLines(w, adj.Txn.Entries)
 		if dryRun {
-			printDryRunNote(w)
+			cli.PrintDryRunNote(w)
 		}
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	verb := "已调账用户 "
 	if dryRun {
 		verb = "将调账用户 "
 	}
 	_, _ = fmt.Fprintf(w, "%s%s\n", verb, adj.Owner.Username)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	// 资产紧挨着余额：余额那个数单独看没有意义，它总是某个资产上的一个数。
 	row("资产", string(adj.Asset))
@@ -1128,7 +1129,7 @@ func printAdjustedWallet(w io.Writer, adj walletAdjustment, applied, dryRun bool
 	_, _ = fmt.Fprintln(w, header)
 	printEntryLines(w, adj.Txn.Entries)
 	if dryRun {
-		printDryRunNote(w)
+		cli.PrintDryRunNote(w)
 	}
 }
 
@@ -1190,7 +1191,7 @@ func walletAmountJSON(amount money.Amount, err error) any {
 	if err != nil {
 		return nil
 	}
-	return jsonAmount(amount)
+	return cli.JSONAmount(amount)
 }
 
 // maxUnreadableInReport 是那行错误里最多点名几行读不出来的钱包。
@@ -1255,15 +1256,15 @@ func walletUnreadableCause(rows []walletRow) error {
 
 // runWalletList 列出钱包与余额快照。
 func runWalletList(args []string) error {
-	fs := newFlagSet("wallet list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletShortUsage) }
+	fs := cli.NewFlagSet("wallet list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户过滤用 --user", fs.Arg(0)))
 	}
 
 	return withDB(walletTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -1324,11 +1325,11 @@ func runWalletList(args []string) error {
 			return cause
 		}
 
-		// JSON 是另一条渲染路径，不是把上面那张表转成 JSON（见 format.go 开头）。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, walletListDoc(rows, cause), cause)
+		// JSON 是另一条渲染路径，不是把上面那张表转成 JSON（见 cli 包的 format.go 开头）。
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, walletListDoc(rows, cause), cause)
 		}
-		printWalletList(humanStdout(), rows)
+		printWalletList(cli.HumanStdout(), rows)
 		// 清单已经打下去了，这一句只定退出码。main 把那句话原样打到 stderr，
 		// stdout 上仍然是完整的一份清单。
 		return cause
@@ -1364,17 +1365,17 @@ func userNames(ctx context.Context, store *auth.Store) (map[int64]string, error)
 // `--user` 给没给。见那里的「两条路差在这里」。
 func printWalletList(w io.Writer, rows []walletRow) {
 	if len(rows) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("钱包", "wallet create"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("钱包", "wallet create"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-		p.bold("用户 ID"), p.bold("用户名"), p.bold("资产"), p.bold("余额"), p.bold("冻结"))
+		p.Bold("用户 ID"), p.Bold("用户名"), p.Bold("资产"), p.Bold("余额"), p.Bold("冻结"))
 	for _, r := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.FormatInt(r.UserID, 10)), p.bold(r.Username),
+			p.Bold(strconv.FormatInt(r.UserID, 10)), p.Bold(r.Username),
 			string(r.Asset),
 			walletCell(r.Balance, r.BalanceErr), walletCell(r.Frozen, r.FrozenErr))
 	}
@@ -1384,7 +1385,7 @@ func printWalletList(w io.Writer, rows []walletRow) {
 // walletListDoc 组装 wallet list 的机器可读输出。
 //
 // 与 printWalletList 是同一份数据的另一条渲染路径：那一档把金额按定点小数打给
-// 人看，这一档打**字符串**——金额过一遍 float64 会丢精度（见 format.go 的
+// 人看，这一档打**字符串**——金额过一遍 float64 会丢精度（见 cli 包的 format.go 的
 // jsonAmount）。
 //
 // 一格里读不出来的金额打 **null**，不打表格那个标记：占位符进 JSON 会让按金额
@@ -1397,14 +1398,14 @@ func printWalletList(w io.Writer, rows []walletRow) {
 // cause 一并传进来，而不是在这里重新数一遍哪几行有问题：报告里的状态与退出码
 // 必须是同一个判断的两面，两处各数一遍迟早分叉（见 doctor 的同一处提醒）。
 func walletListDoc(rows []walletRow, cause error) map[string]any {
-	status := jsonOK
+	status := cli.JSONOK
 	if cause != nil {
-		status = jsonFailed
+		status = cli.JSONFailed
 	}
-	doc := jsonDoc(status)
+	doc := cli.JSONDoc(status)
 
 	unreadableRows := 0
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		if len(walletUnreadableCells(r)) > 0 {
@@ -1442,7 +1443,7 @@ func walletUnreadableCells(r walletRow) []string {
 func walletEntry(r walletRow) map[string]any {
 	return map[string]any{
 		"user_id":    r.UserID,
-		"username":   nullableString(r.Username),
+		"username":   cli.NullableString(r.Username),
 		"asset":      string(r.Asset),
 		"balance":    walletAmountJSON(r.Balance, r.BalanceErr),
 		"frozen":     walletAmountJSON(r.Frozen, r.FrozenErr),

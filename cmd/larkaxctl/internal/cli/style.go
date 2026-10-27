@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -23,11 +23,11 @@ import (
 // 同理不引 golang.org/x/term：判断标准输出是不是交互终端只需要
 // os.Stdout.Stat() 的 os.ModeCharDevice，标准库足够。
 
-// escByte 是转义序列的起始字节（ESC）。
+// EscByte 是转义序列的起始字节（ESC）。
 //
 // 输出里出现它只可能是一段 ANSI 控制码；按显示宽度算宽度时整段跳过
 // （见 table.go 的 ansiSeqLen）。
-const escByte = 0x1b
+const EscByte = 0x1b
 
 // SGR 参数。写成常量而不是在调用点内联拼 "\x1b[1m"：那种字符串拼错一个字节
 // 不报任何错，只会让终端上多出一段乱码，而这里改一处就全都跟着改。
@@ -42,29 +42,30 @@ const (
 
 // ── 状态符 ──────────────────────────────────────────────────────────────
 
-// glyphKind 是一个状态符表达的意思。
+// GlyphKind 是一个状态符表达的意思。
 //
 // 四档而不是两档：「跳过」（依赖没满足，这一项没查成）与「没跑/不适用」
 // （这一项本来就不在这次范围内）是两件事，用同一个符号表达会让一次什么都
 // 没查的运行看起来像一次查过且没问题的运行——这正是本仓反复踩的那个坑
 // （见 LESSONS.md 第 16 条）。
-type glyphKind int
+type GlyphKind int
 
+// 四档状态：GlyphPass 通过、GlyphFail 失败、GlyphSkip 跳过、GlyphNone 没跑。
 const (
-	glyphPass glyphKind = iota // 通过
-	glyphFail                  // 失败
-	glyphSkip                  // 跳过：依赖没满足
-	glyphNone                  // 没跑 / 不适用
+	GlyphPass GlyphKind = iota // 通过
+	GlyphFail                  // 失败
+	GlyphSkip                  // 跳过：依赖没满足
+	GlyphNone                  // 没跑 / 不适用
 )
 
-// symbol 返回这一档的状态符。
-func (g glyphKind) symbol() string {
+// Symbol 返回这一档的状态符。
+func (g GlyphKind) Symbol() string {
 	switch g {
-	case glyphPass:
+	case GlyphPass:
 		return "✓"
-	case glyphFail:
+	case GlyphFail:
 		return "✗"
-	case glyphSkip:
+	case GlyphSkip:
 		return "!"
 	default:
 		return "-"
@@ -73,14 +74,14 @@ func (g glyphKind) symbol() string {
 
 // ── 着色开关 ────────────────────────────────────────────────────────────
 
-// terminalProbe 判断一个写入目标是不是交互终端。
+// TerminalProbe 判断一个写入目标是不是交互终端。
 //
 // 是变量而不是直接调 os.Stdout.Stat()：用例要能注入一个「永远是终端」的
 // 假实现来覆盖上色那一支，而真实的 TTY 在 `go test` 里拿不到。
 //
 // 真实实现看的是 **w 自己**，不是 os.Stdout：输出写到哪就按哪判断，
 // 于是「命令写文件、日志写终端」这类调用点也不会错判。
-var terminalProbe = func(w io.Writer) bool {
+var TerminalProbe = func(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false
@@ -92,7 +93,7 @@ var terminalProbe = func(w io.Writer) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-// newPalette 决定这一次输出要不要上色。
+// NewPalette 决定这一次输出要不要上色。
 //
 // 三个条件里任何一个成立就**不上色**：
 //
@@ -104,76 +105,76 @@ var terminalProbe = func(w io.Writer) bool {
 //
 // 不上色时输出里**一个转义序列都没有**，而不只是「颜色变成透明」——这两者
 // 在终端上看着一样，在 `| grep` 与文件里差很远。
-func newPalette(w io.Writer) palette {
-	if !terminalProbe(w) {
-		return palette{}
+func NewPalette(w io.Writer) Palette {
+	if !TerminalProbe(w) {
+		return Palette{}
 	}
 	if os.Getenv("NO_COLOR") != "" {
-		return palette{}
+		return Palette{}
 	}
 	if os.Getenv("TERM") == "dumb" {
-		return palette{}
+		return Palette{}
 	}
-	return palette{on: true}
+	return Palette{on: true}
 }
 
-// palette 是这一次输出的着色开关，外加几个具名样式。
+// Palette 是这一次输出的着色开关，外加几个具名样式。
 //
 // 零值表示不上色，每一个方法都退化成「原样返回」，所以调用点不必自己判。
-type palette struct{ on bool }
+type Palette struct{ on bool }
 
 // paint 给 s 套上一段 SGR 参数。
 //
 // 空串原样返回：给空串套两个转义序列会在输出里留下一段看不见的东西——
 // 它在终端上零宽、在对齐里零宽，却在 `grep` 与文件里实实在在存在。
-func (p palette) paint(params, s string) string {
+func (p Palette) paint(params, s string) string {
 	if !p.on || s == "" {
 		return s
 	}
 	return "\x1b[" + params + "m" + s + "\x1b[" + sgrReset + "m"
 }
 
-// dim 把辅助描述（说明、版本号、时间戳）置灰。
-func (p palette) dim(s string) string { return p.paint(sgrDim, s) }
+// Dim 把辅助描述（说明、版本号、时间戳）置灰。
+func (p Palette) Dim(s string) string { return p.paint(sgrDim, s) }
 
-// bold 突出关键实体：表头、主键、出错的那个对象。
-func (p palette) bold(s string) string { return p.paint(sgrBold, s) }
+// Bold 突出关键实体：表头、主键、出错的那个对象。
+func (p Palette) Bold(s string) string { return p.paint(sgrBold, s) }
 
 // glyph 返回状态符，并按那一档上色。
 //
 // 失败那一档用「加粗 + 红」：只加粗在浅色主题下与普通文字分不开，只上色在
 // 被截图或转到纯文本时又全丢了。
-func (p palette) glyph(g glyphKind) string {
+func (p Palette) glyph(g GlyphKind) string {
 	switch g {
-	case glyphPass:
-		return p.paint(sgrGreen, g.symbol())
-	case glyphFail:
-		return p.paint(sgrBold+";"+sgrRed, g.symbol())
-	case glyphSkip:
-		return p.paint(sgrYellow, g.symbol())
+	case GlyphPass:
+		return p.paint(sgrGreen, g.Symbol())
+	case GlyphFail:
+		return p.paint(sgrBold+";"+sgrRed, g.Symbol())
+	case GlyphSkip:
+		return p.paint(sgrYellow, g.Symbol())
 	default:
-		return p.paint(sgrDim, g.symbol())
+		return p.paint(sgrDim, g.Symbol())
 	}
 }
 
 // conclusion 按结论的档位处理那一行结论本身。
 //
 // 通过项与跳过项整体置灰：一屏里最重要的信息是「哪几项不正常」，而它们不是。
-func (p palette) conclusion(g glyphKind, s string) string {
-	if g == glyphFail {
-		return p.bold(s)
+func (p Palette) conclusion(g GlyphKind, s string) string {
+	if g == GlyphFail {
+		return p.Bold(s)
 	}
-	return p.dim(s)
+	return p.Dim(s)
 }
 
 // title 是那一行的标题。
 //
 // 失败项加粗：它是这次运行里要看的对象。其余置灰，与结论一起退到背景里。
-func (p palette) title(g glyphKind, s string) string {
-	if g == glyphFail {
-		return p.bold(s)
+func (p Palette) title(g GlyphKind, s string) string {
+	if g == GlyphFail {
+		return p.Bold(s)
 	}
-	return p.dim(s)
+	return p.Dim(s)
 }
 
 // ── 按显示宽度补空格 ────────────────────────────────────────────────────
@@ -183,7 +184,7 @@ func (p palette) title(g glyphKind, s string) string {
 // 补的是**显示宽度**（displayWidth 会跳过样式码，见 table.go），所以
 // 先上色再补空格与先补空格再上色结果一样——调用点不必挑顺序。
 func padRight(s string, width int) string {
-	if gap := width - displayWidth(s); gap > 0 {
+	if gap := width - DisplayWidth(s); gap > 0 {
 		return s + strings.Repeat(" ", gap)
 	}
 	return s
@@ -191,7 +192,7 @@ func padRight(s string, width int) string {
 
 // ── 帮助文本上色 ────────────────────────────────────────────────────────
 
-// paintHelp 给一份帮助文本上色：只加样式码，一个字符都不增删。
+// PaintHelp 给一份帮助文本上色：只加样式码，一个字符都不增删。
 //
 // # 为什么是「逐行插样式码」而不是「渲染时拼」
 //
@@ -220,7 +221,7 @@ func padRight(s string, width int) string {
 // 读` 那一行与它上面那一栏之间只隔**一个**空格（名字栏比上一行长），于是它按
 // 「其余」处理、不加粗。它没有被上错色，只是没上色；要让它也成一行，得把那一栏
 // 的空格补齐——那是改帮助文本的排版，与这一条不是一件事，没有混在一起做。
-func (p palette) paintHelp(text string) string {
+func (p Palette) PaintHelp(text string) string {
 	if !p.on {
 		// 不上色那一档逐字返回原文：它是「重定向、NO_COLOR、TERM=dumb、
 		// --format json」四条判据共同的结果（见 newPalette 与 printUsage）。
@@ -236,7 +237,7 @@ func (p palette) paintHelp(text string) string {
 
 // paintHelpLine 上色一行。nextIndented 是「它后面第一个非空行缩进吗」，
 // 只有段标题那一条判据用得到它。
-func (p palette) paintHelpLine(line string, nextIndented bool) string {
+func (p Palette) paintHelpLine(line string, nextIndented bool) string {
 	indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
 	body := line[len(indent):]
 	if body == "" {
@@ -245,22 +246,22 @@ func (p palette) paintHelpLine(line string, nextIndented bool) string {
 
 	if indent == "" {
 		if strings.HasSuffix(body, "：") && nextIndented {
-			return p.bold(body)
+			return p.Bold(body)
 		}
 		if head, rest, ok := helpCommandPrefix(body); ok {
-			return p.bold(head) + p.dim(rest)
+			return p.Bold(head) + p.Dim(rest)
 		}
-		return p.dim(body)
+		return p.Dim(body)
 	}
 
 	if name, desc, col, ok := splitHelpRow(body); ok {
 		// 说明栏补到原文里那一列。补空格走 padRight（按 displayWidth 算）而不是
 		// 照抄原文那几个空格：名字栏里若含宽字符，字节数与列数不是一回事，
 		// 按字节补会把说明栏往后推。
-		return indent + padRight(p.bold(name), col) + p.dim(desc)
+		return indent + padRight(p.Bold(name), col) + p.Dim(desc)
 	}
 	if helpInvocationRow(body) {
-		return indent + p.bold(body)
+		return indent + p.Bold(body)
 	}
 	return line
 }
@@ -336,7 +337,7 @@ func splitHelpRow(body string) (name, desc string, col int, ok bool) {
 			// 行尾的一串空格后面没有说明栏，这一行不是两栏行。
 			return "", "", 0, false
 		}
-		return body[:i], body[j:], displayWidth(body[:j]), true
+		return body[:i], body[j:], DisplayWidth(body[:j]), true
 	}
 	return "", "", 0, false
 }
@@ -355,7 +356,7 @@ func helpInvocationRow(body string) bool {
 
 // ── 诊断体检类命令的单行状态 ────────────────────────────────────────────
 
-// statusLine 是诊断体检类命令默认输出里的一行：状态符、标题、一句结论，
+// StatusLine 是诊断体检类命令默认输出里的一行：状态符、标题、一句结论，
 // 外加 -v 才打的细节。
 //
 // 先收成切片再打，是因为标题那一栏要按**最宽的那个**补空格，而宽度得等所有行
@@ -365,51 +366,51 @@ func helpInvocationRow(body string) bool {
 // 共用这一条渲染路径，不是各写一遍：共用的地方才数得出来。调用点登记在
 // renderpaths_test.go 的 TestEveryStatusRenderPathIsRegistered 里，多一个
 // 没登记的、少一个登记过的都会红。
-type statusLine struct {
-	kind       glyphKind
-	title      string
-	conclusion string
-	detail     []string
+type StatusLine struct {
+	Kind       GlyphKind
+	Title      string
+	Conclusion string
+	Detail     []string
 }
 
-// printStatusLines 打一组状态行：`状态符 标题 结论`，标题那一栏按最宽的对齐，
+// PrintStatusLines 打一组状态行：`状态符 标题 结论`，标题那一栏按最宽的对齐，
 // verbose 时每行后面缩进跟它的细节。
 //
 // 收敛掉的不是信息量，是**默认那一屏**：一次全通过的运行原先要刷三十多行，
 // 而其中没有一行需要动作。原来的长句一条都没删，只是挪到了 -v。
-func printStatusLines(w io.Writer, lines []statusLine, verbose bool) {
-	p := newPalette(w)
+func PrintStatusLines(w io.Writer, lines []StatusLine, verbose bool) {
+	p := NewPalette(w)
 	width := 0
 	for _, l := range lines {
-		if n := displayWidth(l.title); n > width {
+		if n := DisplayWidth(l.Title); n > width {
 			width = n
 		}
 	}
 	for _, l := range lines {
 		_, _ = fmt.Fprintf(w, "  %s %s  %s\n",
-			p.glyph(l.kind), p.title(l.kind, padRight(l.title, width)),
-			p.conclusion(l.kind, l.conclusion))
+			p.glyph(l.Kind), p.title(l.Kind, padRight(l.Title, width)),
+			p.conclusion(l.Kind, l.Conclusion))
 		if !verbose {
 			continue
 		}
-		for _, line := range l.detail {
-			_, _ = fmt.Fprintf(w, "      %s\n", p.dim(line))
+		for _, line := range l.Detail {
+			_, _ = fmt.Fprintf(w, "      %s\n", p.Dim(line))
 		}
 	}
 }
 
-// countStatusLines 数一组状态行里各档各有多少项。
+// CountStatusLines 数一组状态行里各档各有多少项。
 //
 // 从**打出去的那些行**数，而不是从上游的数据结构数：汇总行说的是「上面这一屏
 // 里有几项」，两处各数一遍时，多打或少打一行都会让那句汇总说谎。
-func countStatusLines(lines []statusLine) (passed, failed, skipped int) {
+func CountStatusLines(lines []StatusLine) (passed, failed, skipped int) {
 	for _, l := range lines {
-		switch l.kind {
-		case glyphPass:
+		switch l.Kind {
+		case GlyphPass:
 			passed++
-		case glyphFail:
+		case GlyphFail:
 			failed++
-		case glyphSkip:
+		case GlyphSkip:
 			skipped++
 		}
 	}
@@ -429,7 +430,7 @@ func countStatusLines(lines []statusLine) (passed, failed, skipped int) {
 // 钉住：新加一条清单命令、空状态自己另写一句，那道门会红。
 const emptyListNoteFmt = "暂无%s。可使用 larkaxctl %s 添加。"
 
-// emptyListNote 返回一句清单空状态。
+// EmptyListNote 返回一句清单空状态。
 //
 // entity 是实体名（「API Key」「渠道」），action 是添加它的子命令
 // （「apikey create」）。没有「添加」这个动作的清单不走这里：这一句的后半截
@@ -441,28 +442,28 @@ const emptyListNoteFmt = "暂无%s。可使用 larkaxctl %s 添加。"
 //
 // 补空格只能按 entity 的**首字节**判（`entity[0] < utf8.RuneSelf` 就是 ASCII），
 // 本包这几条实体名都是纯 ASCII 或纯中文，没有混排的首字符边界要处理。
-func emptyListNote(entity, action string) string {
+func EmptyListNote(entity, action string) string {
 	if entity != "" && entity[0] < utf8.RuneSelf {
 		entity = " " + entity
 	}
 	return fmt.Sprintf(emptyListNoteFmt, entity, action)
 }
 
-// longStampLayout 是清单里时刻那一栏的**带年份**写法。
+// LongStampLayout 是清单里时刻那一栏的**带年份**写法。
 //
 // 与 stampLayout（apikey.go，`01-02 15:04`）差一个年份。清单里默认省掉年份是
 // 为了不把一栏撑宽（见 docs/cli-output.md 的「加一个清单命令」），但那几类数据
 // 的跨度以天计；用量事件按月分区、对账运行记录长期留存，省掉年份之后
 // 「10-31 23:00」是哪一年要靠上下文猜。
-const longStampLayout = "2006-01-02 15:04"
+const LongStampLayout = "2006-01-02 15:04"
 
-// truncatedListNote 是清单被 --limit 截住时补的那一句。
+// TruncatedListNote 是清单被 --limit 截住时补的那一句。
 //
 // 理由与空状态那一句同源：一份**少了后文**的清单与一份完整的清单在屏幕上长得
 // 一样，而看的人会照第一份下结论（见 LESSONS.md 第 16 条）。所以被截住时要在
 // 同一份输出里说出来，并且给出两条能拿到后文的下一步——它收在 style.go 而不是
 // 各命令自己拼，与 emptyListNote 是同一条：同类清单说同一句话。
-func truncatedListNote(shown int) string {
+func TruncatedListNote(shown int) string {
 	return fmt.Sprintf(
 		"（以上是最近 %d 条，更早的没打出来：把 --limit 调大，或用筛选条件缩小范围）", shown)
 }

@@ -173,7 +173,7 @@ func fishCompletionScript(data completionData) string {
 	// `larkaxctl foo `（拼错的命令）上判定版更糟——给 0 条，这一版给 27 条。
 	// 不选判定版，是因为要在生成物里多写一段依赖 `commandline -poc` 语义的 shell
 	// 代码：`--opt=value` 是一个词元，得自己拆；`-o` / `-format` / `--o` 这些等价
-	// 写法也得认得（见 format.go 的 isFormatFlag）。而这两格都是边缘输入，一行
+	// 写法也得认得（见 cli 包的 format.go 的 isFormatFlag）。而这两格都是边缘输入，一行
 	// 条件换那一段，划得来。
 	topCondition := fishTopLevelCondition(data.commands)
 	for _, command := range data.commands {

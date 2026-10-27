@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/pipeline"
@@ -359,17 +360,17 @@ func traceNoRuleReason(canonical string, channelID int64) string {
 
 // runModelTrace 打一条名字链路。
 func runModelTrace(args []string) error {
-	fs := newFlagSet("model trace", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
+	fs := cli.NewFlagSet("model trace", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
 	channelID := fs.Int64("channel", 0, "只诊断这条渠道（平台级映射仍算数）")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf("trace 需要一个位置参数（要诊断的模型名），得到 %d 个", fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("trace 需要一个位置参数（要诊断的模型名），得到 %d 个", fs.NArg()))
 	}
 	if *channelID < 0 {
-		return usageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
+		return cli.UsageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
 	}
 	name := fs.Arg(0)
 
@@ -380,10 +381,10 @@ func runModelTrace(args []string) error {
 		}
 
 		cause := traceCause(tr)
-		if jsonOutput() {
-			return emitJSON(os.Stdout, modelTraceDoc(tr), cause)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, modelTraceDoc(tr), cause)
 		}
-		printModelTrace(humanStdout(), tr)
+		printModelTrace(cli.HumanStdout(), tr)
 		return cause
 	})
 }
@@ -399,7 +400,7 @@ func traceCause(tr modelTrace) error {
 	if tr.BrokenAt == "" {
 		return nil
 	}
-	return reportedErr(fmt.Errorf("断在 %s：%s", tr.BrokenAt, tr.BrokenReason))
+	return cli.ReportedErr(fmt.Errorf("断在 %s：%s", tr.BrokenAt, tr.BrokenReason))
 }
 
 // printModelTrace 打印一份诊断报告。
@@ -408,9 +409,9 @@ func traceCause(tr modelTrace) error {
 // 的。断掉的那一段不留空行——报告末尾单独一句「断在 X」比一栏空白更容易被
 // 人看见。
 func printModelTrace(w io.Writer, tr modelTrace) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", p.bold("段"), p.bold("值"), p.bold("说明"))
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", p.Bold("段"), p.Bold("值"), p.Bold("说明"))
 
 	aliasNote := "不是别名，按原样"
 	switch {
@@ -419,10 +420,10 @@ func printModelTrace(w io.Writer, tr modelTrace) {
 	case tr.ShadowedAlias:
 		aliasNote = "不是别名；另有一条同名入站别名，被这个规范名遮蔽"
 	}
-	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", traceSegmentAlias, p.bold(tr.Requested), aliasNote)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", traceSegmentAlias, p.Bold(tr.Requested), aliasNote)
 
 	if tr.CanonicalExists {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", traceSegmentModel, p.bold(tr.Canonical), "在目录里")
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", traceSegmentModel, p.Bold(tr.Canonical), "在目录里")
 	}
 
 	for _, u := range tr.Upstreams {
@@ -435,7 +436,7 @@ func printModelTrace(w io.Writer, tr modelTrace) {
 			note = fmt.Sprintf("渠道 %d 上胜出", r.ChannelID)
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", traceSegmentPricing,
-			p.bold(fmt.Sprintf("#%d %s %s", r.ID, r.Scope, r.Name)), note)
+			p.Bold(fmt.Sprintf("#%d %s %s", r.ID, r.Scope, r.Name)), note)
 	}
 	_ = tw.Flush()
 
@@ -460,11 +461,11 @@ func traceUpstreamNote(u traceUpstream) string {
 // 键名与 human 表逐项对得上：requested / canonical / upstream_model / rule_id
 // 都是这条命令自己起的名字，见 docs/cli-reference.md 的 model 一节。
 func modelTraceDoc(tr modelTrace) map[string]any {
-	status := jsonOK
+	status := cli.JSONOK
 	if tr.BrokenAt != "" {
-		status = jsonFailed
+		status = cli.JSONFailed
 	}
-	doc := jsonDoc(status)
+	doc := cli.JSONDoc(status)
 	doc["requested"] = tr.Requested
 	doc["alias_matched"] = tr.IsAlias
 	doc["shadowed_alias"] = tr.ShadowedAlias

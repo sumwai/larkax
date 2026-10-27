@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
@@ -204,8 +205,8 @@ func TestParseErrorsAreUsageAndPrintTheRightUsageText(t *testing.T) {
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d（%v）", exitUsage, got, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d（%v）", cli.ExitUsage, got, err)
 			}
 			gotUsage := strings.Contains(stderr, tc.hint)
 			if gotUsage != tc.wantUsage {
@@ -259,8 +260,8 @@ func TestDBUnreachableEntriesExitThree(t *testing.T) {
 			if err == nil {
 				t.Fatal("连不上库时应当报错")
 			}
-			if got := exitCode(err); got != exitDBUnreach {
-				t.Errorf("连不上库的退出码应当是 %d，得到 %d（%v）", exitDBUnreach, got, err)
+			if got := cli.ExitCode(err); got != cli.ExitDBUnreach {
+				t.Errorf("连不上库的退出码应当是 %d，得到 %d（%v）", cli.ExitDBUnreach, got, err)
 			}
 		})
 	}
@@ -319,9 +320,9 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 		{"pricing.ErrRuleNotFound", pricing.ErrRuleNotFound},
 		{"pipeline.ErrNoRule", pipeline.ErrNoRule},
 		{"pluginstore.ErrPluginNotFound", pluginstore.ErrPluginNotFound},
-		{"errSettingsNotFound", errSettingsNotFound},
-		{"errPluginKVKeyNotFound", errPluginKVKeyNotFound},
-		{"snapshot.ErrSnapshotNotFound", errSnapshotNotFound},
+		{"errSettingsNotFound", cli.ErrSettingsNotFound},
+		{"errPluginKVKeyNotFound", cli.ErrPluginKVKeyNotFound},
+		{"snapshot.ErrSnapshotNotFound", cli.ErrSnapshotNotFound},
 		{"payment.ErrOrderNotFound", payment.ErrOrderNotFound},
 		{"payment.ErrOrderConflict", payment.ErrOrderConflict},
 	}
@@ -329,8 +330,8 @@ func TestConflictSentinelsExitFour(t *testing.T) {
 	for _, s := range sentinels {
 		t.Run(s.name, func(t *testing.T) {
 			err := fmt.Errorf("操作失败: %w", s.err)
-			if got := exitCode(err); got != exitConflict {
-				t.Errorf("%s 应当落 %d，得到 %d：它没被登记进 conflictErrors", s.name, exitConflict, got)
+			if got := cli.ExitCode(err); got != cli.ExitConflict {
+				t.Errorf("%s 应当落 %d，得到 %d：它没被登记进 conflictErrors", s.name, cli.ExitConflict, got)
 			}
 		})
 	}
@@ -351,11 +352,11 @@ func TestSnapshotNotFoundExitsFour(t *testing.T) {
 			if err == nil {
 				t.Fatal("一条都没读到时应当报错")
 			}
-			if !errors.Is(err, errSnapshotNotFound) {
+			if !errors.Is(err, cli.ErrSnapshotNotFound) {
 				t.Errorf("错误链里没有 errSnapshotNotFound：%v", err)
 			}
-			if got := exitCode(err); got != exitConflict {
-				t.Errorf("要读的快照不存在应当落 %d，得到 %d（%v）", exitConflict, got, err)
+			if got := cli.ExitCode(err); got != cli.ExitConflict {
+				t.Errorf("要读的快照不存在应当落 %d，得到 %d（%v）", cli.ExitConflict, got, err)
 			}
 		})
 	}
@@ -413,10 +414,10 @@ func TestReportOnlyConclusionsAreNotEchoedButKeepANonZeroCode(t *testing.T) {
 			if err == nil {
 				t.Fatal("这一轮体检有问题，应当返回一个非零结论")
 			}
-			if got := exitCode(err); got == 0 {
+			if got := cli.ExitCode(err); got == 0 {
 				t.Errorf("体检结论要保留非零退出码，得到 0（%v）", err)
 			}
-			if !reportedOnly(err) {
+			if !cli.ReportedOnly(err) {
 				t.Errorf("结论应当标成「报告已说明」，main 才不会补打那一行：%v", err)
 			}
 		})
@@ -429,15 +430,15 @@ func TestReportOnlyConclusionsAreNotEchoedButKeepANonZeroCode(t *testing.T) {
 // 「报告已说明」），失败就变成一声不吭——那正是这个项目反复防的那类问题。
 func TestOrdinaryFailuresAreStillEchoed(t *testing.T) {
 	cases := map[string]error{
-		"参数错":  usageErr(errors.New("缺少 --id")),
-		"连不上库": dbErr(errors.New("连接数据库失败")),
+		"参数错":  cli.UsageErr(errors.New("缺少 --id")),
+		"连不上库": cli.DBErr(errors.New("连接数据库失败")),
 		"约束冲突": fmt.Errorf("启用渠道失败: %w", channels.ErrChannelNotFound),
-		"内部错误": internalErr(errors.New("序列化 JSON 输出失败")),
+		"内部错误": cli.InternalErr(errors.New("序列化 JSON 输出失败")),
 		"其它失败": errors.New("读文件失败"),
 	}
 	for name, err := range cases {
 		t.Run(name, func(t *testing.T) {
-			if reportedOnly(err) {
+			if cli.ReportedOnly(err) {
 				t.Errorf("普通失败不该被判成「报告已说明」，它会一声不吭：%v", err)
 			}
 		})
@@ -446,11 +447,11 @@ func TestOrdinaryFailuresAreStillEchoed(t *testing.T) {
 
 // TestInternalErrorCarriesThePrefix 钉住 C 类的统一前缀。
 func TestInternalErrorCarriesThePrefix(t *testing.T) {
-	err := internalErr(errors.New("序列化 JSON 输出失败: boom"))
+	err := cli.InternalErr(errors.New("序列化 JSON 输出失败: boom"))
 	if got := err.Error(); !strings.Contains(got, "内部错误: ") {
 		t.Errorf("内部故障的那句话要带「内部错误: 」前缀，得到 %q", got)
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("内部故障的退出码应当是 %d，得到 %d", exitFailure, got)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("内部故障的退出码应当是 %d，得到 %d", cli.ExitFailure, got)
 	}
 }

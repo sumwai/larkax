@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/config"
 )
@@ -265,16 +266,16 @@ const userTimeout = 30 * time.Second
 var userActions = []string{"add", "list", "get", "inspect", "update", "password", "unlock", "delete", "plan", "wallet", "key", "usage"}
 
 func runUser(args []string) error {
-	fs := newFlagSet("user", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return usageErr(errors.New("user 需要子命令"))
+		return cli.UsageErr(errors.New("user 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -306,46 +307,46 @@ func runUser(args []string) error {
 	case "usage":
 		return runUserUsage(rest)
 	default:
-		return usageErr(fmt.Errorf("未知的 user 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 user 子命令 %q", action))
 	}
 }
 
 // userNameOperand 是 user add 的位置参数：用户名。
-var userNameOperand = operandSpec{
-	what:  "用户名",
-	flag:  "name",
-	usage: "写成第一个位置参数（larkaxctl user add <用户名> …）",
+var userNameOperand = cli.OperandSpec{
+	What:  "用户名",
+	Flag:  "name",
+	Usage: "写成第一个位置参数（larkaxctl user add <用户名> …）",
 }
 
 func runUserCreate(args []string) error {
 	// 命令名写正式名 add：jsonUnsupported 那句会把命令名打给人看，而 create
 	// 是旧写法（见 userUsage 的「旧名仍可用」）。
-	if err := jsonUnsupported("user add"); err != nil {
+	if err := cli.JSONUnsupported("user add"); err != nil {
 		return err
 	}
 
-	operand, rest, takeErr := takeLeadingOperand(args, userNameOperand)
+	operand, rest, takeErr := cli.TakeLeadingOperand(args, userNameOperand)
 	if takeErr != nil {
 		return takeErr
 	}
 
-	fs := newFlagSet("user add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	name := fs.String("name", "", "")
 	email := fs.String("email", "", "")
 	role := fs.String("role", string(auth.RoleUser), "")
 	generateInitialPassword := fs.Bool("generate-password", false, "")
 	if err := fs.Parse(rest); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"add 不接受多余的参数，得到 %q：用户名要写成第一个位置参数，排在旗标前面", fs.Arg(0)))
 	}
 	given := visitedFlags(fs)
-	username, err := resolveOperand(operand, *name, given["name"], userNameOperand)
+	username, err := cli.ResolveOperand(operand, *name, given["name"], userNameOperand)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	// 参数检查全部发生在连库之前（与 apikey create 同一条约定）：
@@ -356,16 +357,16 @@ func runUserCreate(args []string) error {
 	// auth.ValidateNewUsername）：纯数字的名字建得出来、读不回来，而这一条
 	// 不必连库就知道。放在连库之前还有一层：它挡的是一次注定要回滚的写入。
 	if err = auth.ValidateNewUsername(username); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	parsedRole, err := auth.ParseRole(*role)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	// 邮箱的形状同样在连库之前判（判据在 auth，见 auth.ValidateEmail）。空串是
 	// 「不填这一列」，不是格式错——判据放行它，这里也就不必分两种写法。
 	if err = auth.ValidateEmail(*email); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	// 初始口令在连库之前生成：熵源坏了是一次「这次命令根本没开始」的失败，
@@ -384,7 +385,7 @@ func runUserCreate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), userTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -410,11 +411,11 @@ func runUserCreate(args []string) error {
 			return fmt.Errorf("用户 %s（ID %d）已创建，但设置初始口令失败: %w",
 				created.Username, created.ID, err)
 		}
-		printCreatedUserWithPassword(humanStdout(), humanStderr(), created, initialPassword)
+		printCreatedUserWithPassword(cli.HumanStdout(), cli.HumanStderr(), created, initialPassword)
 		return nil
 	}
 
-	printCreatedUser(humanStdout(), humanStderr(), created)
+	printCreatedUser(cli.HumanStdout(), cli.HumanStderr(), created)
 	return nil
 }
 
@@ -448,15 +449,15 @@ func printCreatedUserWithPassword(stdout, stderr io.Writer, u auth.User, passwor
 
 // runUserList 列出用户。
 func runUserList(args []string) error {
-	fs := newFlagSet("user list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	status := fs.String("status", "", "")
 	role := fs.String("role", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"list 不接受位置参数，得到 %q：按状态筛用 --status，按角色筛用 --role", fs.Arg(0)))
 	}
 
@@ -466,14 +467,14 @@ func runUserList(args []string) error {
 	if *status != "" {
 		parsed, err := auth.ParseUserStatus(*status)
 		if err != nil {
-			return usageErr(err)
+			return cli.UsageErr(err)
 		}
 		filter.Status = parsed
 	}
 	if *role != "" {
 		parsed, err := auth.ParseRole(*role)
 		if err != nil {
-			return usageErr(err)
+			return cli.UsageErr(err)
 		}
 		filter.Role = &parsed
 	}
@@ -483,30 +484,30 @@ func runUserList(args []string) error {
 		if err != nil {
 			return fmt.Errorf("列出用户失败: %w", err)
 		}
-		// JSON 是另一条渲染路径，不是把上面那张表转成 JSON（见 format.go 开头）。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, userListDoc(users), nil)
+		// JSON 是另一条渲染路径，不是把上面那张表转成 JSON（见 cli 包的 format.go 开头）。
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, userListDoc(users), nil)
 		}
-		printUserList(humanStdout(), users)
+		printUserList(cli.HumanStdout(), users)
 		return nil
 	})
 }
 
 // runUserGet 读一个用户的全部字段。
 func runUserGet(args []string) error {
-	fs := newFlagSet("user get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"get 不接受位置参数，得到 %q：要看的用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+		return cli.UsageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -514,10 +515,10 @@ func runUserGet(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, userGetDoc(info), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, userGetDoc(info), nil)
 		}
-		printUserDetail(humanStdout(), info)
+		printUserDetail(cli.HumanStdout(), info)
 		return nil
 	})
 }
@@ -526,14 +527,14 @@ func runUserGet(args []string) error {
 func runUserUpdate(args []string) error {
 	// 与 create 同一条：写类命令今天没有机器可读那一档，必须在改任何一列
 	// 之前拦下来。
-	if err := jsonUnsupported("user update"); err != nil {
+	if err := cli.JSONUnsupported("user update"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("user update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	status := fs.String("status", "", "")
 	email := fs.String("email", "", "")
 	displayName := fs.String("display-name", "", "")
@@ -542,14 +543,14 @@ func runUserUpdate(args []string) error {
 	admin := fs.Bool("admin", false, "")
 	noAdmin := fs.Bool("no-admin", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"update 不接受位置参数，得到 %q：要改的用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+		return cli.UsageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
 	}
 
 	// 参数全部在连库之前校验完（与 create / list 同一条约定）。「一个字段都
@@ -565,7 +566,7 @@ func runUserUpdate(args []string) error {
 		noAdmin:     *noAdmin,
 	})
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -584,7 +585,7 @@ func runUserUpdate(args []string) error {
 		// is_merchant 置假，留下 (is_merchant=false, is_admin=true)，而 roleOf 仍
 		// 把那一行读成 admin：真改了库的那一次在回显里看起来像什么都没做。
 		if isMerchant, isAdmin := userUpdateResultMarkers(before.Role, params); isAdmin && !isMerchant {
-			return usageErr(errors.New(
+			return cli.UsageErr(errors.New(
 				"--no-merchant 会把 admin 的 is_merchant 置假，而 admin 天然也是 merchant：" +
 					"先 --no-admin（is_admin 置假、merchant 不动），" +
 					"或 --no-admin --no-merchant 一起给（一步落到普通用户）"))
@@ -594,7 +595,7 @@ func runUserUpdate(args []string) error {
 		if err != nil {
 			return err
 		}
-		printUserUpdate(humanStdout(), before, after)
+		printUserUpdate(cli.HumanStdout(), before, after)
 		return nil
 	})
 }
@@ -611,7 +612,7 @@ var userDeleteActions = []string{"request", "revert", "purge"}
 
 func runUserDelete(args []string) error {
 	if len(args) == 0 {
-		return usageErr(errors.New("delete 需要子命令：request、revert 或 purge"))
+		return cli.UsageErr(errors.New("delete 需要子命令：request、revert 或 purge"))
 	}
 	action, rest := args[0], args[1:]
 	switch action {
@@ -625,35 +626,35 @@ func runUserDelete(args []string) error {
 		// 这一组没有自己的两版文本：三个动作的写法都写在 user 那一份里
 		// （`user delete request|revert|purge --user …` 那一行）。给 user 的两版，
 		// 不另写文案——与 admin token / plan key 同一条处置。
-		printUsage(os.Stdout, userShortUsage)
+		cli.PrintUsage(os.Stdout, userShortUsage)
 		return nil
 	case "help":
-		printUsage(os.Stdout, userUsage)
+		cli.PrintUsage(os.Stdout, userUsage)
 		return nil
 	default:
-		return usageErr(fmt.Errorf("未知的 user delete 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 user delete 子命令 %q", action))
 	}
 }
 
 // runUserDeleteRequest 给账号打上「要求删除」的标记。
 func runUserDeleteRequest(args []string) error {
-	if err := jsonUnsupported("user delete request"); err != nil {
+	if err := cli.JSONUnsupported("user delete request"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("user delete request", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user delete request", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"delete request 不接受位置参数，得到 %q：要标记的用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+		return cli.UsageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -661,30 +662,30 @@ func runUserDeleteRequest(args []string) error {
 		if err != nil {
 			return err
 		}
-		printDeletionReceipt(humanStdout(), deletionRequestReceipt(mark))
+		printDeletionReceipt(cli.HumanStdout(), deletionRequestReceipt(mark))
 		return nil
 	})
 }
 
 // runUserDeleteRevert 撤掉「要求删除」的标记。
 func runUserDeleteRevert(args []string) error {
-	if err := jsonUnsupported("user delete revert"); err != nil {
+	if err := cli.JSONUnsupported("user delete revert"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("user delete revert", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user delete revert", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"delete revert 不接受位置参数，得到 %q：要撤回的用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+		return cli.UsageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -692,36 +693,36 @@ func runUserDeleteRevert(args []string) error {
 		if err != nil {
 			return err
 		}
-		printDeletionReceipt(humanStdout(), deletionRevertReceipt(mark))
+		printDeletionReceipt(cli.HumanStdout(), deletionRevertReceipt(mark))
 		return nil
 	})
 }
 
 // runUserDeletePurge 匿名化一个已经打过标的账号。
 func runUserDeletePurge(args []string) error {
-	if err := jsonUnsupported("user delete purge"); err != nil {
+	if err := cli.JSONUnsupported("user delete purge"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("user delete purge", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user delete purge", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	confirm := fs.String("confirm", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"delete purge 不接受位置参数，得到 %q：要匿名化的用户用 --user 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
+		return cli.UsageErr(errors.New("缺少 --user（用户的 ID 或用户名）"))
 	}
 	// 空 --confirm 在连库之前就挡下：它是这次调用的形状，不是库里的数据。
 	// 写错名字的那一档要比对用户名，只能等读到那一行之后再判。
 	if strings.TrimSpace(*confirm) == "" {
-		return usageErr(errors.New("缺少 --confirm（要逐字写出当前用户名）"))
+		return cli.UsageErr(errors.New("缺少 --confirm（要逐字写出当前用户名）"))
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -729,7 +730,7 @@ func runUserDeletePurge(args []string) error {
 		if err != nil {
 			return err
 		}
-		printDeletionReceipt(humanStdout(), deletionPurgeReceipt(result))
+		printDeletionReceipt(cli.HumanStdout(), deletionPurgeReceipt(result))
 		return nil
 	})
 }
@@ -813,11 +814,11 @@ func shellArg(s string) string {
 
 // printDeletionReceipt 打一张销户回执。
 func printDeletionReceipt(w io.Writer, r deletionReceipt) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintln(w, r.headline)
 	for _, row := range r.rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(row[0]), row[1])
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(row[0]), row[1])
 	}
 	_ = tw.Flush()
 }
@@ -955,17 +956,17 @@ func userUpdateResultMarkers(before auth.Role, p auth.UpdateUserParams) (isMerch
 // 而一个只在这一处出现的译文会让照着帮助写命令的人对不上。
 func printUserList(w io.Writer, users []auth.UserInfo) {
 	if len(users) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("用户", "user add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("用户", "user add"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-		p.bold("ID"), p.bold("用户名"), p.bold("状态"), p.bold("角色"), p.bold("邮箱"))
+		p.Bold("ID"), p.Bold("用户名"), p.Bold("状态"), p.Bold("角色"), p.Bold("邮箱"))
 	for _, u := range users {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.FormatInt(u.ID, 10)), p.bold(u.Username),
+			p.Bold(strconv.FormatInt(u.ID, 10)), p.Bold(u.Username),
 			u.Status, string(u.Role), orDash(u.Email))
 	}
 	_ = tw.Flush()
@@ -976,10 +977,10 @@ func printUserList(w io.Writer, users []auth.UserInfo) {
 // 一栏一行而不是一行一表：理由与 printModelDetail 相同——一条记录的字段比清单
 // 里那几栏多，横着排会折行，折行之后哪一栏是哪个值就得数着看。
 func printUserDetail(w io.Writer, u auth.UserInfo) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("ID", strconv.FormatInt(u.ID, 10))
 	row("用户名", u.Username)
@@ -988,13 +989,13 @@ func printUserDetail(w io.Writer, u auth.UserInfo) {
 	row("邮箱", orDash(u.Email))
 	row("展示名", orDash(u.DisplayName))
 	// 销户之后这一栏才有值；没走到终态时是 `-`，与「没填」的显示同一套。
-	deletedAt := p.dim("-")
+	deletedAt := p.Dim("-")
 	if u.DeletedAt != nil {
-		deletedAt = p.dim(u.DeletedAt.Format(time.RFC3339))
+		deletedAt = p.Dim(u.DeletedAt.Format(time.RFC3339))
 	}
 	row("删除时间", deletedAt)
-	row("创建时间", p.dim(u.CreatedAt.Format(time.RFC3339)))
-	row("更新时间", p.dim(u.UpdatedAt.Format(time.RFC3339)))
+	row("创建时间", p.Dim(u.CreatedAt.Format(time.RFC3339)))
+	row("更新时间", p.Dim(u.UpdatedAt.Format(time.RFC3339)))
 	_ = tw.Flush()
 }
 
@@ -1009,15 +1010,15 @@ func printUserDetail(w io.Writer, u auth.UserInfo) {
 // 那一行。从命令行参数再拼一遍看着一样，但它记的是「我打算写什么」，而这一步
 // 要回答的是「库里现在是什么」。
 func printUserUpdate(w io.Writer, before, after auth.UserInfo) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(w, "已改用户 %s\n", after.Username)
 
 	row := func(label, old, next string) {
 		if old == next {
 			return
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), old+" → "+next)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), old+" → "+next)
 	}
 	row("状态", before.Status, after.Status)
 	// 角色这一栏给的是称呼（user / merchant / admin），由那两个标记折回来。
@@ -1032,12 +1033,12 @@ func printUserUpdate(w io.Writer, before, after auth.UserInfo) {
 // userListDoc 组装 user list 的机器可读输出。
 //
 // 与 printUserList 是同一份数据的另一条渲染路径：那一档打表、把没填的邮箱铺成
-// `-`，这一档给 null（见 format.go 的 nullableString）。
+// `-`，这一档给 null（见 cli 包的 format.go 的 nullableString）。
 func userListDoc(users []auth.UserInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(users)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		entries = append(entries, userEntry(u))
@@ -1050,7 +1051,7 @@ func userListDoc(users []auth.UserInfo) map[string]any {
 //
 // 只有一条，所以不打 summary（没有可数的东西），形状是 `{"user": {...}}`。
 func userGetDoc(u auth.UserInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["user"] = userDetailEntry(u)
 	return doc
 }
@@ -1063,16 +1064,16 @@ func userEntry(u auth.UserInfo) map[string]any {
 		"status":   u.Status,
 		"role":     string(u.Role),
 		// 邮箱在库里可空，空串就是「没填」（见 CreateUser：不填存 NULL）。
-		"email": nullableString(u.Email),
+		"email": cli.NullableString(u.Email),
 	}
 }
 
 // userDetailEntry 打一个用户的详情：在清单那几栏之上多给展示名与两个时刻。
 func userDetailEntry(u auth.UserInfo) map[string]any {
 	entry := userEntry(u)
-	entry["display_name"] = nullableString(u.DisplayName)
-	entry["deleted_at"] = jsonTimePtr(u.DeletedAt)
-	entry["created_at"] = jsonTime(u.CreatedAt)
-	entry["updated_at"] = jsonTime(u.UpdatedAt)
+	entry["display_name"] = cli.NullableString(u.DisplayName)
+	entry["deleted_at"] = cli.JSONTimePtr(u.DeletedAt)
+	entry["created_at"] = cli.JSONTime(u.CreatedAt)
+	entry["updated_at"] = cli.JSONTime(u.UpdatedAt)
 	return entry
 }

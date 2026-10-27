@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -90,8 +91,8 @@ var upstreamCostActions = []string{"create", "list", "update", "disable"}
 
 func runUpstreamCost(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, upstreamCostShortUsage)
-		return usageErr(errors.New("upstream-cost 需要子命令"))
+		cli.PrintUsage(os.Stderr, upstreamCostShortUsage)
+		return cli.UsageErr(errors.New("upstream-cost 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -105,22 +106,22 @@ func runUpstreamCost(args []string) error {
 	case "disable":
 		return runUpstreamCostDisable(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, upstreamCostShortUsage)
+		cli.PrintUsage(os.Stdout, upstreamCostShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, upstreamCostShortUsage)
-		return usageErr(fmt.Errorf("未知的 upstream-cost 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, upstreamCostShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 upstream-cost 子命令 %q", action))
 	}
 }
 
 func runUpstreamCostCreate(args []string) error {
-	if err := jsonUnsupported("upstream-cost create"); err != nil {
+	if err := cli.JSONUnsupported("upstream-cost create"); err != nil {
 		return err
 	}
 
 	req, err := parseUpstreamCostCreate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -128,7 +129,7 @@ func runUpstreamCostCreate(args []string) error {
 		if createErr != nil {
 			return createErr
 		}
-		printCreatedCostRule(humanStdout(), humanStderr(), id, req)
+		printCreatedCostRule(cli.HumanStdout(), cli.HumanStderr(), id, req)
 		return nil
 	})
 }
@@ -138,8 +139,8 @@ func runUpstreamCostCreate(args []string) error {
 // 它只做「有没有给、给了什么」，校验放在包那一侧（validateCost）：读路径按
 // 渠道与生效区间匹配，那条判据只有一份。
 func parseUpstreamCostCreate(args []string) (pricing.CostCreateRequest, error) {
-	fs := newFlagSet("upstream-cost create", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
+	fs := cli.NewFlagSet("upstream-cost create", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, upstreamCostShortUsage) }
 	channelID := fs.Int64("channel", 0, "这条规则挂在哪个渠道上")
 	models := fs.String("models", "", "")
 	expression := fs.String("expr", "", "")
@@ -166,7 +167,7 @@ func parseUpstreamCostCreate(args []string) (pricing.CostCreateRequest, error) {
 	}
 	// 模型名单进 upstream-cost list / explain 的「模型」那一栏：控制字符
 	// 在连库之前拒掉（判据在 pricing 的 normalizePatterns）。
-	if err := checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+	if err := cli.CheckDisplayList("--models", splitOptionalList(*models)); err != nil {
 		return pricing.CostCreateRequest{}, err
 	}
 	from, err := parseTimeFlag("--effective-from", *effectiveFrom)
@@ -192,20 +193,20 @@ func parseUpstreamCostCreate(args []string) (pricing.CostCreateRequest, error) {
 }
 
 func runUpstreamCostUpdate(args []string) error {
-	if err := jsonUnsupported("upstream-cost update"); err != nil {
+	if err := cli.JSONUnsupported("upstream-cost update"); err != nil {
 		return err
 	}
 
 	req, err := parseUpstreamCostUpdate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
 		if updateErr := pricing.NewCostAdmin(db).Update(ctx, req); updateErr != nil {
 			return updateErr
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已更新成本规则 %d。\n", req.ID)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已更新成本规则 %d。\n", req.ID)
 		return nil
 	})
 }
@@ -215,8 +216,8 @@ func runUpstreamCostUpdate(args []string) error {
 // 这一组旗标没有别名（与 price 那几条不同：那里留着的 --from / --to / --owner
 // 是改名前就在跑的写法），所以判「给没给」看 flag 自己的名字就够。
 func parseUpstreamCostUpdate(args []string) (pricing.CostUpdateRequest, error) {
-	fs := newFlagSet("upstream-cost update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
+	fs := cli.NewFlagSet("upstream-cost update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, upstreamCostShortUsage) }
 	id := fs.Int64("id", 0, "要改的成本规则 ID")
 	channelID := fs.Int64("channel", 0, "改挂到哪条渠道上")
 	models := fs.String("models", "", "")
@@ -260,7 +261,7 @@ func parseUpstreamCostUpdate(args []string) (pricing.CostUpdateRequest, error) {
 	}
 	if given["models"] {
 		list := splitOptionalList(*models)
-		if err := checkDisplayList("--models", list); err != nil {
+		if err := cli.CheckDisplayList("--models", list); err != nil {
 			return pricing.CostUpdateRequest{}, err
 		}
 		req.ModelPatterns = &list
@@ -325,30 +326,30 @@ func parseUpstreamCostUpdate(args []string) (pricing.CostUpdateRequest, error) {
 // 规则 ID 是位置参数，与 `price disable <规则 ID>` 同形：同一个动作有两种写法时，
 // 帮助文本要说两遍，而人多半会猜错一遍。
 func runUpstreamCostDisable(args []string) error {
-	if err := jsonUnsupported("upstream-cost disable"); err != nil {
+	if err := cli.JSONUnsupported("upstream-cost disable"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("upstream-cost disable", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
+	fs := cli.NewFlagSet("upstream-cost disable", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, upstreamCostShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"disable 需要一个规则 ID，得到 %d 个参数：用法 larkaxctl upstream-cost disable <规则 ID>",
 			fs.NArg()))
 	}
 	id, err := strconv.ParseInt(strings.TrimSpace(fs.Arg(0)), 10, 64)
 	if err != nil || id <= 0 {
-		return usageErr(fmt.Errorf("disable 的规则 ID 必须是正整数，当前为 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("disable 的规则 ID 必须是正整数，当前为 %q", fs.Arg(0)))
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
 		if disableErr := pricing.NewCostAdmin(db).Disable(ctx, id); disableErr != nil {
 			return disableErr
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "成本规则 %d 已停用：从现在起不再适用。\n", id)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "成本规则 %d 已停用：从现在起不再适用。\n", id)
 		return nil
 	})
 }
@@ -362,31 +363,31 @@ func runUpstreamCostDisable(args []string) error {
 // 就是裁决依据。分成两条命令会让「有哪些规则」与「用哪条」各排一次序，那两次
 // 排序分岔时的表现是「清单里第一条不是它」，而清单正是用来回答这个问题的。
 func runUpstreamCostList(args []string) error {
-	fs := newFlagSet("upstream-cost list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, upstreamCostShortUsage) }
+	fs := cli.NewFlagSet("upstream-cost list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, upstreamCostShortUsage) }
 	channelID := fs.Int64("channel", 0, "只看这条渠道的规则")
 	model := fs.String("model", "", "这条渠道上的哪个模型（规范模型名）")
 	at := fs.String("at", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *channelID < 0 {
-		return usageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
+		return cli.UsageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
 	}
 	modelName := strings.TrimSpace(*model)
 	if modelName != "" && *channelID == 0 {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"--model 要同时给 --channel：成本规则挂在渠道上，只给模型问不出按哪条算"))
 	}
 	when, err := parseTimeFlag("--at", *at)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if when != nil && modelName == "" {
-		return usageErr(errors.New("--at 要同时给 --model：它问的是某一次请求按哪条规则算成本"))
+		return cli.UsageErr(errors.New("--at 要同时给 --model：它问的是某一次请求按哪条规则算成本"))
 	}
 	// 时刻在这里定下来再交给包：包在零值时会自己取当前时刻，而那样打出来的
 	// 表头与真正用的那一刻是两个数——「问的是哪一刻」正是这一栏要回答的问题。
@@ -425,10 +426,10 @@ func runUpstreamCostList(args []string) error {
 			}
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, costListDoc(q, rules, selectedID), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, costListDoc(q, rules, selectedID), nil)
 		}
-		printCostList(humanStdout(), q, rules, selectedID)
+		printCostList(cli.HumanStdout(), q, rules, selectedID)
 		return nil
 	})
 }
@@ -458,7 +459,7 @@ func printCostList(w io.Writer, q pricing.CostListQuery, rules []pricing.CostInf
 			_, _ = fmt.Fprintln(w, "没有适用的成本规则。")
 			return
 		}
-		_, _ = fmt.Fprintln(w, emptyListNote("成本规则", "upstream-cost create"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("成本规则", "upstream-cost create"))
 		return
 	}
 
@@ -480,24 +481,24 @@ func printCostList(w io.Writer, q pricing.CostListQuery, rules []pricing.CostInf
 
 // printCostTable 打印一张成本规则表。verdictOf 非 nil 时多一栏「裁决」。
 func printCostTable(w io.Writer, rules []pricing.CostInfo, verdictOf func(int) string) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"ID", "渠道", "模型", "优先级", "生效自", "生效至", "单价键"}
 	if verdictOf != nil {
 		headers = append(headers, "裁决")
 	}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 
 	for i, r := range rules {
 		line := fmt.Sprintf("%s\t%d\t%s\t%d\t%s\t%s\t%s",
-			p.bold(strconv.FormatInt(r.ID, 10)), r.ChannelID,
+			p.Bold(strconv.FormatInt(r.ID, 10)), r.ChannelID,
 			joinOrDash(r.ModelPatterns), r.Priority,
-			p.dim(r.EffectiveFrom.Format(time.RFC3339)),
-			p.dim(effectiveToLabel(r.EffectiveTo)),
+			p.Dim(r.EffectiveFrom.Format(time.RFC3339)),
+			p.Dim(effectiveToLabel(r.EffectiveTo)),
 			declaredCostKeysLabel(r))
 		if verdictOf != nil {
 			line += "\t" + verdictOf(i)
@@ -533,17 +534,17 @@ func declaredCostKeysLabel(r pricing.CostInfo) string {
 // 与 printCostList 是同一份数据的另一条渲染路径：那一档把「不过期」与模型栏的
 // `-` 铺成给人扫的表，这一档给布尔、null 与原始值。
 func costListDoc(q pricing.CostListQuery, rules []pricing.CostInfo, selectedID int64) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	// query 里那三个字段说的是这一次问的是什么：没给 --channel 或 --model 时
 	// 它们是 null，与表格那一档不去裁决同一件事。
 	doc["query"] = map[string]any{
-		"channel_id":      jsonID(q.ChannelID),
-		"canonical_model": nullableString(q.CanonicalModel),
-		"at":              jsonTimeOrNull(q.At),
+		"channel_id":      cli.JSONID(q.ChannelID),
+		"canonical_model": cli.NullableString(q.CanonicalModel),
+		"at":              cli.JSONTimeOrNull(q.At),
 	}
 	doc["summary"] = map[string]any{"total": len(rules)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rules))
 	for _, r := range rules {
 		entry := costEntry(r)
@@ -562,12 +563,12 @@ func costEntry(r pricing.CostInfo) map[string]any {
 	return map[string]any{
 		"id":             r.ID,
 		"channel_id":     r.ChannelID,
-		"model_patterns": jsonList(r.ModelPatterns),
+		"model_patterns": cli.JSONList(r.ModelPatterns),
 		"priority":       r.Priority,
-		"effective_from": jsonTime(r.EffectiveFrom),
-		"effective_to":   jsonTimePtr(r.EffectiveTo),
-		"quota_keys":     jsonList(r.DeclaredKeys),
-		"expr_error":     nullableError(r.ExprErr),
+		"effective_from": cli.JSONTime(r.EffectiveFrom),
+		"effective_to":   cli.JSONTimePtr(r.EffectiveTo),
+		"quota_keys":     cli.JSONList(r.DeclaredKeys),
+		"expr_error":     cli.NullableError(r.ExprErr),
 	}
 }
 

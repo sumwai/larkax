@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger/store"
 )
 
@@ -180,7 +181,7 @@ func TestLedgerRunsShowsEveryCountColumn(t *testing.T) {
 	}
 
 	// JSON：按键名核。键漏掉时解进结构体那一栏只会是零值，所以这里读原文。
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runLedger, []string{"runs", "--limit", "0"})
 	if r.err != nil {
 		t.Fatalf("ledger runs -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
@@ -247,7 +248,7 @@ func TestLedgerRunsJSONShape(t *testing.T) {
 		t.Fatalf("写一行未收尾的运行记录失败: %v", err)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runLedger, []string{"runs", "--limit", "0"})
 	if r.err != nil {
 		t.Fatalf("ledger runs -o json 失败: %v\nstderr:\n%s", r.err, r.stderr)
@@ -276,8 +277,8 @@ func TestLedgerRunsJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, r.stdout)
 	}
-	if doc.Status != jsonOK {
-		t.Fatalf("最外层的状态是 %q，想要 %q：\n%s", doc.Status, jsonOK, r.stdout)
+	if doc.Status != cli.JSONOK {
+		t.Fatalf("最外层的状态是 %q，想要 %q：\n%s", doc.Status, cli.JSONOK, r.stdout)
 	}
 
 	// --limit 0 不限条数：打出来的行数就是表里的行数。
@@ -442,8 +443,8 @@ func TestLedgerRunsRejectsBadFlags(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("这一次应当报错，却成功返回了：stdout=%q", r.stdout)
 			}
-			if got := exitCode(r.err); got != exitUsage {
-				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 			}
 			if !strings.Contains(r.err.Error(), tc.want) {
 				t.Errorf("错误里没有 %q：%v", tc.want, r.err)
