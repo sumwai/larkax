@@ -72,3 +72,6 @@
 | [54](lessons/54-dead-code-gates-skip-constants.md) | 三道死代码门只管函数、方法与整包，导出常量没有调用点它们一起也报不出来 | 改 `internal/quota` 的单位常量、`internal/snapshot` 的占位常量，或怀疑「有实现、没有调用方」而三道门全绿时 | 活 |
 | [55](lessons/55-delegation-granularity-not-parallelism.md) | 多 agent 的活慢在颗粒度与收口，不在并行度；并发上限常常一次都没碰到 | 起 workflow、把一批活拆给多个子代理之前 | 活 |
 | [56](lessons/56-baseline-run-must-not-overwrite-worktree.md) | 拿基线做对照时用 `git show HEAD:file > file` 覆盖了工作树，未提交的改动只剩在暂存区 | 跑基线对比、把同一个文件切到旧版本验证时 | 活 |
+| [57](lessons/57-contract-current-state-needs-code-pointer.md) | 契约或注释里「某函数现在会做 X」这句话指不到一行代码，就是在说假话，照着它写出来的实现会静默不工作 | 写契约段、写描述现状的注释、读别人写的「已确认」时 | 活 |
+| [58](lessons/58-expectation-isomorphic-to-implementation.md) | 三种「绿得没有信息」的用例：期望值与实现同构、差异落点选错、前提恒真——都 PASS，都像严格的用例 | 写断言与前提检查、写解析器 / 分块器 / 指纹类的用例、评审这类用例时 | 活 |
+| [59](lessons/59-parallel-work-shares-package-namespace.md) | 并行派出的活各自绿、合流时整包编译不过：包级名字是共享资源，而它不体现在文件名上 | 把同一包的不同文件拆给多个执行者并行做时 | 活 |
