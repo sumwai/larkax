@@ -811,6 +811,21 @@ func runMigrate(args []string) error {
 	}
 	action, rest := rest[0], rest[1:]
 
+	// 子命令认下来之后、任何副作用之前先收掉「只要帮助」：下面每一档都会连库
+	// 或写文件，`migrate up -h` 落在连库那一档会被报成「连不上库」（退出码 1），
+	// 而 `migrate create -h` 会**真的建出一个迁移文件**——名字就叫 -h，而那个
+	// 目录是 //go:embed sql/*.sql，下一次构建会把它嵌进二进制。
+	//
+	// flag 包在第一个非选项参数（子命令）处停下，所以 `migrate up -h` 的 -h 留在
+	// rest 里、到不了 fs.Parse。收在这里而不是 fs 上，正是因为这一点。
+	//
+	// 只认「子命令后面只有一个 -h/--help」：`migrate create help` 里的 help 是
+	// 迁移文件名，仍然是位置参数。
+	if helpOnly(rest) {
+		fs.Usage()
+		return nil
+	}
+
 	// 子命令与它吃的取值先校验掉，**再连库**：`migrate bogus` 与
 	// `migrate down-to abc` 都是用户输入错，报出来的应该是「改命令」（退出码 2）。
 	// 把它们留到连库之后判，库一连不上就会盖成「连不上库」（3），脚本按

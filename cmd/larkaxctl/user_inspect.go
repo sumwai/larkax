@@ -31,6 +31,10 @@ import (
 // 只读是字面意义上的：这个事务里只有 SELECT，写方法在 NewInTx 造出来的
 // 那些句柄上没有可用的连接（见各包的 NewInTx）。
 func runUserInspect(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err

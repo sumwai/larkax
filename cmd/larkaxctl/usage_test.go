@@ -408,64 +408,13 @@ func TestSubcommandHelpHasTwoLevels(t *testing.T) {
 	}
 }
 
-// subGroupHelpCase 是三个「命令组下的命令组」：它们的帮助比一级命令低一层，
-// 但读者分不出这个差别——`price calendar --help` 与 `price --help` 是同一种
-// 请求。所以它们同样分两版，同样受预算与指针的约束。
-//
-// 指针那一栏写成三级的写法（`… rotate help`），因为它**真的走得通**：一级命令的
-// `help` 在分派那一处收掉，二级的在自己那层收。指向一条走不通的写法比不写更坏。
-type subGroupHelpCase struct {
-	what    string
-	short   string
-	long    string
-	pointer []string
-}
-
-var subGroupHelpCases = []subGroupHelpCase{
-	{"channel map", channelMapShortUsage, channelMapUsage, []string{"channel", "map", "help"}},
-	{"model alias", modelAliasShortUsage, modelAliasUsage, []string{"model", "alias", "help"}},
-	{"secret rotate", rotateShortUsage, rotateUsage, []string{"secret", "rotate", "help"}},
-	{"price calendar", priceCalendarShortUsage, priceCalendarUsage, []string{"price", "calendar", "help"}},
-	{"price tier", priceTierShortUsage, priceTierUsage, []string{"price", "tier", "help"}},
-	{"price peak", pricePeakShortUsage, pricePeakUsage, []string{"price", "peak", "help"}},
-	{"maintenance idempotency", maintenanceIdempotencyShortUsage, maintenanceIdempotencyUsage,
-		[]string{"maintenance", "idempotency", "help"}},
-	{"maintenance session", maintenanceSessionShortUsage, maintenanceSessionUsage,
-		[]string{"maintenance", "session", "help"}},
-	{"plugin kv", pluginKVShortUsage, pluginKVUsage, []string{"plugin", "kv", "help"}},
-	{"wallet payment", walletPaymentShortUsage, walletPaymentUsage, []string{"wallet", "payment", "help"}},
-}
-
-// TestSubGroupHelpKeepsTheSameShape 断言二级命令组的帮助与一级命令同一套规矩：
-// 短版一屏之内、首行点出自己是谁，`<那一组> help` 打出长版。
-func TestSubGroupHelpKeepsTheSameShape(t *testing.T) {
-	for _, tc := range subGroupHelpCases {
-		t.Run(tc.what, func(t *testing.T) {
-			checkShortUsage(t, tc.what, tc.what, tc.short)
-
-			if strings.TrimSpace(tc.short) == strings.TrimSpace(tc.long) {
-				t.Errorf("%s 的长版与短版逐字相同：分层没有发生", tc.what)
-			}
-
-			var err error
-			stdout, stderr := captureStreams(t, func() { err = dispatch(tc.pointer) })
-			if err != nil {
-				t.Fatalf("%v 出错: %v（stderr=%q）——短版指的这条路走不通", tc.pointer, err, stderr)
-			}
-			if !strings.Contains(stdout, tc.long) {
-				t.Errorf("%v 打的不是长版，stdout=%q", tc.pointer, stdout)
-			}
-		})
-	}
-}
-
 // TestSubcommandHelpHasNoDesignRationale 断言两版帮助都不含设计理由标记词。
 //
 // 词表与根帮助页共用一份（见 rootUsageDesignReasonMarkers）：某个字段为什么必填、
 // 别家工具怎么做这类话，对跑命令的人当下没用；它们的家是 docs/cli-reference.md。
 // 短版里出现它们说明这一版又长回去了，长版里出现说明说明文字没搬走。
 func TestSubcommandHelpHasNoDesignRationale(t *testing.T) {
-	for _, tc := range helpTextsForGate() {
+	for _, tc := range helpTextsForGate(t) {
 		for _, marker := range rootUsageDesignReasonMarkers {
 			if strings.Contains(tc.text, marker) {
 				t.Errorf("%s 出现了设计理由标记词 %q", tc.what, marker)
@@ -475,11 +424,17 @@ func TestSubcommandHelpHasNoDesignRationale(t *testing.T) {
 }
 
 // helpTextsForGate 是这几道门管辖的全部文本：一级命令的短版与长版，加上每个
-// 二级命令组的短版与长版。
+// 命令组的短版与长版（按注册表派生，不手抄）。
 //
 // 抽成一份是因为「管哪些文本」这件事本身就是判据的一部分：另写几份清单的话，
 // 新加一条命令或一个命令组时，漏掉的那一份不会报错，只会安静地少管一段文本。
-func helpTextsForGate() []struct{ what, text string } {
+//
+// 组的文本走 dispatch 取实际打出来的那一份，而不是从某个常量变量读：很多组与
+// 父组共用短版（见 TestGroupPathsAnswerBothHelpForms 的说明），按常量读会漏掉
+// 其中一半，也会把「哪一份真的被打出来」这件事绕过。
+func helpTextsForGate(t *testing.T) []struct{ what, text string } {
+	t.Helper()
+
 	var texts []struct{ what, text string }
 	for _, g := range commandGroups {
 		for _, c := range g.commands {
@@ -489,11 +444,23 @@ func helpTextsForGate() []struct{ what, text string } {
 			)
 		}
 	}
-	for _, tc := range subGroupHelpCases {
-		texts = append(texts,
-			struct{ what, text string }{tc.what + " 的短版", tc.short},
-			struct{ what, text string }{tc.what + " 的长版", tc.long},
-		)
+	for _, path := range groupPathsDerived(t) {
+		parts := strings.Fields(path)
+		for _, form := range []struct {
+			what string
+			args []string
+		}{
+			{"短版", append(slices.Clone(parts), "-h")},
+			{"长版", append(slices.Clone(parts), "help")},
+		} {
+			var err error
+			stdout, stderr := captureStreams(t, func() { err = dispatch(form.args) })
+			if err != nil && !helpRequested(err) {
+				t.Fatalf("%s 的%s取不到：%v（stderr=%q）", path, form.what, err, stderr)
+			}
+			texts = append(texts,
+				struct{ what, text string }{path + " 的" + form.what, stdout + stderr})
+		}
 	}
 	return texts
 }
@@ -514,7 +481,7 @@ func TestHelpPointersTargetRealDocSections(t *testing.T) {
 	doc := string(raw)
 
 	checked := 0
-	for _, tc := range helpTextsForGate() {
+	for _, tc := range helpTextsForGate(t) {
 		if !strings.HasSuffix(tc.what, "的长版") {
 			continue
 		}

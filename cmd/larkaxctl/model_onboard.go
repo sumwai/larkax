@@ -57,6 +57,11 @@ type onboardReport struct {
 // 它不另写校验：五处各自的合法性判据在 catalog / channels / pricing 里，
 // 这里只负责参数解析、顺序与事务边界。
 func runModelOnboard(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, modelShortUsage) {
+		return nil
+	}
+
 	if err := jsonUnsupported("model onboard"); err != nil {
 		return err
 	}

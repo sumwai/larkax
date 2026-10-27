@@ -569,6 +569,15 @@ func runPlanKey(args []string) error {
 		return runPlanKeyShow(rest)
 	case "set":
 		return runPlanKeySet(rest)
+	case "-h", "--help":
+		// 这一组没有自己的两版文本：它由 plan 拆出来，读者要的仍是 plan 那一份
+		// 里关于 Key 额度包的那几行。所以 -h 给 plan 的短版、help 给它长版，
+		// 与「帮助文案只有一处来源」这条一致。
+		printUsage(os.Stdout, planShortUsage)
+		return nil
+	case "help":
+		printUsage(os.Stdout, planUsage)
+		return nil
 	default:
 		return usageErr(fmt.Errorf("未知的 plan key 子命令 %q", action))
 	}
@@ -670,6 +679,13 @@ func runPlanOrder(args []string) error {
 		return runPlanOrderShow(rest)
 	case "set":
 		return runPlanOrderSet(rest)
+	case "-h", "--help":
+		// 与 plan key 同理：这一组没有自己的两版文本，给 plan 的那一份。
+		printUsage(os.Stdout, planShortUsage)
+		return nil
+	case "help":
+		printUsage(os.Stdout, planUsage)
+		return nil
 	default:
 		return usageErr(fmt.Errorf("未知的 plan order 子命令 %q", action))
 	}
