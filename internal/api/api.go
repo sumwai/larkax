@@ -39,6 +39,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime"
@@ -776,7 +777,14 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 	// 上游名是我们与上游之间的事，而调用方按自己请求里的名字理解响应。
 	// 请求里写的是别名时，回显的也是别名（见 modelNames）。上游实际用了
 	// 什么记在 channel.Response.UpstreamModel 里，供计费与排查。
-	rendered, err := renderSuccess(protocol, requestID, names.requested, h.now(), res.Response)
+	var rendered []byte
+	if nativePassthrough(protocol, upstream, res.Channel) {
+		// 同协议直通：上游原文就是调用方要的那套形状，按字段原样交出，
+		// 不走 dto 渲染器（判据见 nativePassthrough，渲染见 renderNativePassthrough）。
+		rendered, err = renderNativePassthrough(requestID, names.requested, res.Response.Raw)
+	} else {
+		rendered, err = renderSuccess(protocol, requestID, names.requested, h.now(), res.Response)
+	}
 	if err != nil {
 		observe.FromContext(r.Context()).Error("渲染响应失败", "err", err)
 		writeError(w, protocol, http.StatusInternalServerError, "internal error")
@@ -784,6 +792,60 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 	}
 	writeJSON(w, http.StatusOK, rendered)
 	return served{complete: true}
+}
+
+// nativePassthrough 判断这次非流式响应该不该直接用上游原文渲染。
+//
+// 两个条件缺一不可，与各适配器里的 nativeEligible 是同一个判据（不是近似）：
+//
+//   - NativeBody 非 nil：调用方发来的原文还在。挂上 onRequest / onResponse /
+//     onStream 任何一个 hook 时它会被摘掉（见 serveOnce 里插件那一段），
+//     于是这里也走枢纽渲染器——那三个 hook 改的正是枢纽那条路上的东西。
+//   - 渠道分派给入口协议的就是入口协议自己：DispatchProtocol 返回入口协议时，
+//     执行器会选到自述协议等于入口协议的那个适配器，而适配器的 nativeEligible
+//     正是「原文在 && 自述协议 == req.Protocol」。跨协议请求也带着原文，但它
+//     用另一个适配器的报文，Raw 是枢纽那一份。
+//
+// **不能用 Raw != nil 判直通**：两条路的 Raw 都非 nil——直通填上游原文，
+// 枢纽填 toRawMap 的再序列化（见 channel.Response.Raw）。拿它判会把跨协议的
+// 响应也当成原文发出去，而那份里已经少了 dto 不认识的字段。
+func nativePassthrough(protocol channel.Protocol, upstream *channel.Request, ch channel.Channel) bool {
+	return upstream != nil && upstream.NativeBody != nil && ch.DispatchProtocol(protocol) == protocol
+}
+
+// renderNativePassthrough 用上游原文渲染非流式响应体。
+//
+// 只换顶层的 id 与 model，其它键一个都不动：不按 dto 裁剪、不补字段、不删
+// 字段。这正是直通的意义——上游给了什么，调用方就看到什么。
+//
+//   - model 回显的是**调用方要的那个**，不是上游回报的那个（口径见调用点上
+//     方那段注释）；
+//   - id 是本次请求的关联标识，客户端与账单都按它对齐。
+//
+// 三套协议的响应对象顶层都有这两个字符串键，所以这一个函数对三协议通用，
+// 不需要按协议分。原文缺哪个就补哪个，除此之外不多加键。
+//
+// # 契约是逐字段等价，不是逐字节相同
+//
+// raw 是 map，经 json.Marshal 出来会按字典序重排键序，其中的数字也已经过
+// float64（适配器解码时如此），大整数会丢精度。所以直通的非流式响应与上游
+// 字节**逐字段等价、不逐字节相同**：要对照就按 JSON 对象比，别拿字节比。
+func renderNativePassthrough(id, model string, raw map[string]any) ([]byte, error) {
+	if raw == nil {
+		// 判据成立却拿不到原文，只可能是装配错误：适配器走直通时一定填了
+		// Raw。与「非流式入口收到没有响应体的结果」同一个处置——报出来，
+		// 而不是把 null 当响应写给调用方。
+		return nil, errors.New("同协议直通没有上游原文")
+	}
+	// 复制一份再改：Raw 是渠道响应上的数据，响应方向的快照也读它，就地
+	// 覆写会让「上游回报的是什么」在我们手里走样。
+	out := make(map[string]any, len(raw)+2)
+	for k, v := range raw {
+		out[k] = v
+	}
+	out["id"] = id
+	out["model"] = model
+	return json.Marshal(out)
 }
 
 // runRequestHook 为这次请求建插件会话，并把 onRequest 的补丁应用上去。
