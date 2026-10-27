@@ -249,12 +249,17 @@ func (p *nativeStreamPassthrough) finish(w io.Writer) error {
 	return p.inner.finish(w)
 }
 
-// errorFrame 满足接口，但**不会被 serveStream 调到**：调用方只按
-// start / event / finish 驱动，而错误帧是各渲染器自己在 event 里写的
-// （直通那条路见 p.event）。保留它只为让包装器仍是一份 streamRenderer——
-// 将来若有人把包装器再包一层，透传是唯一说得通的语义。
-func (p *nativeStreamPassthrough) errorFrame(w io.Writer, err error) error {
-	return p.inner.errorFrame(w, err)
+// errorFrame 是**唯一一个包装器不转发的方法**，而且它永远不会被调到：
+// serveStream 只按 start / event / finish 驱动，错误帧由各渲染器在自己
+// 的 event 里写（直通那条路见 p.event，它调 p.inner.errorFrame）。
+//
+// 所以这里**不转发**，而是炸掉。转发一个永远到不了的调用看着无害，实际
+// 有害：接口上有一半实现者的这个方法被真正调用（三个 inner 都走它），
+// 另一半（这里）不生效——下一个人照着接口实现新渲染器时，会以为它是必须
+// 的、并且以为包装器的那个是活的。要留的是「它会炸」这个断言，不是一句
+// 注释：注释只对读代码的人有效，而这里要防的正是读代码时被误导。
+func (p *nativeStreamPassthrough) errorFrame(io.Writer, error) error {
+	panic("nativeStreamPassthrough.errorFrame 不该被调用：错误帧由 inner.event 或 p.event 写")
 }
 
 // ── 帧 ─────────────────────────────────────────────────────────────────

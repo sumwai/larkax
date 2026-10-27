@@ -11,6 +11,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -419,4 +420,23 @@ func TestRendererFirstEventErrorWritesNoPreamble(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 包装器的 errorFrame 不该被调用——它炸掉而不是转发。
+//
+// 接口上它是个必须实现的方法，而 serveStream 只按 start / event / finish
+// 驱动：三个 inner 的 errorFrame 被真正调到（余额切断走它），包装器的那个
+// 永远不会。若它转发而不炸，「接口上有这个方法」就会让人以为它是活的，
+// 下一份实现照着抄时也跟着写一个假的。这条用例把「假接口成员」钉成红的。
+func TestPassthroughErrorFrameIsNotCallable(t *testing.T) {
+	p := &nativeStreamPassthrough{
+		inner:    &openAIStream{id: "i", model: "m", created: 1},
+		protocol: channel.ProtocolOpenAI,
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("包装器的 errorFrame 没有炸：它应当是不可达的断言，不是转发")
+		}
+	}()
+	_ = p.errorFrame(io.Discard, errStreamTest{})
 }
