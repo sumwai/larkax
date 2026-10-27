@@ -4,6 +4,11 @@ import "os"
 
 // helpOnly 判断这次调用是不是「只要帮助」：参数恰好是一个 -h 或 --help。
 //
+// **只认这两种写法**，尽管 `flag` 包也认 `-help` 与 `--h`。理由是基线版本对这两种
+// 写法本身就不一致：`plan -help` 退出码 0、`wallet -help` 却是 2。这一层若把四种
+// 一起收下，20 条叶子会变成「四种都通」，而其余命令仍是两种——不是统一，是又多出
+// 一种组合。要收就整仓一起定，那属于另一件事。
+//
 // 为什么需要它：好几条命令先把**第一个位置参数**摘掉，再交给下一层解析
 // （见 takeOperand 与 operand.go 的 takeLeadingOperand）。`user wallet credit -h`
 // 里那个 -h 会被当成用户 ID 摘走，于是报的是「缺少 <用户>」——人要的是用法，
@@ -22,7 +27,7 @@ import "os"
 // 在这里短路等于让那些命令一个旗标都记不下——补全脚本会安静地少掉一片旗标。
 // 与 takeOperand / takeLeadingOperand 在同一个开关上让路，是同一件事。
 //
-// 于是这条判据的影响面正好是「今天会失败的那一小撮」。
+// 于是这条判据的影响面正好是「在基线版本上会报参数错的那 20 条叶子」。
 func helpOnly(args []string) bool {
 	if collectingCommandFlags {
 		return false
@@ -33,9 +38,11 @@ func helpOnly(args []string) bool {
 // answerHelpFlag 处理「参数只有一个 -h 或 --help」：把短版打到 stderr 并返回
 // true（调用方直接 return nil，收尾与 `flag` 返回 ErrHelp 时一致）。
 //
-// 打到 stderr 而不是 stdout，是为了与不走这一层的叶子**逐字一致**：它们的 -h
-// 由 `fs.Usage` 打出，而那一路本来就写 stderr。两处选不同的流，会让人在
-// `cmd -h | less` 上看到同类命令两种结果。
+// 打 stderr 而不打 stdout，是跟着**叶子**的既有做法：走 flag 集的那一批
+// （`wallet credit -h`、`channel list -h`）本来就把用法打在 stderr 上，而这一层
+// 的 20 条全是没有自己 flag 集的叶子。两处打不同的流，会让人在 `cmd -h | less`
+// 上看到同类命令两种结果。有下级的组是另一档：它们大多打 stdout（41 条里 32 条），
+// 因为那一份是「接下来还有哪些子命令」的导览，会被人往下翻。
 //
 // 走 printUsage 而不是自己 Fprint，是为了让「帮助只有一个出口」这条仍然成立。
 func answerHelpFlag(args []string, short string) bool {
