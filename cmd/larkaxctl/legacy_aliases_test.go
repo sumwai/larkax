@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -386,8 +387,8 @@ func TestLegacyPriceEnableFlagForm(t *testing.T) {
 			t.Errorf("price %v 应当报参数错", args)
 			continue
 		}
-		if got := exitCode(r.err); got != exitUsage {
-			t.Errorf("price %v 的退出码 = %d，期望参数错的 %d", args, got, exitUsage)
+		if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+			t.Errorf("price %v 的退出码 = %d，期望参数错的 %d", args, got, cli.ExitUsage)
 		}
 	}
 }

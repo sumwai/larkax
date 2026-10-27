@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/snapshot"
 	"github.com/sumwai/larkax/internal/snapshotwire"
 )
@@ -540,8 +541,8 @@ func TestSnapshotGetRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -600,8 +601,8 @@ func TestSnapshotRedactRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -730,7 +731,7 @@ func TestRunSnapshotRedactRejectsBadPayload(t *testing.T) {
 				t.Fatal("坏报文应当报错")
 			}
 			// 不是参数错：报文是从标准输入来的，命令行本身没写错。
-			if code := exitCode(runErr); code == exitUsage {
+			if code := cli.ExitCode(runErr); code == cli.ExitUsage {
 				t.Errorf("报文问题不该报成参数错: %v", runErr)
 			}
 		})
@@ -811,8 +812,8 @@ func TestRunSnapshotRedactRejectsOversizedInput(t *testing.T) {
 	}
 	// 退出码是 1，不是 2：命令行本身没写错，问题出在喂进来的东西上——与上面
 	// 「坏报文」那条同一个理由（main.go 把 2 留给命令行参数）。
-	if code := exitCode(runErr); code != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", code, exitFailure)
+	if code := cli.ExitCode(runErr); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", code, cli.ExitFailure)
 	}
 	if strings.TrimSpace(out) != "" {
 		t.Errorf("超限在解析之前就拦下，stdout 不该有内容：\n%s", out)
@@ -1039,7 +1040,7 @@ func TestSnapshotGetUnknownRequestDoesNotLog(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("不存在的 request_id 应当报错")
 	}
-	if code := exitCode(runErr); code == exitOK {
+	if code := cli.ExitCode(runErr); code == cli.ExitOK {
 		t.Errorf("退出码不该是成功：%v", runErr)
 	}
 	if strings.Contains(out, "skeleton") {
@@ -1335,7 +1336,7 @@ func TestSnapshotGetJSONMarksWithheldRaw(t *testing.T) {
 		skeleton:    `{"messages":[{"content":"原样留下的提示词"}]}`,
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var runErr error
 	stdout, _ := captureStreams(t, func() {
 		runErr = runSnapshotGet([]string{requestID, "--actor", username, "--reason", "用例"})
@@ -1383,7 +1384,7 @@ func jsonDocOf(t *testing.T, doc map[string]any) map[string]any {
 	if err != nil {
 		t.Fatalf("文档编不成 JSON: %v", err)
 	}
-	if strings.ContainsRune(string(raw), escByte) {
+	if strings.ContainsRune(string(raw), cli.EscByte) {
 		t.Errorf("不许有转义序列：%s", raw)
 	}
 	var got map[string]any
@@ -1547,14 +1548,14 @@ func TestAllowlistDocCarriesEveryNote(t *testing.T) {
 //
 // 这条命令不连库，所以它是「整条命令的 stdout 契约」最省事的那条证据。
 func TestSnapshotAllowlistJSONStdoutIsPure(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	var err error
 	stdout, _ := captureStreams(t, func() { err = runSnapshotAllowlist(nil) })
 	if err != nil {
 		t.Fatalf("allowlist 失败: %v", err)
 	}
-	if strings.ContainsRune(stdout, escByte) {
+	if strings.ContainsRune(stdout, cli.EscByte) {
 		t.Errorf("json 模式下 stdout 里不许有转义序列：%q", stdout)
 	}
 
@@ -1573,7 +1574,7 @@ func TestSnapshotAllowlistJSONStdoutIsPure(t *testing.T) {
 	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
 		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, stdout)
 	}
-	if got.Status != jsonOK || got.ExitCode != exitOK {
+	if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
 		t.Errorf("status=%q exit_code=%d", got.Status, got.ExitCode)
 	}
 	if len(got.Allowlist) == 0 {
@@ -1617,7 +1618,7 @@ func TestSnapshotGetJSONStdoutIsPure(t *testing.T) {
 		createdAt: at.Add(time.Millisecond),
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var runErr error
 	stdout, _ := captureStreams(t, func() {
 		runErr = runSnapshotGet([]string{

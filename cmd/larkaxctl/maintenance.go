@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // maintenanceHelp 是 maintenance 的两版帮助文本（见 helpText）。
@@ -55,8 +57,8 @@ var maintenanceActions = []string{"idempotency", "session"}
 // runMaintenance 处理 maintenance 子命令。
 func runMaintenance(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, maintenanceShortUsage)
-		return usageErr(errors.New("maintenance 需要子命令"))
+		cli.PrintUsage(os.Stderr, maintenanceShortUsage)
+		return cli.UsageErr(errors.New("maintenance 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -69,10 +71,10 @@ func runMaintenance(args []string) error {
 		// 会话清理的实现与它的用法文本都在 maintenance_session.go。
 		return runMaintenanceSession(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, maintenanceShortUsage)
+		cli.PrintUsage(os.Stdout, maintenanceShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, maintenanceShortUsage)
-		return usageErr(fmt.Errorf("未知的 maintenance 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, maintenanceShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 maintenance 子命令 %q", action))
 	}
 }

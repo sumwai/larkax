@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // TestPriceTierTakesPositionalLocator 钉住 price tier 的三条命令都从第一个
@@ -40,7 +42,7 @@ func TestPriceTierTakesPositionalLocator(t *testing.T) {
 
 	// list：段号在第一列（机器可读档里是 segment），读回来确认上面那一段在。
 	t.Run("list", func(t *testing.T) {
-		withFormat(t, formatJSON)
+		withFormat(t, cli.FormatJSON)
 		var err error
 		stdout, _ := captureStreams(t, func() { err = runPriceTier([]string{"list", idArg}) })
 		if err != nil {

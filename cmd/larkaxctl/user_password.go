@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 )
 
@@ -49,13 +50,13 @@ var passwordInput io.Reader = os.Stdin
 
 // runUserPassword 设或重置一个用户的口令。
 func runUserPassword(args []string) error {
-	if err := jsonUnsupported("user password"); err != nil {
+	if err := cli.JSONUnsupported("user password"); err != nil {
 		return err
 	}
 
 	user, generate, readStdin, err := parseUserPassword(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	// 生成口令在连库之前做：熵源坏了是一次「这次命令根本没开始」的失败，
@@ -78,13 +79,13 @@ func runUserPassword(args []string) error {
 		if readStdin {
 			password, err = readPasswordInput()
 			if err != nil {
-				return usageErr(err)
+				return cli.UsageErr(err)
 			}
 		}
 		// 生成的那一个当然过得了；从标准输入来的要按同一套策略判。
 		// 判据与登录侧共用 auth.ValidatePassword，不在这里另写一遍。
 		if policyErr := auth.ValidatePassword(info.Username, password); policyErr != nil {
-			return usageErr(policyErr)
+			return cli.UsageErr(policyErr)
 		}
 
 		hash, err := auth.HashPassword(auth.DefaultKDFParams, password)
@@ -98,8 +99,8 @@ func runUserPassword(args []string) error {
 			return err
 		}
 
-		_, _ = fmt.Fprintln(humanStdout(), password)
-		_, _ = fmt.Fprintf(humanStderr(),
+		_, _ = fmt.Fprintln(cli.HumanStdout(), password)
+		_, _ = fmt.Fprintf(cli.HumanStderr(),
 			"已为用户 %s 设置新口令，只显示这一次；该用户的其他控制台会话已全部下线\n",
 			info.Username)
 		return nil
@@ -112,10 +113,10 @@ func runUserPassword(args []string) error {
 // `user password <user>`，而本仓其余命令一律用 `--user`。两种都收、两边
 // 都给时报错——静默挑一个会让「我明明写了另一个」无从解释。
 func parseUserPassword(args []string) (user string, generate, readStdin bool, err error) {
-	fs := newFlagSet("user password", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user password", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	userFlag := fs.String("user", "", "")
-	stringAlias(fs, userFlag, "u")
+	cli.StringAlias(fs, userFlag, "u")
 	generateFlag := fs.Bool("generate", false, "")
 	stdinFlag := fs.Bool("stdin", false, "")
 	if err := fs.Parse(reorderUserPasswordArgs(args)); err != nil {
@@ -196,28 +197,28 @@ func reorderUserPasswordArgs(args []string) []string {
 
 // runUserUnlock 清掉一个账号的失败计数与锁定。
 func runUserUnlock(args []string) error {
-	if err := jsonUnsupported("user unlock"); err != nil {
+	if err := cli.JSONUnsupported("user unlock"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("user unlock", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, userShortUsage) }
+	fs := cli.NewFlagSet("user unlock", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, userShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 1 {
-		return usageErr(fmt.Errorf("unlock 只收一个用户标识，得到 %d 个", fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("unlock 只收一个用户标识，得到 %d 个", fs.NArg()))
 	}
 	if fs.NArg() == 1 {
 		if *user != "" {
-			return usageErr(errors.New("用户既出现在位置参数里，又给了 --user：只留一个"))
+			return cli.UsageErr(errors.New("用户既出现在位置参数里，又给了 --user：只留一个"))
 		}
 		*user = fs.Arg(0)
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少用户（ID 或用户名）：用 --user 或位置参数给出"))
+		return cli.UsageErr(errors.New("缺少用户（ID 或用户名）：用 --user 或位置参数给出"))
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -225,7 +226,7 @@ func runUserUnlock(args []string) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStdout(), "已解锁用户 %s\n", info.Username)
+		_, _ = fmt.Fprintf(cli.HumanStdout(), "已解锁用户 %s\n", info.Username)
 		return nil
 	})
 }

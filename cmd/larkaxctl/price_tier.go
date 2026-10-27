@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/pricing"
 )
@@ -76,15 +77,15 @@ var priceTierActions = []string{"add", "list", "remove"}
 //
 // 这些命令没有同名的旗标，定位符只能写成位置参数，所以 flag 留空；称呼沿用
 // price update 那一份（见 priceLocatorOperand），几处定位的是同一件事。
-var priceSegmentLocatorOperand = operandSpec{
-	what: "定位符",
+var priceSegmentLocatorOperand = cli.OperandSpec{
+	What: "定位符",
 }
 
 // runPriceTier 处理 price 下的 tier 子命令。
 func runPriceTier(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, priceTierShortUsage)
-		return usageErr(errors.New("price tier 需要子命令"))
+		cli.PrintUsage(os.Stderr, priceTierShortUsage)
+		return cli.UsageErr(errors.New("price tier 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -96,14 +97,14 @@ func runPriceTier(args []string) error {
 	case "remove":
 		return runPriceTierRemove(rest)
 	case "help":
-		printUsage(os.Stdout, priceTierUsage)
+		cli.PrintUsage(os.Stdout, priceTierUsage)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, priceTierShortUsage)
+		cli.PrintUsage(os.Stdout, priceTierShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, priceTierShortUsage)
-		return usageErr(fmt.Errorf("未知的 price tier 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, priceTierShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 price tier 子命令 %q", action))
 	}
 }
 
@@ -120,12 +121,12 @@ type priceTierRequest struct {
 }
 
 func runPriceTierAdd(args []string) error {
-	if err := jsonUnsupported("price tier add"); err != nil {
+	if err := cli.JSONUnsupported("price tier add"); err != nil {
 		return err
 	}
 	req, err := parsePriceTierAdd(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -155,22 +156,22 @@ func runPriceTierAdd(args []string) error {
 		}); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(),
+		_, _ = fmt.Fprintf(cli.HumanStderr(),
 			"已为计价规则 %d 加上第 %d 段阶梯：输入上下文达到 %d token 起，改写 %s。\n",
 			info.ID, segment, above, slotPricesLabel(req.prices))
-		_, _ = fmt.Fprintln(humanStdout(), segment)
+		_, _ = fmt.Fprintln(cli.HumanStdout(), segment)
 		return nil
 	})
 }
 
 func parsePriceTierAdd(args []string) (priceTierRequest, error) {
-	locator, rest, err := takeLeadingOperand(args, priceSegmentLocatorOperand)
+	locator, rest, err := cli.TakeLeadingOperand(args, priceSegmentLocatorOperand)
 	if err != nil {
 		return priceTierRequest{}, err
 	}
 
-	fs := newFlagSet("price tier add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceTierShortUsage) }
+	fs := cli.NewFlagSet("price tier add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceTierShortUsage) }
 	above := fs.Int64("above", 0, "")
 	by := fs.String("by", "", "")
 	slots := newPriceSlotFlags(fs)
@@ -211,13 +212,13 @@ func parsePriceTierAdd(args []string) (priceTierRequest, error) {
 }
 
 func runPriceTierList(args []string) error {
-	fs := newFlagSet("price tier list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceTierShortUsage) }
+	fs := cli.NewFlagSet("price tier list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceTierShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"list 需要一个规则名或规则 ID，得到 %d 个参数：用法 larkaxctl price tier list <规则名 或 ID>",
 			fs.NArg()))
 	}
@@ -229,21 +230,21 @@ func runPriceTierList(args []string) error {
 			return err
 		}
 		tiers := collectPriceTiers(info.Schedule)
-		if jsonOutput() {
-			return emitJSON(os.Stdout, priceTierListDoc(info, tiers), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, priceTierListDoc(info, tiers), nil)
 		}
-		printTierList(humanStdout(), tiers)
+		printTierList(cli.HumanStdout(), tiers)
 		return nil
 	})
 }
 
 func runPriceTierRemove(args []string) error {
-	if err := jsonUnsupported("price tier remove"); err != nil {
+	if err := cli.JSONUnsupported("price tier remove"); err != nil {
 		return err
 	}
 	locator, segment, by, err := parsePriceSegmentRemove("price tier", priceTierShortUsage, args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -276,7 +277,7 @@ func runPriceTierRemove(args []string) error {
 		}); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已删除计价规则 %d 的第 %d 段阶梯（门槛 %d token）。\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除计价规则 %d 的第 %d 段阶梯（门槛 %d token）。\n",
 			info.ID, segment, removed)
 		return nil
 	})
@@ -292,7 +293,7 @@ func runPriceTierRemove(args []string) error {
 // flag 包遇到第一个非旗标词就停，只认后一种写法时，`remove r1 2 --by alice`
 // 里的 --by 会整段落进多余参数。两种写法都收，多给的一律报错。
 func parsePriceSegmentRemove(group, short string, args []string) (locator string, segment int, by string, err error) {
-	locator, rest, err := takeLeadingOperand(args, priceSegmentLocatorOperand)
+	locator, rest, err := cli.TakeLeadingOperand(args, priceSegmentLocatorOperand)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -302,8 +303,8 @@ func parsePriceSegmentRemove(group, short string, args []string) (locator string
 		rest = rest[1:]
 	}
 
-	fs := newFlagSet(group+" remove", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, short) }
+	fs := cli.NewFlagSet(group+" remove", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, short) }
 	byFlag := fs.String("by", "", "")
 	if err := fs.Parse(rest); err != nil {
 		return "", 0, "", err
@@ -343,7 +344,7 @@ func parsePriceSegmentRemove(group, short string, args []string) (locator string
 func loadScheduleRule(ctx context.Context, db *sql.DB, locator, thing string) (pricing.RuleInfo, error) {
 	id, err := resolvePriceRuleLocator(ctx, db, locator, nil)
 	if err != nil {
-		return pricing.RuleInfo{}, usageErr(err)
+		return pricing.RuleInfo{}, cli.UsageErr(err)
 	}
 	info, err := pricing.NewAdmin(db).Get(ctx, id)
 	if err != nil {
@@ -389,20 +390,20 @@ func collectPriceTiers(schedule *pricing.Schedule) []priceTierInfo {
 // printTierList 打印一张阶梯表。
 func printTierList(w io.Writer, tiers []priceTierInfo) {
 	if len(tiers) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("阶梯档位", "price tier add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("阶梯档位", "price tier add"))
 		return
 	}
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"段号", "门槛（输入上下文 token）", "单价（每 token）"}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 	for _, tier := range tiers {
 		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\n",
-			p.bold(strconv.Itoa(tier.segment)), tier.above, slotPricesLabel(tier.prices))
+			p.Bold(strconv.Itoa(tier.segment)), tier.above, slotPricesLabel(tier.prices))
 	}
 	_ = tw.Flush()
 }
@@ -426,7 +427,7 @@ func slotPricesLabel(prices map[string]float64) string {
 
 // priceTierListDoc 组装 price tier list 的机器可读输出。
 func priceTierListDoc(rule pricing.RuleInfo, tiers []priceTierInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["rule"] = map[string]any{
 		"id":    rule.ID,
 		"name":  rule.Name,

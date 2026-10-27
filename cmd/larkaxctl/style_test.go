@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/catalog"
@@ -36,12 +37,12 @@ import (
 // withTerminal 把「输出目标是不是交互终端」换成给定的答案。
 //
 // 真实的 TTY 在 `go test` 里拿不到（stdout 是管道），所以这个判断本身是变量
-// （见 style.go 的 terminalProbe）。用例是唯一读它的地方。
+// （见 cli 包的 style.go 的 terminalProbe）。用例是唯一读它的地方。
 func withTerminal(t *testing.T, isTerminal bool) {
 	t.Helper()
-	saved := terminalProbe
-	terminalProbe = func(io.Writer) bool { return isTerminal }
-	t.Cleanup(func() { terminalProbe = saved })
+	saved := cli.TerminalProbe
+	cli.TerminalProbe = func(io.Writer) bool { return isTerminal }
+	t.Cleanup(func() { cli.TerminalProbe = saved })
 }
 
 // colorEnv 把两个「别上色」的开关显式清干净，再按需设其中一个。
@@ -159,10 +160,10 @@ func TestStyledTableStillAligns(t *testing.T) {
 	colorEnv(t)
 
 	var buf bytes.Buffer
-	p := newPalette(&buf)
-	tw := newTableWriter(&buf)
-	_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold("模型规范名"), p.bold("单价"))
-	_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold("claude-x"), p.dim("1.00"))
+	p := cli.NewPalette(&buf)
+	tw := cli.NewTableWriter(&buf)
+	_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold("模型规范名"), p.Bold("单价"))
+	_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold("claude-x"), p.Dim("1.00"))
 	_ = tw.Flush()
 
 	out := buf.String()
@@ -357,11 +358,11 @@ func TestHelpTextStylesWithoutChangingContent(t *testing.T) {
 			withTerminal(t, false)
 			colorEnv(t)
 			var plain bytes.Buffer
-			printUsage(&plain, tc.text)
+			cli.PrintUsage(&plain, tc.text)
 
 			withTerminal(t, true)
 			var styled bytes.Buffer
-			printUsage(&styled, tc.text)
+			cli.PrintUsage(&styled, tc.text)
 
 			if !strings.Contains(styled.String(), "\x1b[") {
 				t.Fatalf("这一份没上色：它没走 palette\n%s", styled.String())
@@ -390,7 +391,7 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 	colorEnv(t)
 
 	var short bytes.Buffer
-	printUsage(&short, versionShortUsage)
+	cli.PrintUsage(&short, versionShortUsage)
 
 	for _, want := range []string{
 		"\x1b[1m用法：\x1b[0m",                                  // 段标题：整行加粗
@@ -414,7 +415,7 @@ func TestHelpColoursStructureOnly(t *testing.T) {
 	}
 
 	var root bytes.Buffer
-	printUsage(&root, usage)
+	cli.PrintUsage(&root, usage)
 	for _, want := range []string{
 		"\x1b[1m核心与诊断 (Core & Diagnostics)：\x1b[0m", // 组标题
 		"\x1b[1mdoctor\x1b[0m",           // 清单里的命令名
@@ -482,7 +483,7 @@ func TestHelpLineJudgement(t *testing.T) {
 			colorEnv(t)
 
 			var buf bytes.Buffer
-			printUsage(&buf, tc.text)
+			cli.PrintUsage(&buf, tc.text)
 			if got := buf.String(); got != tc.want {
 				t.Errorf("上色后 =\n%s\n期望 =\n%s", helpTextRounding(got), helpTextRounding(tc.want))
 			}
@@ -519,8 +520,8 @@ func TestHelpTextHasNoStyleWhenColourIsOff(t *testing.T) {
 		{"--format json", func(t *testing.T) {
 			withTerminal(t, true)
 			colorEnv(t)
-			outputFormat = formatJSON
-			t.Cleanup(func() { outputFormat = formatTable })
+			cli.OutputFormat = cli.FormatJSON
+			t.Cleanup(func() { cli.OutputFormat = cli.FormatTable })
 		}},
 	}
 
@@ -530,7 +531,7 @@ func TestHelpTextHasNoStyleWhenColourIsOff(t *testing.T) {
 			tc.apply(t)
 			for _, one := range texts {
 				var buf bytes.Buffer
-				printUsage(&buf, one.text)
+				cli.PrintUsage(&buf, one.text)
 				if strings.Contains(buf.String(), "\x1b") {
 					t.Errorf("%s：%s 里出现了转义序列：\n%q", tc.name, one.what, buf.String())
 				}
@@ -606,8 +607,8 @@ func TestQuietStillColoursHelp(t *testing.T) {
 	withTerminal(t, true)
 	colorEnv(t)
 
-	quietOutput = true
-	t.Cleanup(func() { quietOutput = false })
+	cli.QuietOutput = true
+	t.Cleanup(func() { cli.QuietOutput = false })
 
 	var stdout, stderr string
 	if err := runQuietly(t, []string{"help", "channel"}, &stdout, &stderr); err != nil {
@@ -629,7 +630,7 @@ func helpOf(t *testing.T, c command, flag string) (string, string) {
 	stdout, stderr := captureStreams(t, func() { err = c.run([]string{flag}) })
 	// flag 解析到 -h / --help 时返回 ErrHelp，而那时用法已经打过了：那不是失败，
 	// main 也照这个判据收尾（见 helpRequested）。
-	if err != nil && !helpRequested(err) {
+	if err != nil && !cli.HelpRequested(err) {
 		t.Fatalf("%s %s 报错了: %v", c.name, flag, err)
 	}
 	return stdout, stderr

@@ -8,6 +8,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/migrate"
 )
 
@@ -53,8 +54,8 @@ func TestMigrateAllowMissingOnlyOnUp(t *testing.T) {
 			if err == nil {
 				t.Fatalf("migrate %s 应当被挡成参数错", strings.Join(args, " "))
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错）: %v", code, exitUsage, err)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）: %v", code, cli.ExitUsage, err)
 			}
 			if !strings.Contains(err.Error(), "--allow-missing") {
 				t.Errorf("错误信息要点名这个开关: %v", err)

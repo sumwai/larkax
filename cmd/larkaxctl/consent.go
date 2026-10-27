@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/settings"
@@ -102,16 +103,16 @@ const consentMaxWindowKey = "capture.consent_max_window_hours"
 var consentActions = []string{"grant", "list", "revoke"}
 
 func runConsent(args []string) error {
-	fs := newFlagSet("consent", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
+	fs := cli.NewFlagSet("consent", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, consentShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return usageErr(errors.New("consent 需要子命令"))
+		return cli.UsageErr(errors.New("consent 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -123,25 +124,25 @@ func runConsent(args []string) error {
 	case "revoke":
 		return runConsentRevoke(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, consentShortUsage)
+		cli.PrintUsage(os.Stdout, consentShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, consentShortUsage)
-		return usageErr(fmt.Errorf("未知的 consent 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, consentShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 consent 子命令 %q", action))
 	}
 }
 
 func runConsentGrant(args []string) error {
 	// 与别的写类子命令同一条：json 模式下必须在写库之前拦下来，否则调用方
-	// 只看到一句参数错，而授权已经落了库（见 format.go 的 jsonUnsupported）。
-	if err := jsonUnsupported("consent grant"); err != nil {
+	// 只看到一句参数错，而授权已经落了库（见 cli 包的 format.go 的 jsonUnsupported）。
+	if err := cli.JSONUnsupported("consent grant"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("consent grant", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
+	fs := cli.NewFlagSet("consent grant", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, consentShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	scope := fs.String("scope", "", "")
 	requestID := fs.String("request-id", "", "")
 	expiresAt := fs.String("expires-at", "", "")
@@ -151,16 +152,16 @@ func runConsentGrant(args []string) error {
 	to := fs.String("to", "", "")
 	agree := fs.Bool("agree", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("grant 不接受位置参数，得到 %q：授权给谁用 --user 指定", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("grant 不接受位置参数，得到 %q：授权给谁用 --user 指定", fs.Arg(0)))
 	}
 	if *user == "" {
-		return usageErr(errors.New("缺少 --user：这条授权给哪一个用户"))
+		return cli.UsageErr(errors.New("缺少 --user：这条授权给哪一个用户"))
 	}
 	if *scope == "" {
-		return usageErr(fmt.Errorf("缺少 --scope：%s 或 %s",
+		return cli.UsageErr(fmt.Errorf("缺少 --scope：%s 或 %s",
 			snapshotwire.ConsentScopeSingleRequest, snapshotwire.ConsentScopeTimeWindow))
 	}
 
@@ -169,31 +170,31 @@ func runConsentGrant(args []string) error {
 	switch *scope {
 	case snapshotwire.ConsentScopeSingleRequest:
 		if *from != "" || *to != "" {
-			return usageErr(errors.New("--scope single_request 不接受 --from / --to：按单条请求授权只用到 --request-id 与到期时间"))
+			return cli.UsageErr(errors.New("--scope single_request 不接受 --from / --to：按单条请求授权只用到 --request-id 与到期时间"))
 		}
 		// request_id 会进 grant 的回执与 consent list 的 RANGE 那一栏：控制
 		// 字符在连库之前拒掉（判据也在 ConsentStore.Grant 的 validate 里）。
-		if err := checkDisplayText("--request-id", *requestID); err != nil {
+		if err := cli.CheckDisplayText("--request-id", *requestID); err != nil {
 			return err
 		}
-		at, err := resolveExpiry(seen, expiryFlags{
-			expiresAt: *expiresAt, ttl: *ttl, forever: *forever,
-		}, expiryNow(), func(v string) (time.Time, error) {
+		at, err := cli.ResolveExpiry(seen, cli.ExpiryFlags{
+			ExpiresAt: *expiresAt, TTL: *ttl, Forever: *forever,
+		}, cli.ExpiryNow(), func(v string) (time.Time, error) {
 			return parseConsentTime("--expires-at", v)
 		})
-		if errors.Is(err, errExpiryNotGiven) {
-			return usageErr(errors.New("缺少过期时间：--expires-at、--ttl 或 --forever 给一个"))
+		if errors.Is(err, cli.ErrExpiryNotGiven) {
+			return cli.UsageErr(errors.New("缺少过期时间：--expires-at、--ttl 或 --forever 给一个"))
 		}
 		if err != nil {
-			return usageErr(err)
+			return cli.UsageErr(err)
 		}
 		req.ExpiresAt = at
 	case snapshotwire.ConsentScopeTimeWindow:
-		if *requestID != "" || flagGiven(seen, "expires-at") || flagGiven(seen, "ttl") || *forever {
-			return usageErr(errors.New("--scope time_window 不接受 --request-id / --expires-at / --ttl / --forever：时间窗的到期时间就是 --to"))
+		if *requestID != "" || cli.FlagGiven(seen, "expires-at") || cli.FlagGiven(seen, "ttl") || *forever {
+			return cli.UsageErr(errors.New("--scope time_window 不接受 --request-id / --expires-at / --ttl / --forever：时间窗的到期时间就是 --to"))
 		}
 		if *from == "" || *to == "" {
-			return usageErr(errors.New("缺少 --from 或 --to：时间窗的两端都要给"))
+			return cli.UsageErr(errors.New("缺少 --from 或 --to：时间窗的两端都要给"))
 		}
 		start, err := parseConsentTime("--from", *from)
 		if err != nil {
@@ -205,7 +206,7 @@ func runConsentGrant(args []string) error {
 		}
 		req.WindowStart, req.WindowEnd = start, end
 	default:
-		return usageErr(fmt.Errorf("--scope 只能是 %s 或 %s，得到 %q",
+		return cli.UsageErr(fmt.Errorf("--scope 只能是 %s 或 %s，得到 %q",
 			snapshotwire.ConsentScopeSingleRequest, snapshotwire.ConsentScopeTimeWindow, *scope))
 	}
 
@@ -218,7 +219,7 @@ func runConsentGrant(args []string) error {
 	_, _ = fmt.Fprint(os.Stderr, consentDisclosure())
 
 	if !*agree {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"未确认：读完上面那段同意文案，同意之后加 --agree 再执行一次"))
 	}
 
@@ -245,26 +246,26 @@ func runConsentGrant(args []string) error {
 			// 类型认它（见 ConsentInvalidError）。
 			var bad *snapshotwire.ConsentInvalidError
 			if errors.As(err, &bad) {
-				return usageErr(err)
+				return cli.UsageErr(err)
 			}
 			return err
 		}
 
-		printConsentGranted(humanStderr(), id, owner.Username, req)
+		printConsentGranted(cli.HumanStderr(), id, owner.Username, req)
 		return nil
 	})
 }
 
 func runConsentList(args []string) error {
-	fs := newFlagSet("consent list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
+	fs := cli.NewFlagSet("consent list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, consentShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q：按用户筛用 --user", fs.Arg(0)))
 	}
 
 	return withConsentStore(func(ctx context.Context, db *sql.DB, store *snapshotwire.ConsentStore) error {
@@ -284,34 +285,34 @@ func runConsentList(args []string) error {
 			return err
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, consentListDoc(rows), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, consentListDoc(rows), nil)
 		}
-		printConsentList(humanStdout(), rows)
+		printConsentList(cli.HumanStdout(), rows)
 		return nil
 	})
 }
 
 func runConsentRevoke(args []string) error {
-	if err := jsonUnsupported("consent revoke"); err != nil {
+	if err := cli.JSONUnsupported("consent revoke"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("consent revoke", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, consentShortUsage) }
+	fs := cli.NewFlagSet("consent revoke", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, consentShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return usageErr(errors.New("缺少要撤销的授权 ID：larkaxctl consent revoke <授权 ID>"))
+		return cli.UsageErr(errors.New("缺少要撤销的授权 ID：larkaxctl consent revoke <授权 ID>"))
 	}
 	if len(rest) > 1 {
-		return usageErr(fmt.Errorf("revoke 只接受一个授权 ID，多出来的是 %q", rest[1]))
+		return cli.UsageErr(fmt.Errorf("revoke 只接受一个授权 ID，多出来的是 %q", rest[1]))
 	}
 	id, err := strconv.ParseInt(rest[0], 10, 64)
 	if err != nil || id <= 0 {
-		return usageErr(fmt.Errorf("授权 ID 要是一个正整数，得到 %q", rest[0]))
+		return cli.UsageErr(fmt.Errorf("授权 ID 要是一个正整数，得到 %q", rest[0]))
 	}
 
 	return withConsentStore(func(ctx context.Context, _ *sql.DB, store *snapshotwire.ConsentStore) error {
@@ -326,7 +327,7 @@ func runConsentRevoke(args []string) error {
 			return fmt.Errorf("%w：id=%d（larkaxctl consent list 能看到现有的授权）",
 				snapshotwire.ErrConsentNotFound, id)
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已撤销授权 id=%d：这条授权从此刻起不再放行原文\n", id)
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已撤销授权 id=%d：这条授权从此刻起不再放行原文\n", id)
 		return nil
 	})
 }
@@ -366,7 +367,7 @@ func consentMaxWindow(vals *settings.Values) (time.Duration, error) {
 func parseConsentTime(name, value string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		return time.Time{}, usageErr(fmt.Errorf(
+		return time.Time{}, cli.UsageErr(fmt.Errorf(
 			"%s 不是 RFC3339 时刻（例如 2026-10-18T15:00:00+08:00）: %w", name, err))
 	}
 	return t, nil
@@ -405,21 +406,21 @@ func printConsentGranted(w io.Writer, id int64, username string, req snapshotwir
 // 「这一条现在还能不能换来原文」。
 func printConsentList(w io.Writer, rows []snapshotwire.Consent) {
 	if len(rows) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("授权记录", "consent grant"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("授权记录", "consent grant"))
 		return
 	}
 
 	now := time.Now()
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("ID"), p.bold("USER"), p.bold("SCOPE"), p.bold("STATE"),
-		p.bold("EXPIRES"), p.bold("RANGE"))
+		p.Bold("ID"), p.Bold("USER"), p.Bold("SCOPE"), p.Bold("STATE"),
+		p.Bold("EXPIRES"), p.Bold("RANGE"))
 	for _, c := range rows {
 		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.FormatInt(c.ID, 10)), c.UserID, c.Scope,
+			p.Bold(strconv.FormatInt(c.ID, 10)), c.UserID, c.Scope,
 			consentStateLabel(c.StateAt(now)),
-			p.dim(c.ExpiresAt.Format("01-02 15:04")), consentRange(c))
+			p.Dim(c.ExpiresAt.Format("01-02 15:04")), consentRange(c))
 	}
 	_ = tw.Flush()
 }
@@ -456,13 +457,13 @@ func consentRange(c snapshotwire.Consent) string {
 
 // consentListDoc 组装 consent list 的机器可读输出。
 //
-// 与 printConsentList 是同一份数据的另一条渲染路径（见 format.go 开头）。
+// 与 printConsentList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）。
 func consentListDoc(rows []snapshotwire.Consent) map[string]any {
 	now := time.Now()
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 
 	active := 0
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, c := range rows {
 		if c.StateAt(now) == snapshotwire.ConsentStateActive {
@@ -485,14 +486,14 @@ func consentEntry(c snapshotwire.Consent, now time.Time) map[string]any {
 		"id":              c.ID,
 		"user_id":         c.UserID,
 		"scope":           c.Scope,
-		"request_id":      nullableString(c.RequestID),
-		"window_start":    jsonTimePtr(c.WindowStart),
-		"window_end":      jsonTimePtr(c.WindowEnd),
+		"request_id":      cli.NullableString(c.RequestID),
+		"window_start":    cli.JSONTimePtr(c.WindowStart),
+		"window_end":      cli.JSONTimePtr(c.WindowEnd),
 		"consent_text":    c.ConsentText,
 		"consent_version": c.ConsentVersion,
-		"agreed_at":       jsonTime(c.AgreedAt),
-		"revoked_at":      jsonTimePtr(c.RevokedAt),
-		"expires_at":      jsonTime(c.ExpiresAt),
+		"agreed_at":       cli.JSONTime(c.AgreedAt),
+		"revoked_at":      cli.JSONTimePtr(c.RevokedAt),
+		"expires_at":      cli.JSONTime(c.ExpiresAt),
 		"state":           c.StateAt(now),
 	}
 }

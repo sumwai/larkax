@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
+)
 
 // TestJoinChoiceNames 直接钉住分隔规则的几种形态。
 //
@@ -19,7 +23,7 @@ func TestJoinChoiceNames(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := joinChoiceNames(tc.in); got != tc.want {
+			if got := cli.JoinChoiceNames(tc.in); got != tc.want {
 				t.Errorf("joinChoiceNames(%q) = %q，想要 %q", tc.in, got, tc.want)
 			}
 		})

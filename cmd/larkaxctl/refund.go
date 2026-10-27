@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -108,43 +109,43 @@ func txnIDForRefund(ref string) ledger.TxnID {
 // 分录、交给 store.PostTransaction 落库。记账逻辑一行都不在这里——「一笔退款拆到哪
 // 几个科目上」是 internal/ledger 已经定好的语义。
 func runWalletRefund(args []string) error {
-	if err := jsonUnsupported("wallet refund"); err != nil {
+	if err := cli.JSONUnsupported("wallet refund"); err != nil {
 		return err
 	}
 
 	// `wallet refund help` 给长版，理由与 secret rotate 那一处相同：那一份把
 	// 退款拆到哪几个科目上讲全了，短版只是一屏摘要。
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletRefundUsage)
+		cli.PrintUsage(os.Stdout, walletRefundUsage)
 		return nil
 	}
 
-	fs := newFlagSet("wallet refund", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletRefundShortUsage) }
+	fs := cli.NewFlagSet("wallet refund", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletRefundShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	memo := fs.String("memo", "", "")
 	merchant := fs.String("merchant", "", "")
 	merchantShare := fs.String("merchant-share", "", "")
 	upstreamCost := fs.String("upstream-cost", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"refund 不接受位置参数，得到 %q：用户、金额与单据号都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 	// 外部单据号必填且没有默认值，理由与 credit 那一条相同：默认值会把「操作者
 	// 忘了给单号」变成两笔互不相干的退款，而这两笔在账面上都合法。
-	refundRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+	refundRef, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError(
 		"它是这笔退款对应的外部单据号，同时是幂等键——重跑同一条命令时靠它认出「已经退过款」"))
 	if refErr != nil {
 		return refErr
@@ -182,16 +183,16 @@ func runWalletRefund(args []string) error {
 	merchantRef := strings.TrimSpace(*merchant)
 	switch {
 	case merchantRef != "" && !share.IsPositive():
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"给了 --merchant 却没给 --merchant-share：这次退款要冲回这个商户多少分成？只给商户的话这一个旗标不产生任何作用"))
 	case merchantRef == "" && share.IsPositive():
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"给了 --merchant-share 却没给 --merchant：这笔分成记在哪个商户名下？先解析成一个真实存在的用户才写得进去"))
 	}
 	// 和超过退款额也在连库之前拒：Ledger 那一层同样会拒，但那是「其他失败」（退出 1），
 	// 而这是命令里的数写错了——改一下命令就能过，退出码该是 2。
 	if refunded := share.Add(cost); refunded.Cmp(amountValue) > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"--merchant-share %s 与 --upstream-cost %s 之和 %s 超过退款额 %s："+
 				"退款只能把收过的钱冲回去，多出来的部分是一笔要单独说明的调账（wallet adjust）",
 			share, cost, refunded, amountValue))
@@ -241,12 +242,12 @@ func runWalletRefund(args []string) error {
 		}
 
 		if *dryRun {
-			return inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			return cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				applied, postErr := store.New(db).PostTransactionTx(ctx, tx, txn)
 				if postErr != nil {
 					return postErr
 				}
-				printRefundedWallet(humanStdout(), walletRefund{
+				printRefundedWallet(cli.HumanStdout(), walletRefund{
 					Owner:  owner,
 					Asset:  assetValue,
 					Amount: amountValue,
@@ -263,7 +264,7 @@ func runWalletRefund(args []string) error {
 			return postErr
 		}
 
-		printRefundedWallet(humanStdout(), walletRefund{
+		printRefundedWallet(cli.HumanStdout(), walletRefund{
 			Owner:  owner,
 			Asset:  assetValue,
 			Amount: amountValue,
@@ -294,7 +295,7 @@ func parseNonNegativeAmountFlag(flagName, plain string) (money.Amount, error) {
 		return money.Zero, err
 	}
 	if amount.IsNegative() {
-		return money.Zero, usageErr(fmt.Errorf(
+		return money.Zero, cli.UsageErr(fmt.Errorf(
 			"%s 不能为负数，得到 %s：它是这次要冲回的金额，方向由分录决定", flagName, amount))
 	}
 	return amount, nil
@@ -330,7 +331,7 @@ func printRefundedWallet(w io.Writer, r walletRefund, applied, dryRun bool) {
 		_, _ = fmt.Fprintln(w, "此前写入的分录：")
 		printEntryLines(w, r.Txn.Entries)
 		if dryRun {
-			printDryRunNote(w)
+			cli.PrintDryRunNote(w)
 		}
 		return
 	}
@@ -353,6 +354,6 @@ func printRefundedWallet(w io.Writer, r walletRefund, applied, dryRun bool) {
 	_, _ = fmt.Fprintln(w, header)
 	printEntryLines(w, r.Txn.Entries)
 	if dryRun {
-		printDryRunNote(w)
+		cli.PrintDryRunNote(w)
 	}
 }

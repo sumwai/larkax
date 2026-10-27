@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/textshape"
 )
 
@@ -278,8 +279,8 @@ func TestWriteCommandsRejectControlCharsInDisplayText(t *testing.T) {
 					if r.err == nil {
 						t.Fatalf("%q 应当被拒，但命令退出了 0", ch.bad)
 					}
-					if code := exitCode(r.err); code != exitUsage {
-						t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, exitUsage)
+					if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+						t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, cli.ExitUsage)
 					}
 					for _, want := range []string{"控制字符", ch.want, tc.want} {
 						if !strings.Contains(r.err.Error(), want) {
@@ -315,8 +316,8 @@ export default definePlugin({
 	if r.err == nil {
 		t.Fatal("meta.version 里的换行应当被拒，但命令退出了 0")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, exitUsage)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, cli.ExitUsage)
 	}
 	for _, want := range []string{"控制字符", "换行（U+000A）", "meta.version"} {
 		if !strings.Contains(r.err.Error(), want) {
@@ -343,8 +344,8 @@ func TestUserUpdateRejectsControlCharDisplayNameLeavesNoChange(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("展示名里的控制字符应当被拒，但命令退出了 0")
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, exitUsage)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错那一档）", code, cli.ExitUsage)
 	}
 	for _, want := range []string{"控制字符", "换行（U+000A）", "--display-name"} {
 		if !strings.Contains(r.err.Error(), want) {
@@ -384,13 +385,13 @@ func TestUserUpdateRejectsControlCharDisplayNameLeavesNoChange(t *testing.T) {
 // 而它只有在 usageErrors 里登记过才有退出码 2——漏登记的那一天它会安静地
 // 退回 1，而 1 与 2 在脚本里是两种处置。
 func TestExitCodeUsageForTextshapeControlChar(t *testing.T) {
-	if got := exitCode(textshape.ErrControlChar); got != exitUsage {
-		t.Errorf("textshape.ErrControlChar 的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(textshape.ErrControlChar); got != cli.ExitUsage {
+		t.Errorf("textshape.ErrControlChar 的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 
 	wrapped := fmt.Errorf("写入失败: %w", textshape.ErrControlChar)
-	if got := exitCode(wrapped); got != exitUsage {
-		t.Errorf("包了一层之后仍应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(wrapped); got != cli.ExitUsage {
+		t.Errorf("包了一层之后仍应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 	if !errors.Is(wrapped, textshape.ErrControlChar) {
 		t.Error("errors.Is 认不出这条链，上一条断言就没有意义")

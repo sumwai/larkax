@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -121,8 +122,8 @@ func TestUpstreamCostCreateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -189,8 +190,8 @@ func TestUpstreamCostCreateUnknownChannelIsConflict(t *testing.T) {
 	if err == nil {
 		t.Fatal("渠道不在库里时应当被拒")
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("外键冲突的退出码应当是 %d，得到 %d（%v）", exitConflict, got, err)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("外键冲突的退出码应当是 %d，得到 %d（%v）", cli.ExitConflict, got, err)
 	}
 }
 
@@ -373,8 +374,8 @@ func TestUpstreamCostListRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -480,8 +481,8 @@ func TestUpstreamCostUpdateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -502,8 +503,8 @@ func TestUpstreamCostUpdateUnknownIDIsConflict(t *testing.T) {
 	if !errors.Is(err, pricing.ErrCostNotFound) {
 		t.Fatalf("期望 ErrCostNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("「那一行不在」的退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("「那一行不在」的退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 
@@ -614,8 +615,8 @@ func TestUpstreamCostDisableRejectsBadID(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -642,7 +643,7 @@ func TestUpstreamCostListDocIsMachineReadable(t *testing.T) {
 
 	q := pricing.CostListQuery{ChannelID: 9, CanonicalModel: "m1", At: from}
 	got := jsonRoundTrip(t, costListDoc(q, rules, 41))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
 
 	query := jsonObjectField(t, got, "query")
@@ -694,7 +695,7 @@ func TestUpstreamCostListDocIsMachineReadable(t *testing.T) {
 // TestUpstreamCostWriteCommandsRejectJSONBeforeDoingAnything 钉住写入类命令在
 // json 档下当场被拒，而不是做完再报不支持。
 func TestUpstreamCostWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	cases := []struct {
 		command string
@@ -714,8 +715,8 @@ func TestUpstreamCostWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
 				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -749,7 +750,7 @@ func TestUpstreamCostListJSONEndToEnd(t *testing.T) {
 		"--channel", channelArg, "--expr", testCostExpr, "--models", model,
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	out, _ := captureStreams(t, func() {
 		if err := runUpstreamCostList([]string{"--channel", channelArg, "--model", model}); err != nil {
@@ -757,7 +758,7 @@ func TestUpstreamCostListJSONEndToEnd(t *testing.T) {
 		}
 	})
 	doc := decodeJSONDoc(t, out)
-	assertJSONField(t, doc, "status", jsonOK)
+	assertJSONField(t, doc, "status", cli.JSONOK)
 	entries := jsonEntries(t, doc, "costs")
 	if len(entries) != 1 {
 		t.Fatalf("规则数 = %d，期望 1：\n%s", len(entries), out)

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/pricing"
 )
 
@@ -138,12 +139,12 @@ func TestPriceCoverageHintRejectsMismatchedBranchKeys(t *testing.T) {
 
 // F：-q 之下提示一个字都不出。
 func TestPriceCoverageHintQuietModeIsSilent(t *testing.T) {
-	saved := quietOutput
-	quietOutput = true
-	t.Cleanup(func() { quietOutput = saved })
+	saved := cli.QuietOutput
+	cli.QuietOutput = true
+	t.Cleanup(func() { cli.QuietOutput = saved })
 
 	_, stderr := captureStreams(t, func() {
-		printPriceCoverageHint(humanStderr(), testExpr, nil)
+		printPriceCoverageHint(cli.HumanStderr(), testExpr, nil)
 	})
 	if stderr != "" {
 		t.Errorf("-q 之下提示应当静默，得到 %q", stderr)
@@ -299,9 +300,9 @@ func TestPriceCreateQuietSuppressesCoverageHint(t *testing.T) {
 	// 先建操作人再切安静模式：--by 要解析成一个真的存在的用户，而那条命令
 	// 把自己的 ID 打在 stdout 上，切了之后就读不到了。
 	by := createTestUserID(t)
-	saved := quietOutput
-	quietOutput = true
-	t.Cleanup(func() { quietOutput = saved })
+	saved := cli.QuietOutput
+	cli.QuietOutput = true
+	t.Cleanup(func() { cli.QuietOutput = saved })
 
 	var err error
 	_, stderr := captureStreams(t, func() {

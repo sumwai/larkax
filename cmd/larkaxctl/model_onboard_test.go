@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/pricing"
@@ -225,17 +226,17 @@ func TestModelOnboardRejectsExistingUnlessUpdate(t *testing.T) {
 	}
 
 	_, _, firstErr := runOnboard(t, args...)
-	if !errors.Is(firstErr, errOnboardExists) {
+	if !errors.Is(firstErr, cli.ErrOnboardExists) {
 		t.Fatalf("重复跑应报 errOnboardExists，得到 %v", firstErr)
 	}
-	if got := exitCode(firstErr); got != exitConflict {
-		t.Fatalf("「已存在」应退出 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(firstErr); got != cli.ExitConflict {
+		t.Fatalf("「已存在」应退出 %d，得到 %d", cli.ExitConflict, got)
 	}
 	_, _, secondErr := runOnboard(t, args...)
 	if secondErr == nil || secondErr.Error() != firstErr.Error() {
 		t.Fatalf("同一条命令重复跑的报错不稳定：%v / %v", firstErr, secondErr)
 	}
-	t.Logf("重复跑报错（两次逐字相同，退出码 %d）：%v", exitCode(firstErr), firstErr)
+	t.Logf("重复跑报错（两次逐字相同，退出码 %d）：%v", cli.ExitCode(firstErr), firstErr)
 
 	const newPriceExpr = `{"prompt": 0.0000020, "completion": 0.0000100}`
 	const newCostExpr = `{"prompt": 0.0000010, "completion": 0.0000050}`
@@ -291,8 +292,8 @@ func TestModelOnboardDryRunWritesNothing(t *testing.T) {
 	}
 	// 断共用常量而不是抄一句字面量：尾注只有 dryrun.go 那一份，抄一遍会在
 	// 改文案时静默失配。
-	if !strings.Contains(out, dryRunNote) {
-		t.Fatalf("干跑输出没有写尾注 %q：%q", dryRunNote, out)
+	if !strings.Contains(out, cli.DryRunNote) {
+		t.Fatalf("干跑输出没有写尾注 %q：%q", cli.DryRunNote, out)
 	}
 	if after := onboardSnapshot(t, db, canonical, channelID); before != after {
 		t.Fatalf("干跑改动了库：\n之前 %s\n之后 %s", before, after)

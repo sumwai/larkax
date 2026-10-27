@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/calendar"
 	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 	"github.com/sumwai/larkax/internal/config"
@@ -138,8 +139,8 @@ var priceCalendarActions = []string{"import", "sync", "list"}
 // runPriceCalendar 处理 price 下的 calendar 子命令。
 func runPriceCalendar(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, priceCalendarShortUsage)
-		return usageErr(errors.New("price calendar 需要子命令"))
+		cli.PrintUsage(os.Stderr, priceCalendarShortUsage)
+		return cli.UsageErr(errors.New("price calendar 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -151,14 +152,14 @@ func runPriceCalendar(args []string) error {
 	case "list":
 		return runCalendarList(rest)
 	case "help":
-		printUsage(os.Stdout, priceCalendarUsage)
+		cli.PrintUsage(os.Stdout, priceCalendarUsage)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, priceCalendarShortUsage)
+		cli.PrintUsage(os.Stdout, priceCalendarShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, priceCalendarShortUsage)
-		return usageErr(fmt.Errorf("未知的 price calendar 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, priceCalendarShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 price calendar 子命令 %q", action))
 	}
 }
 
@@ -174,8 +175,8 @@ var calendarActions = []string{"import"}
 
 func runCalendar(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, priceCalendarShortUsage)
-		return usageErr(errors.New("calendar 需要子命令"))
+		cli.PrintUsage(os.Stderr, priceCalendarShortUsage)
+		return cli.UsageErr(errors.New("calendar 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -183,14 +184,14 @@ func runCalendar(args []string) error {
 	case "import":
 		return runCalendarImport(rest)
 	case "help":
-		printUsage(os.Stdout, priceCalendarUsage)
+		cli.PrintUsage(os.Stdout, priceCalendarUsage)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, priceCalendarShortUsage)
+		cli.PrintUsage(os.Stdout, priceCalendarShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, priceCalendarShortUsage)
-		return usageErr(fmt.Errorf("未知的 calendar 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, priceCalendarShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 calendar 子命令 %q", action))
 	}
 }
 
@@ -201,12 +202,12 @@ func runCalendar(args []string) error {
 // 坑。文件读不出来或校验不过时**不连数据库**——那种情况下连上去也没有用，
 // 而失败发生在碰库之前，日志里就不会出现一条看不懂的连接记录。
 func runCalendarImport(args []string) error {
-	if err := jsonUnsupported("price calendar import"); err != nil {
+	if err := cli.JSONUnsupported("price calendar import"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("price calendar import", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
+	fs := cli.NewFlagSet("price calendar import", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceCalendarShortUsage) }
 	if err := fs.Parse(args); err != nil {
 		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
 		// 再把它当错误返回会让 `larkaxctl price calendar import --help` 以退出码 1
@@ -216,12 +217,12 @@ func runCalendarImport(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
 		// 不打整段用法：人已经会用这条命令了，只是位置参数没给对。用法留给
 		// 「还没开始用」的那几处（缺子命令 / 未知子命令 / flag 解析失败）。
-		return usageErr(fmt.Errorf("price calendar import 需要一个文件参数，得到 %d 个", fs.NArg()))
+		return cli.UsageErr(fmt.Errorf("price calendar import 需要一个文件参数，得到 %d 个", fs.NArg()))
 	}
 	path := fs.Arg(0)
 
@@ -247,7 +248,7 @@ func runCalendarImport(args []string) error {
 	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置相同
 	// （都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
 	// 不同的退出码，而脚本对它们的处置是不一样的。
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -260,10 +261,10 @@ func runCalendarImport(args []string) error {
 	if !result.Written {
 		// 文件不带 days，而这一年已经有定论：Import 把它转给了只写年份状态的
 		// 那条路，那条路见到定论就不写。**这不是失败**，退 0。
-		printCalendarSettled(humanStdout(), result, "这份文件只记年份状态")
+		printCalendarSettled(cli.HumanStdout(), result, "这份文件只记年份状态")
 		return nil
 	}
-	printCalendarImport(humanStdout(), result)
+	printCalendarImport(cli.HumanStdout(), result)
 	return nil
 }
 
@@ -359,12 +360,12 @@ type holidayCNDaySource struct {
 // 等于丢掉「两源不一致」这个事实，而那正是下一次人工核对该找的东西。反方向是
 // 允许的：一次成功且一致的拉取可以把 conflict 改写成 synced（「覆盖」那一列）。
 func runPriceCalendarSync(args []string) error {
-	if err := jsonUnsupported("price calendar sync"); err != nil {
+	if err := cli.JSONUnsupported("price calendar sync"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("price calendar sync", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
+	fs := cli.NewFlagSet("price calendar sync", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceCalendarShortUsage) }
 	rawYear := fs.String("year", "", "要同步的年份；缺省取 CN 时区的当年")
 	if err := fs.Parse(args); err != nil {
 		// -h / --help 不是失败：flag 在返回 ErrHelp 之前已经把用法打印过了，
@@ -373,10 +374,10 @@ func runPriceCalendarSync(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("price calendar sync 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("price calendar sync 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	year, err := syncTargetYear(*rawYear)
 	if err != nil {
@@ -399,7 +400,7 @@ func runPriceCalendarSync(args []string) error {
 	// 走 openDB 而不是自己 sql.Open + Ping：打开与探活失败时的处置与 import
 	// 相同（都归 exitDBUnreach），各写一遍的表现是同一类失败在两条命令上给出
 	// 不同的退出码。
-	db, err := openDB(dbCtx, cfg)
+	db, err := cli.OpenDB(dbCtx, cfg)
 	if err != nil {
 		return err
 	}
@@ -418,7 +419,7 @@ func runPriceCalendarSync(args []string) error {
 			if err != nil {
 				return err
 			}
-			printCalendarImport(humanStdout(), result)
+			printCalendarImport(cli.HumanStdout(), result)
 			return nil
 		}
 		// sync 不带 days 的文档只有 pending 一种（见 fetchCalendarDocument）。
@@ -427,10 +428,10 @@ func runPriceCalendarSync(args []string) error {
 			return err
 		}
 		if !result.Written {
-			printCalendarSettled(humanStdout(), result, "数据源这次表示未发布")
+			printCalendarSettled(cli.HumanStdout(), result, "数据源这次表示未发布")
 			return nil
 		}
-		printCalendarImport(humanStdout(), result)
+		printCalendarImport(cli.HumanStdout(), result)
 		return nil
 	}
 
@@ -470,11 +471,11 @@ func syncYear(raw string, now time.Time) (int, error) {
 	}
 	year, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
-		return 0, usageErr(fmt.Errorf("--year 只接受一个年份（例如 2026），得到 %q", raw))
+		return 0, cli.UsageErr(fmt.Errorf("--year 只接受一个年份（例如 2026），得到 %q", raw))
 	}
 	// 上界与 Document 的年份校验同一个范围：超出它，本年最后一天也构造不出来。
 	if year < 1 || year > 9999 {
-		return 0, usageErr(fmt.Errorf("--year %d 不在 [1, 9999] 内", year))
+		return 0, cli.UsageErr(fmt.Errorf("--year %d 不在 [1, 9999] 内", year))
 	}
 	return year, nil
 }
@@ -663,13 +664,13 @@ const calendarListTimeout = 30 * time.Second
 //
 // 只读，不要主密钥：与 list 那几组同一条。
 func runCalendarList(args []string) error {
-	fs := newFlagSet("price calendar list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, priceCalendarShortUsage) }
+	fs := cli.NewFlagSet("price calendar list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, priceCalendarShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withDB(calendarListTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -677,10 +678,10 @@ func runCalendarList(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, calendarListDoc(years), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, calendarListDoc(years), nil)
 		}
-		printCalendarList(humanStdout(), years, verboseOutput)
+		printCalendarList(cli.HumanStdout(), years, cli.VerboseOutput)
 		return nil
 	})
 }
@@ -697,17 +698,17 @@ func printCalendarList(w io.Writer, years []calendarstore.Year, verbose bool) {
 	if len(years) == 0 {
 		// 明确打一句，而不是什么都不输出：一个没导入过的库与「命令没跑起来」
 		// 在安静的终端里长得一样（见 LESSONS.md 第 16 条）。
-		_, _ = fmt.Fprintln(w, emptyListNote("日历", "price calendar import"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("日历", "price calendar import"))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-		p.bold("地区"), p.bold("年份"), p.bold("状态"), p.bold("天数"), p.bold("双源"), p.bold("同步于"))
+		p.Bold("地区"), p.Bold("年份"), p.Bold("状态"), p.Bold("天数"), p.Bold("双源"), p.Bold("同步于"))
 	for _, y := range years {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\n",
-			p.bold(y.Region), p.bold(strconv.Itoa(y.Year)), y.Status, y.DayCount,
+			p.Bold(y.Region), p.Bold(strconv.Itoa(y.Year)), y.Status, y.DayCount,
 			agreeText(y.SourcesAgree), formatStampShort(y.SyncedAt))
 	}
 	_ = tw.Flush()
@@ -747,12 +748,12 @@ func agreeText(agree *bool) string {
 
 // calendarListDoc 组装 price calendar list 的机器可读输出。
 //
-// 与 printCalendarList 是同一份数据的另一条渲染路径（见 format.go 开头）。
+// 与 printCalendarList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）。
 func calendarListDoc(years []calendarstore.Year) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(years)}
 
-	// 从空切片起：一年都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一年都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(years))
 	for _, y := range years {
 		entries = append(entries, calendarYearEntry(y))
@@ -785,8 +786,8 @@ func calendarYearEntry(y calendarstore.Year) map[string]any {
 		// 原文照搬：这几条链接是公告修订时要拿来比对的东西。
 		"source_paper_urls": urls,
 		"sources_agree":     agree,
-		"last_error":        nullableString(y.LastError),
+		"last_error":        cli.NullableString(y.LastError),
 		// 走 jsonTime（恒 UTC、完整精度），不走表格那一档的截断。
-		"synced_at": jsonTime(y.SyncedAt),
+		"synced_at": cli.JSONTime(y.SyncedAt),
 	}
 }

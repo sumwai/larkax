@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/settings"
 )
 
@@ -304,8 +305,8 @@ func TestSettingsListDocIsMachineReadable(t *testing.T) {
 	}
 	raw := decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	if got.Summary.Total != 5 || len(got.Settings) != 5 {
 		t.Fatalf("summary.total = %d、settings 有 %d 条，都想要 5",
@@ -420,7 +421,7 @@ func TestSettingsListDocEmptyListIsEmptyArray(t *testing.T) {
 
 // settings set 会写进 settings 表，在 json 模式下必须在连库之前拦下。
 func TestSettingsSetRejectsJSONFormatBeforeTouchingTheDB(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
@@ -437,8 +438,8 @@ func TestSettingsSetRejectsJSONFormatBeforeTouchingTheDB(t *testing.T) {
 	if !strings.Contains(err.Error(), "settings set") {
 		t.Errorf("错误信息里要点名是哪条命令：%v", err)
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 	}
 	if stdout != "" {
 		t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
@@ -454,7 +455,7 @@ func TestSettingsListJSONStdoutIsMachineReadable(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var err error
 	stdout, stderr := captureStreams(t, func() { err = runSettingsList(nil) })
 	if err != nil {
@@ -478,9 +479,9 @@ func TestSettingsListJSONStdoutIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, stdout)
 	}
-	if got.Status != jsonOK || got.ExitCode != exitOK {
+	if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
 		t.Errorf("status=%q exit_code=%d，想要 %q / %d",
-			got.Status, got.ExitCode, jsonOK, exitOK)
+			got.Status, got.ExitCode, cli.JSONOK, cli.ExitOK)
 	}
 	// 迁移把 Registry 里的键都写进去了，所以清单必然非空：一条都没有时
 	// 这一条会红，而「settings 表是空的」正是要能与「命令没跑成」分开的那件事。
@@ -528,14 +529,14 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 		}
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var runErr error
 	stdout, stderr := captureStreams(t, func() { runErr = runSettingsList(nil) })
 	if runErr == nil {
 		t.Fatal("配置加载不起来时命令应当以非零退出码收尾")
 	}
-	if code := exitCode(runErr); code != exitFailure {
-		t.Errorf("退出码 = %d，想要 %d（其他失败）", code, exitFailure)
+	if code := cli.ExitCode(runErr); code != cli.ExitFailure {
+		t.Errorf("退出码 = %d，想要 %d（其他失败）", code, cli.ExitFailure)
 	}
 	assertOnlyJSON(t, stdout)
 
@@ -551,9 +552,9 @@ func TestSettingsListJSONKeepsValidationWarningOffStdout(t *testing.T) {
 		t.Fatalf("解不回来: %v\n%s", err, stdout)
 	}
 	// 结论由 exit_code 说出来；status 说的是「这份报告读出什么」，两者各说各的
-	// （见 format.go 与 docs/cli-output.md）。
-	if got.ExitCode != exitFailure {
-		t.Errorf("报告里的 exit_code = %d，想要 %d", got.ExitCode, exitFailure)
+	// （见 cli 包的 format.go 与 docs/cli-output.md）。
+	if got.ExitCode != cli.ExitFailure {
+		t.Errorf("报告里的 exit_code = %d，想要 %d", got.ExitCode, cli.ExitFailure)
 	}
 	// 命令自己不再打附注：那句话走错误出口（main 打 `larkaxctl: …` 那一行），
 	// 而错误里带着「加载不起来」这半句——使用者要知道的是这意味着什么。
@@ -640,8 +641,8 @@ func TestSettingsGetRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -651,25 +652,25 @@ func TestSettingsGetRejectsBadArgs(t *testing.T) {
 // 与 Registry 里也没有（多半键名写错）。两种的下一步动作不同，但都退出 4。
 func TestSettingsMissingDistinguishesDeclaredFromUndeclared(t *testing.T) {
 	declared := settingsMissing("plugin.enabled")
-	if !errors.Is(declared, errSettingsNotFound) {
+	if !errors.Is(declared, cli.ErrSettingsNotFound) {
 		t.Errorf("声明过的键：错误链里没有 errSettingsNotFound：%v", declared)
 	}
 	if !strings.Contains(declared.Error(), "在 Registry 里声明过") {
 		t.Errorf("声明过的键：报错没说它在 Registry 里：%v", declared)
 	}
-	if got := exitCode(declared); got != exitConflict {
-		t.Errorf("声明过的键：退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(declared); got != cli.ExitConflict {
+		t.Errorf("声明过的键：退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 
 	undeclared := settingsMissing("typo.retentoin_days")
-	if !errors.Is(undeclared, errSettingsNotFound) {
+	if !errors.Is(undeclared, cli.ErrSettingsNotFound) {
 		t.Errorf("未声明的键：错误链里没有 errSettingsNotFound：%v", undeclared)
 	}
 	if !strings.Contains(undeclared.Error(), "在 Registry 里也没有声明") {
 		t.Errorf("未声明的键：报错没说 Registry 里也没有：%v", undeclared)
 	}
-	if got := exitCode(undeclared); got != exitConflict {
-		t.Errorf("未声明的键：退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(undeclared); got != cli.ExitConflict {
+		t.Errorf("未声明的键：退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 
@@ -763,8 +764,8 @@ func TestSettingsGetDocIsMachineReadable(t *testing.T) {
 	}
 	decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	s := got.Setting
 	if s.Key != "plugin.enabled" || !s.Editable {
@@ -812,11 +813,11 @@ func TestSettingsGetUnknownKeyExitsFour(t *testing.T) {
 	if err == nil {
 		t.Fatal("不存在的键该报错")
 	}
-	if !errors.Is(err, errSettingsNotFound) {
+	if !errors.Is(err, cli.ErrSettingsNotFound) {
 		t.Errorf("错误链里没有 errSettingsNotFound：%v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 	if !strings.Contains(err.Error(), "在 Registry 里也没有声明") {
 		t.Errorf("报错没说清楚是哪一种不存在：%v", err)
@@ -840,7 +841,7 @@ func TestSettingsGetDoesNotRequireMasterKey(t *testing.T) {
 func TestSettingsGetJSONStdoutIsMachineReadable(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	var err error
 	stdout, stderr := captureStreams(t, func() {
@@ -863,8 +864,8 @@ func TestSettingsGetJSONStdoutIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, stdout)
 	}
-	if got.Status != jsonOK || got.ExitCode != exitOK {
-		t.Errorf("status=%q exit_code=%d，想要 %q / %d", got.Status, got.ExitCode, jsonOK, exitOK)
+	if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
+		t.Errorf("status=%q exit_code=%d，想要 %q / %d", got.Status, got.ExitCode, cli.JSONOK, cli.ExitOK)
 	}
 	if got.Setting.Key != "plugin.enabled" {
 		t.Errorf("key = %q", got.Setting.Key)

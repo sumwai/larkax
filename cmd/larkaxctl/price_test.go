@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/pipeline"
 	"github.com/sumwai/larkax/internal/pricing"
 )
@@ -61,8 +62,8 @@ func TestPriceCreateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -230,8 +231,8 @@ func TestPriceUpdateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -557,8 +558,8 @@ func TestPriceExplainNoRule(t *testing.T) {
 	if !errors.Is(err, pipeline.ErrNoRule) {
 		t.Errorf("期望 pipeline.ErrNoRule，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码应当是 %d，得到 %d", exitConflict, got)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码应当是 %d，得到 %d", cli.ExitConflict, got)
 	}
 }
 
@@ -679,7 +680,7 @@ func TestPriceListDocIsMachineReadable(t *testing.T) {
 	}
 
 	got := jsonRoundTrip(t, priceListDoc(rules))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	assertJSONField(t, jsonObjectField(t, got, "summary"), "total", float64(2))
 
 	list := jsonEntries(t, got, "rules")
@@ -738,7 +739,7 @@ func TestPriceExplainDocIsMachineReadable(t *testing.T) {
 	}
 
 	got := jsonRoundTrip(t, priceExplainDoc(q, rules))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 
 	query := jsonObjectField(t, got, "query")
 	assertJSONField(t, query, "canonical_model", "m1")
@@ -772,7 +773,7 @@ func TestPriceExplainDocIsMachineReadable(t *testing.T) {
 
 // TestPriceWriteCommandsRejectJSONBeforeDoingAnything 钉住写类命令的守卫位置。
 func TestPriceWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	cases := []struct {
 		command string
@@ -791,8 +792,8 @@ func TestPriceWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
 				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -874,8 +875,8 @@ func TestPriceAddNameAndOperandMustAgree(t *testing.T) {
 	if !strings.Contains(r.err.Error(), "两个不同的值") {
 		t.Errorf("错误信息里该点出两处给了不同的值：%v", r.err)
 	}
-	if got := exitCode(r.err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+	if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 	}
 }
 

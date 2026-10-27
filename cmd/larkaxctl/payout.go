@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
@@ -209,8 +210,8 @@ var walletPayoutActions = []string{"request", "settle", "approve", "reject", "pa
 
 func runWalletPayout(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, walletPayoutShortUsage)
-		return usageErr(errors.New("wallet payout 需要子命令"))
+		cli.PrintUsage(os.Stderr, walletPayoutShortUsage)
+		return cli.UsageErr(errors.New("wallet payout 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -226,14 +227,14 @@ func runWalletPayout(args []string) error {
 	case "paid":
 		return runPayoutPaid(rest)
 	case "help":
-		printUsage(os.Stdout, walletPayoutHelp.long)
+		cli.PrintUsage(os.Stdout, walletPayoutHelp.long)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, walletPayoutHelp.short)
+		cli.PrintUsage(os.Stdout, walletPayoutHelp.short)
 		return nil
 	default:
-		printUsage(os.Stderr, walletPayoutShortUsage)
-		return usageErr(fmt.Errorf("未知的 wallet payout 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, walletPayoutShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 wallet payout 子命令 %q", action))
 	}
 }
 
@@ -243,7 +244,7 @@ func runWalletPayout(args []string) error {
 // 写在同一个事务里。**单子与分录都在 store 里写**（不在命令行里拼两次写操作）：两条
 // 事实缺一条，账面就有一个说得通而实际不对的状态（见 store/payout.go 的开头）。
 func runPayoutRequest(args []string) error {
-	if err := jsonUnsupported("wallet payout request"); err != nil {
+	if err := cli.JSONUnsupported("wallet payout request"); err != nil {
 		return err
 	}
 	// 五个子命令（request / settle / approve / reject / paid）都认 `help` 这一个
@@ -251,31 +252,31 @@ func runPayoutRequest(args []string) error {
 	// 认它不会有歧义；五个里四个认、一个不认的话，`wallet payout request help`
 	// 会以「不接受位置参数」收场，而同一族里相邻的那条命令却打出一屏说明书。
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletPayoutHelp.long)
+		cli.PrintUsage(os.Stdout, walletPayoutHelp.long)
 		return nil
 	}
 
-	fs := newFlagSet("wallet payout request", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
+	fs := cli.NewFlagSet("wallet payout request", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletPayoutShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	asset := fs.String("asset", "", "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	destination := fs.String("destination", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"request 不接受位置参数，得到 %q：商户、金额与申请单号都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
-	requestRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+	requestRef, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError(
 		"它是这张提现单的申请单号，同时是幂等键——重跑同一条命令时靠它认出「已经申请过」"))
 	if refErr != nil {
 		return refErr
@@ -299,7 +300,7 @@ func runPayoutRequest(args []string) error {
 	destinationJSON := strings.TrimSpace(*destination)
 	if destinationJSON != "" &&
 		(!strings.HasPrefix(destinationJSON, "{") || !json.Valid([]byte(destinationJSON))) {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			`--destination 必须是合法的 JSON 对象（形如 {"bank":"…"}），得到 %q：`+
 				"它要落进 payout_requests.destination（一个 jsonb 列），打款通道按字段取值", destinationJSON))
 	}
@@ -330,7 +331,7 @@ func runPayoutRequest(args []string) error {
 			applied bool
 		)
 		if *dryRun {
-			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			dryErr := cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				var postErr error
 				row, applied, postErr = store.New(db).RequestPayoutTx(ctx, tx, input)
 				return postErr
@@ -367,7 +368,7 @@ func runPayoutRequest(args []string) error {
 		case *dryRun:
 			verdict = "将申请提现。"
 		}
-		printPayout(humanStdout(), payoutReceipt{
+		printPayout(cli.HumanStdout(), payoutReceipt{
 			Verdict:    verdict,
 			Payout:     row,
 			User:       owner,
@@ -385,36 +386,36 @@ func runPayoutRequest(args []string) error {
 // 操作人与收款信息，申请不要），落库的也是两件不同的事实（谁发起的），在审计时
 // 这两个问题完全不同。
 func runPayoutSettle(args []string) error {
-	if err := jsonUnsupported("wallet payout settle"); err != nil {
+	if err := cli.JSONUnsupported("wallet payout settle"); err != nil {
 		return err
 	}
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletPayoutHelp.long)
+		cli.PrintUsage(os.Stdout, walletPayoutHelp.long)
 		return nil
 	}
 
-	fs := newFlagSet("wallet payout settle", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
+	fs := cli.NewFlagSet("wallet payout settle", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletPayoutShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	amount := fs.String("amount", "", "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	destination := fs.String("destination", "", "")
 	by := fs.String("by", "", "")
 	note := fs.String("note", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"settle 不接受位置参数，得到 %q：商户、金额、单号与操作人都用旗标指定；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*user) == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
-	settleRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError(
+	settleRef, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError(
 		"它是这次清算的单号，同时是幂等键——重跑同一条命令时靠它认出「已经清算过」"))
 	if refErr != nil {
 		return refErr
@@ -431,16 +432,16 @@ func runPayoutSettle(args []string) error {
 	// 哪条命令的哪个参数）。
 	destinationJSON := strings.TrimSpace(*destination)
 	if destinationJSON == "" {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"缺少 --destination：平台清算要把钱付到哪里？这一档是平台已经决定付了，收款信息必须当场说清"))
 	}
 	if !strings.HasPrefix(destinationJSON, "{") || !json.Valid([]byte(destinationJSON)) {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			`--destination 必须是合法的 JSON 对象（形如 {"bank":"…"}），得到 %q：`+
 				"它要落进 payout_requests.destination（一个 jsonb 列），打款通道按字段取值", destinationJSON))
 	}
 	if strings.TrimSpace(*by) == "" {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"缺少 --by：清算要记下是谁做的（这一栏落进 reviewed_by）"))
 	}
 	settleNote := strings.TrimSpace(*note)
@@ -484,7 +485,7 @@ func runPayoutSettle(args []string) error {
 			applied bool
 		)
 		if *dryRun {
-			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			dryErr := cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				var postErr error
 				row, applied, postErr = store.New(db).SettlePayoutTx(ctx, tx, input)
 				return postErr
@@ -526,7 +527,7 @@ func runPayoutSettle(args []string) error {
 		case *dryRun:
 			verdict = fmt.Sprintf("将清算提现单 %d。", row.ID)
 		}
-		printPayout(humanStdout(), payoutReceipt{
+		printPayout(cli.HumanStdout(), payoutReceipt{
 			Verdict:   verdict,
 			Payout:    row,
 			User:      owner,
@@ -556,32 +557,32 @@ func runPayoutReject(args []string) error {
 // 使用者看到的仍然是「approve」「reject」那两个词。
 func runPayoutReview(action string, args []string) error {
 	command := "wallet payout " + action
-	if err := jsonUnsupported(command); err != nil {
+	if err := cli.JSONUnsupported(command); err != nil {
 		return err
 	}
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletPayoutHelp.long)
+		cli.PrintUsage(os.Stdout, walletPayoutHelp.long)
 		return nil
 	}
 
-	fs := newFlagSet(command, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
+	fs := cli.NewFlagSet(command, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletPayoutShortUsage) }
 	id := fs.Int64("id", 0, "")
 	by := fs.String("by", "", "")
 	note := fs.String("note", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"%s 不接受位置参数，得到 %q：提现单与操作人都用旗标指定", action, fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"缺少 --id：要%s的是哪条提现单（payout_requests.id，申请那一步的回显里有）", payoutActionWord(action)))
 	}
 	if strings.TrimSpace(*by) == "" {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"缺少 --by：%s要记下是谁做的", payoutActionWord(action)))
 	}
 	// 说明会原样落进 payout_requests.review_note（那一列不过清洗），也会打进回显，
@@ -657,7 +658,7 @@ func runPayoutReview(action string, args []string) error {
 		if !applied {
 			verdict = fmt.Sprintf("提现单 %d 已经%s过，本次未改动。", row.ID, payoutActionWord(action))
 		}
-		printPayout(humanStdout(), payoutReceipt{
+		printPayout(cli.HumanStdout(), payoutReceipt{
 			Verdict:  verdict,
 			Payout:   row,
 			User:     owner,
@@ -681,34 +682,34 @@ func payoutActionWord(action string) string {
 
 // runPayoutPaid 给一条已批准的提现单打款。
 func runPayoutPaid(args []string) error {
-	if err := jsonUnsupported("wallet payout paid"); err != nil {
+	if err := cli.JSONUnsupported("wallet payout paid"); err != nil {
 		return err
 	}
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, walletPayoutHelp.long)
+		cli.PrintUsage(os.Stdout, walletPayoutHelp.long)
 		return nil
 	}
 
-	fs := newFlagSet("wallet payout paid", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, walletPayoutShortUsage) }
+	fs := cli.NewFlagSet("wallet payout paid", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, walletPayoutShortUsage) }
 	id := fs.Int64("id", 0, "")
 	gateway := fs.String("gateway", "", "")
 	gatewayRef := fs.String("gateway-ref", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"paid 不接受位置参数，得到 %q：提现单与通道都用旗标指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"缺少 --id：要打款的是哪条提现单（payout_requests.id，申请那一步的回显里有）"))
 	}
 	// 通道必填且没有默认值：见 walletPayoutUsage 里那一段（credit 上那个 manual
 	// 默认值在这一侧不适用）。
 	if strings.TrimSpace(*gateway) == "" {
-		return usageErr(errors.New(
+		return cli.UsageErr(errors.New(
 			"缺少 --gateway：钱实际从哪个通道出去？这笔分录要记在 payment_gateway:<通道> 上，通道未知时它对不上任何一份通道账单"))
 	}
 	gatewayName, gatewayErr := parseGatewayFlag(fs, *gateway)
@@ -756,7 +757,7 @@ func runPayoutPaid(args []string) error {
 		if !applied {
 			verdict = fmt.Sprintf("提现单 %d 已经打过款，本次未改动。", row.ID)
 		}
-		printPayout(humanStdout(), payoutReceipt{
+		printPayout(cli.HumanStdout(), payoutReceipt{
 			Verdict:  verdict,
 			Payout:   row,
 			User:     owner,
@@ -811,7 +812,7 @@ func payoutReviewer(ctx context.Context, authStore *auth.Store, row store.Payout
 // 打款凭据号走同一条判据：它同样原样落库、原样进回显与分录备注。
 func checkPayoutNote(flagName, note string) error {
 	if r, bad := hasControlChar(note); bad {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"%s 不能含控制字符（这里是 %q）：回显会原样打出来，换行会把一栏拆成两行",
 			flagName, r))
 	}
@@ -853,11 +854,11 @@ type payoutReceipt struct {
 // 里面的控制字符带进终端，清洗之后打又与库里不是同一份。要看它得走读取路径——那一族
 // 命令还没有。
 func printPayout(w io.Writer, r payoutReceipt, dryRun bool) {
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintln(w, r.Verdict)
 	row := func(label, value string) {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.bold(label), value)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", p.Bold(label), value)
 	}
 	row("提现单", strconv.FormatInt(r.Payout.ID, 10))
 	row("商户", r.User.Username)
@@ -899,6 +900,6 @@ func printPayout(w io.Writer, r payoutReceipt, dryRun bool) {
 		printEntryLines(w, r.Txn.Entries)
 	}
 	if dryRun {
-		printDryRunNote(w)
+		cli.PrintDryRunNote(w)
 	}
 }

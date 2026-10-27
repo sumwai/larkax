@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/consoleapi"
 )
@@ -228,8 +229,8 @@ func TestUsageSummaryRejectsBadWindows(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("这一次应当报错，却成功返回了：stdout=%q", r.stdout)
 			}
-			if got := exitCode(r.err); got != exitUsage {
-				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, exitUsage, r.err)
+			if got := cli.ExitCode(r.err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，参数错应当是 %d（err=%v）", got, cli.ExitUsage, r.err)
 			}
 			if !strings.Contains(r.err.Error(), tc.want) {
 				t.Errorf("错误里没有 %q：%v", tc.want, r.err)
@@ -380,7 +381,7 @@ func TestUsageSummaryJSONKeepsTheTwoAmountsApart(t *testing.T) {
 		insertUsageSummaryEvent(t, db, userID, e)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runUsage, []string{"summary", "--user", itoa64(userID),
 		"--from", "2026-10-01T00:00:00Z", "--to", "2026-11-01T00:00:00Z"})
 	if r.err != nil {
@@ -552,7 +553,7 @@ func TestUsageSummaryMatchesConsole(t *testing.T) {
 	// 两条都是读类，顺序只是为了不把夹具留在切换之后。
 	console := fetchConsoleUsageSummary(t, db, userID, from, to)
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	r := runOnce(t, runUsage, []string{"summary", "--user", itoa64(userID),
 		"--from", from.Format(time.RFC3339), "--to", to.Format(time.RFC3339)})
 	if r.err != nil {

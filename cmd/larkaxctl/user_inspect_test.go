@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/money"
@@ -39,8 +40,8 @@ func TestUserInspectRequiresItsOperand(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）：%v", got, exitUsage, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）：%v", got, cli.ExitUsage, err)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("报错里没有点名 %q：%v", tc.want, err)
@@ -181,9 +182,9 @@ func TestPrintUserInspectEmbedsEachSection(t *testing.T) {
 // runJSONDoc 跑一条命令的 json 档，返回解出来的顶层对象。
 func runJSONDoc(t *testing.T, fn func() error) map[string]any {
 	t.Helper()
-	saved := outputFormat
-	outputFormat = formatJSON
-	defer func() { outputFormat = saved }()
+	saved := cli.OutputFormat
+	cli.OutputFormat = cli.FormatJSON
+	defer func() { cli.OutputFormat = saved }()
 
 	stdout, stderr, err := runStream(t, fn)
 	if err != nil {
@@ -356,7 +357,7 @@ func TestUserInspectUnknownUserMatchesUserGet(t *testing.T) {
 	if getErr.Error() != inspectErr.Error() {
 		t.Errorf("错误文案不同：\nuser get:     %v\nuser inspect: %v", getErr, inspectErr)
 	}
-	if got, want := exitCode(inspectErr), exitCode(getErr); got != want {
+	if got, want := cli.ExitCode(inspectErr), cli.ExitCode(getErr); got != want {
 		t.Errorf("退出码 = %d，user get 是 %d", got, want)
 	}
 	if !errors.Is(inspectErr, auth.ErrUserNotFound) {

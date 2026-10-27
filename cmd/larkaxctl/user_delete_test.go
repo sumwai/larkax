@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 )
@@ -47,8 +48,8 @@ func TestUserDeleteRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 			}
 		})
 	}
@@ -155,8 +156,8 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	if !strings.Contains(r.err.Error(), "delete revert") {
 		t.Errorf("报错没指向 revert: %v", r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d（冲突）", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d（冲突）", code, cli.ExitConflict)
 	}
 	r = runOnce(t, runUser, []string{"get", "--user", name})
 	if r.err != nil {
@@ -193,8 +194,8 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	if !errors.Is(r.err, auth.ErrDeletionConfirmMismatch) {
 		t.Errorf("错误 %v 不是 ErrDeletionConfirmMismatch", r.err)
 	}
-	if code := exitCode(r.err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d", code, exitUsage)
+	if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d", code, cli.ExitUsage)
 	}
 	var status string
 	if err := db.QueryRowContext(ctx,
@@ -254,8 +255,8 @@ func TestUserDeleteLifecycle(t *testing.T) {
 	if !strings.Contains(r.err.Error(), "已经匿名化") {
 		t.Errorf("报错里没有「已经匿名化」: %v", r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d（终态冲突）", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d（终态冲突）", code, cli.ExitConflict)
 	}
 	r = runOnce(t, runUser, []string{"get", "--user", strconv.FormatInt(id, 10)})
 	if r.err != nil {
@@ -298,8 +299,8 @@ func TestUserDeleteRefusesNonZeroBalance(t *testing.T) {
 	if !strings.Contains(r.err.Error(), "1.23") {
 		t.Errorf("报错里没有当前余额: %v", r.err)
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d（约束冲突）", code, exitConflict)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d（约束冲突）", code, cli.ExitConflict)
 	}
 }
 

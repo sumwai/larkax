@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/payment"
 )
@@ -35,8 +36,8 @@ func TestWalletPaymentRejectsBadArgs(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（%v）", got, exitUsage, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（%v）", got, cli.ExitUsage, err)
 			}
 			if !strings.Contains(err.Error(), tc.hint) {
 				t.Errorf("错误里没有 %q：%v", tc.hint, err)
@@ -78,8 +79,8 @@ func TestWalletPaymentLifecycle(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "没有启用") {
 		t.Fatalf("通道关着时应当拒绝，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("通道关着时的退出码 = %d，期望 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("通道关着时的退出码 = %d，期望 %d", got, cli.ExitFailure)
 	}
 
 	setPaymentFake(t, ctx, db, true)
@@ -123,8 +124,8 @@ func TestWalletPaymentLifecycle(t *testing.T) {
 	if !errors.Is(conflictErr, payment.ErrOrderConflict) {
 		t.Fatalf("错误 = %v，期望 ErrOrderConflict", conflictErr)
 	}
-	if got := exitCode(conflictErr); got != exitConflict {
-		t.Errorf("冲突退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(conflictErr); got != cli.ExitConflict {
+		t.Errorf("冲突退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 
 	// 查一张不存在的单子：退出 4。
@@ -134,8 +135,8 @@ func TestWalletPaymentLifecycle(t *testing.T) {
 	if !errors.Is(missingErr, payment.ErrOrderNotFound) {
 		t.Fatalf("错误 = %v，期望 ErrOrderNotFound", missingErr)
 	}
-	if got := exitCode(missingErr); got != exitConflict {
-		t.Errorf("缺单退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(missingErr); got != cli.ExitConflict {
+		t.Errorf("缺单退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 
 	// 没有钱包的用户下单：与 wallet credit 同一档。
@@ -146,8 +147,8 @@ func TestWalletPaymentLifecycle(t *testing.T) {
 	if !errors.Is(walletErr, store.ErrNoWallet) {
 		t.Fatalf("错误 = %v，期望 ErrNoWallet", walletErr)
 	}
-	if got := exitCode(walletErr); got != exitConflict {
-		t.Errorf("缺钱包退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(walletErr); got != cli.ExitConflict {
+		t.Errorf("缺钱包退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 

@@ -12,18 +12,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/pricing"
 )
-
-// errOnboardExists 表示向导的某一步发现目标已经在库里，而这次没给 --update。
-//
-// 它是「一个已经配了一半」的信号，不是唯一键撞出来的：渠道白名单里有这个
-// 名字、计价规则已经覆盖这个模型，库里都没有唯一约束会拒绝第二次写入。
-// 归进 conflictErrors（exit.go）：下一步都是「先去库里看现在是什么，再决定
-// 要不要覆盖」，与撞唯一键同一档。
-var errOnboardExists = errors.New("已经存在")
 
 // onboardOptions 是 model onboard 解析出来的那一次请求。
 //
@@ -57,18 +50,18 @@ type onboardReport struct {
 // 它不另写校验：五处各自的合法性判据在 catalog / channels / pricing 里，
 // 这里只负责参数解析、顺序与事务边界。
 func runModelOnboard(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, modelShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, modelShortUsage) {
 		return nil
 	}
 
-	if err := jsonUnsupported("model onboard"); err != nil {
+	if err := cli.JSONUnsupported("model onboard"); err != nil {
 		return err
 	}
 
 	opts, err := parseModelOnboard(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -81,7 +74,7 @@ func runModelOnboard(args []string) error {
 
 		if opts.DryRun {
 			// 与真跑同一条写路径：同一份判重、同一份写入，全部成功之后回滚。
-			if err := inRolledBackTx(ctx, db, apply); err != nil {
+			if err := cli.InRolledBackTx(ctx, db, apply); err != nil {
 				return err
 			}
 		} else {
@@ -99,7 +92,7 @@ func runModelOnboard(args []string) error {
 			}
 		}
 
-		printOnboardReport(humanStdout(), opts, report)
+		printOnboardReport(cli.HumanStdout(), opts, report)
 		return nil
 	})
 }
@@ -114,8 +107,8 @@ func parseModelOnboard(args []string) (onboardOptions, error) {
 		return onboardOptions{}, err
 	}
 
-	fs := newFlagSet("model onboard", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, modelShortUsage) }
+	fs := cli.NewFlagSet("model onboard", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, modelShortUsage) }
 	channelID := fs.Int64("channel", 0, "")
 	upstream := fs.String("upstream", "", "")
 	priceExpr := fs.String("price-expr", "", "")
@@ -145,13 +138,13 @@ func parseModelOnboard(args []string) (onboardOptions, error) {
 	}
 
 	// 这几个值会进清单与单条回显：控制字符在连库之前拒掉。
-	if err := checkDisplayText("--<规范名>", strings.TrimSpace(canonical)); err != nil {
+	if err := cli.CheckDisplayText("--<规范名>", strings.TrimSpace(canonical)); err != nil {
 		return onboardOptions{}, err
 	}
-	if err := checkDisplayText("--upstream（上游名）", strings.TrimSpace(*upstream)); err != nil {
+	if err := cli.CheckDisplayText("--upstream（上游名）", strings.TrimSpace(*upstream)); err != nil {
 		return onboardOptions{}, err
 	}
-	if err := checkDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
+	if err := cli.CheckDisplayText("--display（展示名）", strings.TrimSpace(*display)); err != nil {
 		return onboardOptions{}, err
 	}
 
@@ -203,7 +196,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		if !opts.Update {
 			return report, fmt.Errorf(
 				"%w：模型目录里已经有规范名 %q；确认要覆盖就加 --update",
-				errOnboardExists, opts.Canonical)
+				cli.ErrOnboardExists, opts.Canonical)
 		}
 		if opts.Display != "" {
 			display := opts.Display
@@ -237,7 +230,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		if !opts.Update {
 			return report, fmt.Errorf(
 				"%w：渠道 %d 的 models 白名单里已经有 %q；确认要覆盖就加 --update",
-				errOnboardExists, opts.ChannelID, opts.Canonical)
+				cli.ErrOnboardExists, opts.ChannelID, opts.Canonical)
 		}
 		report.Channel = "已包含"
 	} else {
@@ -264,7 +257,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		if !opts.Update {
 			return report, fmt.Errorf(
 				"%w：渠道 %d 已经有规范名 %q 的出站映射（上游名 %s）；确认要覆盖就加 --update",
-				errOnboardExists, opts.ChannelID, opts.Canonical, alias.UpstreamModel)
+				cli.ErrOnboardExists, opts.ChannelID, opts.Canonical, alias.UpstreamModel)
 		}
 		if alias.UpstreamModel == opts.Upstream {
 			report.Alias = fmt.Sprintf("已存在 id=%d，未变", alias.ID)
@@ -320,7 +313,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		if !opts.Update {
 			return report, fmt.Errorf(
 				"%w：计价规则 id=%d 已经覆盖渠道 %d 的 %q；确认要覆盖就加 --update",
-				errOnboardExists, priceHits[0].ID, opts.ChannelID, opts.Canonical)
+				cli.ErrOnboardExists, priceHits[0].ID, opts.ChannelID, opts.Canonical)
 		}
 		expr := opts.PriceExpr
 		if updateErr := priceAdmin.Update(ctx, pricing.UpdateRequest{
@@ -334,7 +327,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		return report, fmt.Errorf(
 			"%w：计价规则里有 %d 条覆盖渠道 %d 的 %q（id：%s）；不猜要改哪一条，"+
 				"先跑 larkaxctl price list 逐条看清",
-			errOnboardExists, len(priceHits), opts.ChannelID, opts.Canonical,
+			cli.ErrOnboardExists, len(priceHits), opts.ChannelID, opts.Canonical,
 			priceRuleIDs(priceHits))
 	}
 
@@ -365,7 +358,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		if !opts.Update {
 			return report, fmt.Errorf(
 				"%w：成本规则 id=%d 已经覆盖渠道 %d 的 %q；确认要覆盖就加 --update",
-				errOnboardExists, costHits[0].ID, opts.ChannelID, opts.Canonical)
+				cli.ErrOnboardExists, costHits[0].ID, opts.ChannelID, opts.Canonical)
 		}
 		expr := opts.CostExpr
 		if updateErr := costAdmin.Update(ctx, pricing.CostUpdateRequest{
@@ -379,7 +372,7 @@ func onboardInTx(ctx context.Context, db *sql.DB, tx *sql.Tx, opts onboardOption
 		return report, fmt.Errorf(
 			"%w：成本规则里有 %d 条覆盖渠道 %d 的 %q（id：%s）；不猜要改哪一条，"+
 				"先跑 larkaxctl upstream-cost list --channel %d 逐条看清",
-			errOnboardExists, len(costHits), opts.ChannelID, opts.Canonical,
+			cli.ErrOnboardExists, len(costHits), opts.ChannelID, opts.Canonical,
 			costRuleIDs(costHits), opts.ChannelID)
 	}
 
@@ -424,6 +417,6 @@ func printOnboardReport(w io.Writer, opts onboardOptions, report onboardReport) 
 	_, _ = fmt.Fprintf(w, "成本规则：%s\n", report.Cost)
 	if opts.DryRun {
 		// 尾注只有 dryrun.go 那一份：同一句话写两遍，改的时候就会漏掉一处。
-		printDryRunNote(w)
+		cli.PrintDryRunNote(w)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // --env-file 是**全局**选项：它必须与任何子命令一起用，写在子命令前后都认。
@@ -100,8 +102,8 @@ func TestTakeEnvFileFlagRejectsEmptyPath(t *testing.T) {
 			if err == nil {
 				t.Fatal("应报错")
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", code, cli.ExitUsage)
 			}
 			if !strings.Contains(err.Error(), "env-file") {
 				t.Errorf("错误信息未点到那个选项: %v", err)

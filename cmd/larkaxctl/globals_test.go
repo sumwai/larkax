@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // ── 全局开关 --verbose / -v 与 --quiet / -q ──────────────────────────────
@@ -42,7 +44,7 @@ func TestTakeGlobalBoolAcceptsSpellings(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, rest, err := takeQuietFlag(tc.args)
+			got, rest, err := cli.TakeQuietFlag(tc.args)
 			if err != nil {
 				t.Fatalf("解析失败: %v", err)
 			}
@@ -59,7 +61,7 @@ func TestTakeGlobalBoolAcceptsSpellings(t *testing.T) {
 // 两个开关各认各的名字：--quiet 不该被 --verbose 的解析当成自己人，
 // 反过来也一样。
 func TestGlobalBoolsDoNotSwallowEachOther(t *testing.T) {
-	verbose, rest, err := takeVerboseFlag([]string{"--quiet", "doctor"})
+	verbose, rest, err := cli.TakeVerboseFlag([]string{"--quiet", "doctor"})
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
@@ -70,7 +72,7 @@ func TestGlobalBoolsDoNotSwallowEachOther(t *testing.T) {
 		t.Errorf("--quiet 该原样留下，得到 %q", rest)
 	}
 
-	quiet, rest, err := takeQuietFlag([]string{"-v", "doctor"})
+	quiet, rest, err := cli.TakeQuietFlag([]string{"-v", "doctor"})
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
@@ -85,15 +87,15 @@ func TestGlobalBoolsDoNotSwallowEachOther(t *testing.T) {
 // 取值不是布尔时报参数错（退出码 2），不静默当成 true。
 func TestTakeGlobalBoolRejectsNonBooleanValue(t *testing.T) {
 	for _, raw := range []string{"yes", "1x", "", "silent"} {
-		_, rest, err := takeQuietFlag([]string{"doctor", "--quiet=" + raw})
+		_, rest, err := cli.TakeQuietFlag([]string{"doctor", "--quiet=" + raw})
 		if err == nil {
 			t.Fatalf("--quiet=%q 应当报错", raw)
 		}
 		if rest != nil {
 			t.Errorf("报错时不该返回剩下的参数，得到 %q", rest)
 		}
-		if code := exitCode(err); code != exitUsage {
-			t.Errorf("--quiet=%q 的退出码 = %d，想要 %d（参数错）", raw, code, exitUsage)
+		if code := cli.ExitCode(err); code != cli.ExitUsage {
+			t.Errorf("--quiet=%q 的退出码 = %d，想要 %d（参数错）", raw, code, cli.ExitUsage)
 		}
 		// 错误信息要点出是哪个开关的取值不对，否则使用者会去查子命令的参数。
 		if !strings.Contains(err.Error(), "--quiet") {
@@ -112,9 +114,9 @@ func runWithArgs(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
 
 	t.Cleanup(func() {
-		outputFormat = formatTable
-		verboseOutput = false
-		quietOutput = false
+		cli.OutputFormat = cli.FormatTable
+		cli.VerboseOutput = false
+		cli.QuietOutput = false
 	})
 
 	saved := os.Args
@@ -162,7 +164,7 @@ func TestVersionTakesUpperVAndVerboseTakesLowerV(t *testing.T) {
 		if stdout != "" {
 			t.Errorf("-v 不该再打版本号，stdout 得到 %q", stdout)
 		}
-		if !verboseOutput {
+		if !cli.VerboseOutput {
 			t.Error("-v 应当把详细模式打开")
 		}
 	})
@@ -171,7 +173,7 @@ func TestVersionTakesUpperVAndVerboseTakesLowerV(t *testing.T) {
 		if _, _, err := runWithArgs(t, "--verbose"); err == nil {
 			t.Fatal("没有子命令时应当报参数错")
 		}
-		if !verboseOutput {
+		if !cli.VerboseOutput {
 			t.Error("--verbose 应当把详细模式打开")
 		}
 	})
@@ -183,8 +185,8 @@ func TestVerboseAndQuietAreMutuallyExclusive(t *testing.T) {
 	if err == nil {
 		t.Fatal("--quiet 与 --verbose 一起给时应当报参数错")
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 	}
 	for _, want := range []string{"--verbose", "--quiet"} {
 		if !strings.Contains(err.Error(), want) {
@@ -241,11 +243,11 @@ func TestQuietKeepsFatalErrorsAndDropsTheReport(t *testing.T) {
 	if err == nil {
 		t.Fatal("连不上库时应当报错——静默模式不该把致命错误也吞掉")
 	}
-	if helpRequested(err) {
+	if cli.HelpRequested(err) {
 		t.Fatalf("这不是一次「要帮助」，main 会把它打到 stderr：%v", err)
 	}
-	if code := exitCode(err); code != exitDBUnreach {
-		t.Errorf("静默模式不该改变退出码：得到 %d，想要 %d", code, exitDBUnreach)
+	if code := cli.ExitCode(err); code != cli.ExitDBUnreach {
+		t.Errorf("静默模式不该改变退出码：得到 %d，想要 %d", code, cli.ExitDBUnreach)
 	}
 	if quietOut != "" {
 		t.Errorf("静默模式下 stdout 应当为空，得到 %q", quietOut)
@@ -271,9 +273,9 @@ func TestQuietLeavesJSONOutputAlone(t *testing.T) {
 	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
 		t.Fatalf("静默模式下 json 那一份也该照打，stdout 解不回来: %v\n%s", jsonErr, stdout)
 	}
-	if got.Status != jsonSkipped || got.ExitCode != exitDBUnreach {
+	if got.Status != cli.JSONSkipped || got.ExitCode != cli.ExitDBUnreach {
 		t.Errorf("status=%q exit_code=%d，想要 %q / %d",
-			got.Status, got.ExitCode, jsonSkipped, exitDBUnreach)
+			got.Status, got.ExitCode, cli.JSONSkipped, cli.ExitDBUnreach)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/api"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
@@ -43,7 +44,7 @@ const testDoctorKey = "test-key-placeholder"
 // 它**只能**写在测试文件里：deadcode 门禁不把测试当调用点，写在 doctor.go 里
 // 会被判成「没人调的函数」。
 func printDoctorLive(w io.Writer, l doctorLive, verbose bool) {
-	printStatusLines(w, []statusLine{doctorLiveLine(l)}, verbose)
+	cli.PrintStatusLines(w, []cli.StatusLine{doctorLiveLine(l)}, verbose)
 }
 
 // ── 第 1 项：数据库 ─────────────────────────────────────────────────────
@@ -612,12 +613,12 @@ func TestDoctorPassesWhenEveryCheckPasses(t *testing.T) {
 
 // TestDoctorKeepsDBUnreachExitCode 钉住连不上库时的退出码。
 //
-// 它是既有的对外契约（见 exit.go）：脚本按 3 分派「去看环境」，doctor 不该
+// 它是既有的对外契约（见 cli 包的 exit.go）：脚本按 3 分派「去看环境」，doctor 不该
 // 把它变成「其他失败」。
 func TestDoctorKeepsDBUnreachExitCode(t *testing.T) {
-	rep := doctorReportWithoutDB(context.Background(), dbErr(errors.New("连不上")), doctorOptions{})
-	if got := exitCode(rep.exitErr(dbErr(errors.New("连不上")))); got != exitDBUnreach {
-		t.Fatalf("连不上库时退出码应当是 %d，得到 %d", exitDBUnreach, got)
+	rep := doctorReportWithoutDB(context.Background(), cli.DBErr(errors.New("连不上")), doctorOptions{})
+	if got := cli.ExitCode(rep.exitErr(cli.DBErr(errors.New("连不上")))); got != cli.ExitDBUnreach {
+		t.Fatalf("连不上库时退出码应当是 %d，得到 %d", cli.ExitDBUnreach, got)
 	}
 
 	var buf bytes.Buffer
@@ -681,13 +682,13 @@ func doctorRep(checks ...doctorCheck) doctorReport {
 // 这一类分叉，而那正是这条命令最要紧的一条契约。
 func doctorJSON(t *testing.T, rep doctorReport, dbErr error) (map[string]any, error) {
 	t.Helper()
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	var buf bytes.Buffer
 	err := emitDoctorReport(&buf, rep, dbErr, false)
 	out := buf.String()
 
-	if strings.ContainsRune(out, escByte) {
+	if strings.ContainsRune(out, cli.EscByte) {
 		t.Errorf("json 模式的输出里不许有转义序列：%q", out)
 	}
 	var got map[string]any
@@ -732,18 +733,18 @@ func TestDoctorJSONStatusAndExitCodeAgree(t *testing.T) {
 		wantStatus string
 		wantCode   int
 	}{
-		{"九项全通过", doctorRep(pass, pass, pass, pass, pass, pass, pass, pass, pass), nil, jsonOK, exitOK},
-		{"一项不通过", doctorRep(pass, pass, fail, pass, pass, pass, pass, pass, pass), nil, jsonFailed, exitFailure},
-		{"一项没跑成", doctorRep(pass, pass, pass, skip, pass, pass, pass, pass, pass), nil, jsonSkipped, exitFailure},
+		{"九项全通过", doctorRep(pass, pass, pass, pass, pass, pass, pass, pass, pass), nil, cli.JSONOK, cli.ExitOK},
+		{"一项不通过", doctorRep(pass, pass, fail, pass, pass, pass, pass, pass, pass), nil, cli.JSONFailed, cli.ExitFailure},
+		{"一项没跑成", doctorRep(pass, pass, pass, skip, pass, pass, pass, pass, pass), nil, cli.JSONSkipped, cli.ExitFailure},
 		{
 			// 连不上库：九项都「没跑成」，退出码 3。这是 doctor 最要紧的一次
 			// 输出，json 模式下它同样要认得出来——探针不能因为库挂了就拿到
 			// 一份空的 stdout。
 			"连不上库",
-			doctorReportWithoutDB(context.Background(), dbErr(errors.New("连不上")), doctorOptions{}),
-			dbErr(errors.New("连不上")),
-			jsonSkipped,
-			exitDBUnreach,
+			doctorReportWithoutDB(context.Background(), cli.DBErr(errors.New("连不上")), doctorOptions{}),
+			cli.DBErr(errors.New("连不上")),
+			cli.JSONSkipped,
+			cli.ExitDBUnreach,
 		},
 	}
 
@@ -751,7 +752,7 @@ func TestDoctorJSONStatusAndExitCodeAgree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doc, err := doctorJSON(t, tc.rep, tc.dbErr)
 
-			if got := exitCode(err); got != tc.wantCode {
+			if got := cli.ExitCode(err); got != tc.wantCode {
 				t.Errorf("退出码 = %d，想要 %d", got, tc.wantCode)
 			}
 			if doc["status"] != tc.wantStatus {
@@ -945,7 +946,7 @@ func TestDoctorJSONLiveObject(t *testing.T) {
 	if len(live) != 2 {
 		t.Errorf("没开 --live 时不该铺一排空栏：%#v", live)
 	}
-	if doc["status"] != jsonOK {
+	if doc["status"] != cli.JSONOK {
 		t.Errorf("没开 --live 不该影响整份报告的结论，得到 %v", doc["status"])
 	}
 
@@ -965,7 +966,7 @@ func TestDoctorJSONLiveObject(t *testing.T) {
 	if err == nil {
 		t.Fatal("真打上游失败时退出码必须非 0")
 	}
-	if doc["status"] != jsonFailed {
+	if doc["status"] != cli.JSONFailed {
 		t.Errorf("真打上游失败时整份报告该是 failed，得到 %v", doc["status"])
 	}
 	live, _ = doc["live"].(map[string]any)
@@ -1746,8 +1747,8 @@ func TestDoctorRejectsFlagsThatNeedLive(t *testing.T) {
 		if !strings.Contains(err.Error(), "只在 --live 时才有意义") {
 			t.Errorf("%v 的错误信息是 %v", args, err)
 		}
-		if got := exitCode(err); got != exitUsage {
-			t.Errorf("%v 是参数错，退出码应当是 %d，得到 %d", args, exitUsage, got)
+		if got := cli.ExitCode(err); got != cli.ExitUsage {
+			t.Errorf("%v 是参数错，退出码应当是 %d，得到 %d", args, cli.ExitUsage, got)
 		}
 	}
 }
@@ -1774,8 +1775,8 @@ func TestDoctorLiveRejectsBadFlags(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("期望报错且含 %q，得到 %v", tc.want, err)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -1937,8 +1938,8 @@ func TestDoctorLiveDefaultBaseURLFollowsListenAddr(t *testing.T) {
 		t.Errorf("打出来的入口地址里没有 %q：\n%s", want, liveSection)
 	}
 	// 库连不上是这一条的前提，不是它的结论：退出码照旧是那一档。
-	if got := exitCode(err); got != exitDBUnreach {
-		t.Errorf("退出码 = %d，期望 %d（库连不上）", got, exitDBUnreach)
+	if got := cli.ExitCode(err); got != cli.ExitDBUnreach {
+		t.Errorf("退出码 = %d，期望 %d（库连不上）", got, cli.ExitDBUnreach)
 	}
 }
 
@@ -1963,8 +1964,8 @@ func TestDoctorLiveBaseURLFlagBeatsListenAddr(t *testing.T) {
 	if !strings.Contains(out, "✓ 上游连通") {
 		t.Errorf("真打上游那一行该是通过：\n%s", out)
 	}
-	if got := exitCode(err); got != exitDBUnreach {
-		t.Errorf("退出码 = %d，期望 %d（库连不上）", got, exitDBUnreach)
+	if got := cli.ExitCode(err); got != cli.ExitDBUnreach {
+		t.Errorf("退出码 = %d，期望 %d（库连不上）", got, cli.ExitDBUnreach)
 	}
 }
 
@@ -1998,8 +1999,8 @@ func TestDoctorUnusableListenAddr(t *testing.T) {
 				t.Errorf("报错里没有 %q：%v", want, err)
 			}
 		}
-		if got := exitCode(err); got != exitFailure {
-			t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+		if got := cli.ExitCode(err); got != cli.ExitFailure {
+			t.Errorf("退出码 = %d，期望 %d", got, cli.ExitFailure)
 		}
 	})
 
@@ -2023,8 +2024,8 @@ func TestDoctorUnusableListenAddr(t *testing.T) {
 
 		// 退出码是「连不上库」那一档：报错走的是九项检查那条路，而不是地址
 		// 拼不出来——那件事只在 --live 时才有意义。
-		if got := exitCode(err); got != exitDBUnreach {
-			t.Errorf("退出码 = %d，期望 %d（库连不上）:\n%s", got, exitDBUnreach, out)
+		if got := cli.ExitCode(err); got != cli.ExitDBUnreach {
+			t.Errorf("退出码 = %d，期望 %d（库连不上）:\n%s", got, cli.ExitDBUnreach, out)
 		}
 		if !strings.Contains(out, "上游连通") {
 			t.Errorf("报告里该有真打上游那一节：\n%s", out)
@@ -2121,8 +2122,8 @@ func TestDoctorIntegrationFlagsChannelModelMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("库里有对不上的名字时 doctor 该非零退出")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d（有问题）", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d（有问题）", got, cli.ExitFailure)
 	}
 }
 
@@ -2394,8 +2395,8 @@ func TestDoctorIntegrationPrintsEverySection(t *testing.T) {
 	if err == nil {
 		t.Fatalf("这个库不可能九项全通过（用例自己就会造出没有钱包行的用户）：\n%s", out)
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitFailure)
 	}
 	// 九项的标题都在，加最后那一项「上游连通」：默认输出里每项就一行，
 	// 所以标题是唯一的定位手段。

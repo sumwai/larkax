@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // `maintenance session` 的集成用例。
@@ -109,9 +111,9 @@ func TestMaintenanceSessionRejectsNonPositiveRetention(t *testing.T) {
 			t.Errorf("留存期 %d 天时报错没点出拒绝清理：%v", days, err)
 		}
 		// 设置里的值坏了是运行期失败（退出 1），不是命令写错（退出 2）。
-		if code := exitCode(err); code != exitFailure {
+		if code := cli.ExitCode(err); code != cli.ExitFailure {
 			t.Errorf("留存期 %d 天的退出码 = %d，期望 %d（运行期失败，不是用法错误）",
-				days, code, exitFailure)
+				days, code, cli.ExitFailure)
 		}
 		if !cliSessionExists(t, db, id) {
 			t.Errorf("留存期 %d 天时被拒绝的清理不该删掉行", days)
@@ -130,16 +132,16 @@ func TestMaintenanceSessionRejectsPositionalArgs(t *testing.T) {
 	if !strings.Contains(err.Error(), "dry-run") {
 		t.Errorf("报错应当提示 --dry-run，得到 %v", err)
 	}
-	if code := exitCode(err); code != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（用法错误）", code, exitUsage)
+	if code := cli.ExitCode(err); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（用法错误）", code, cli.ExitUsage)
 	}
 }
 
 // `--format json` 下写类命令直接报错（与 maintenance idempotency 同一条约定）。
 func TestMaintenanceSessionRejectsJSON(t *testing.T) {
-	saved := outputFormat
-	outputFormat = formatJSON
-	defer func() { outputFormat = saved }()
+	saved := cli.OutputFormat
+	cli.OutputFormat = cli.FormatJSON
+	defer func() { cli.OutputFormat = saved }()
 
 	if err := runMaintenanceSession(nil); err == nil {
 		t.Error("--format json 下 maintenance session 应当报错")

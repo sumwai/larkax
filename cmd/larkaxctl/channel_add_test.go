@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channel/anthropicadapter"
 	"github.com/sumwai/larkax/internal/channel/httpx"
@@ -65,8 +66,8 @@ func TestChannelAddRejectsBadShapes(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -95,7 +96,7 @@ func TestChannelAddWithoutModelsParsesThrough(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("没有数据库时不该真的建出渠道")
 	}
-	if got := exitCode(runErr); got == exitUsage {
+	if got := cli.ExitCode(runErr); got == cli.ExitUsage {
 		t.Errorf("不给 --models 被当成了参数错（退出码 %d）：%v", got, runErr)
 	}
 }
@@ -109,8 +110,8 @@ func TestChannelCreateAliasStillWorks(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "缺少 --name") {
 		t.Fatalf("channel create 没有走到 add 的实现：%v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 	}
 }
 
@@ -426,7 +427,7 @@ func TestChannelAddAllProbesFailCreatesNothing(t *testing.T) {
 	if got := channelRowCount(t, db); got != before {
 		t.Errorf("渠道行数从 %d 变成了 %d：没探测成功时不该留下任何行", before, got)
 	}
-	if got := exitCode(err); got == exitUsage {
+	if got := cli.ExitCode(err); got == cli.ExitUsage {
 		t.Errorf("「探不通」是运行期失败，不该按参数错报（退出码 %d）", got)
 	}
 }

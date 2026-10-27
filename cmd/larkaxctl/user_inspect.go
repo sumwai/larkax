@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/plans"
@@ -31,8 +32,8 @@ import (
 // 只读是字面意义上的：这个事务里只有 SELECT，写方法在 NewInTx 造出来的
 // 那些句柄上没有可用的连接（见各包的 NewInTx）。
 func runUserInspect(args []string) error {
-	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
-	if answerHelpFlag(args, userShortUsage) {
+	// -h 要在摘位置参数之前收掉（见 cli 包的 helpflag.go）。
+	if cli.AnswerHelpFlag(args, userShortUsage) {
 		return nil
 	}
 	user, rest, err := takeOperand(args, "<用户>")
@@ -40,7 +41,7 @@ func runUserInspect(args []string) error {
 		return err
 	}
 	if len(rest) > 0 {
-		return usageErr(fmt.Errorf("inspect 只接受一个用户，多出来的 %q 不认识", rest[0]))
+		return cli.UsageErr(fmt.Errorf("inspect 只接受一个用户，多出来的 %q 不认识", rest[0]))
 	}
 
 	return withDB(userTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -102,10 +103,10 @@ func runUserInspect(args []string) error {
 			return fmt.Errorf("列出 API Key 失败: %w", err)
 		}
 
-		if jsonOutput() {
-			return emitJSON(os.Stdout, userInspectDoc(info, rows, cause, subs, order, source, keys), cause)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, userInspectDoc(info, rows, cause, subs, order, source, keys), cause)
 		}
-		printUserInspect(humanStdout(), info, rows, subs, order, source, keys)
+		printUserInspect(cli.HumanStdout(), info, rows, subs, order, source, keys)
 		return cause
 	})
 }
@@ -122,9 +123,9 @@ func runUserInspect(args []string) error {
 func printUserInspect(w io.Writer, info auth.UserInfo, rows []walletRow,
 	subs []plans.UserPlan, order plans.ChargeOrder, source plans.ChargeOrderSource,
 	keys []auth.Key) {
-	p := newPalette(w)
+	p := cli.NewPalette(w)
 	section := func(title string) {
-		_, _ = fmt.Fprintf(w, "\n%s\n", p.bold(title+"："))
+		_, _ = fmt.Fprintf(w, "\n%s\n", p.Bold(title+"："))
 	}
 
 	_, _ = fmt.Fprintf(w, "用户 %s 的全景：\n", info.Username)
@@ -154,14 +155,14 @@ func printUserInspect(w io.Writer, info auth.UserInfo, rows []walletRow,
 func userInspectDoc(info auth.UserInfo, rows []walletRow, cause error,
 	subs []plans.UserPlan, order plans.ChargeOrder, source plans.ChargeOrderSource,
 	keys []auth.Key) map[string]any {
-	status := jsonOK
+	status := cli.JSONOK
 	if cause != nil {
-		status = jsonFailed
+		status = cli.JSONFailed
 	}
-	doc := jsonDoc(status)
+	doc := cli.JSONDoc(status)
 	doc["user"] = userDetailEntry(info)
 
-	// 三个列表都从空切片起：没有条目时打 `[]`，不是 `null`（见 format.go 的
+	// 三个列表都从空切片起：没有条目时打 `[]`，不是 `null`（见 cli 包的 format.go 的
 	// jsonList 与上面那段「空集合一律给 []」）。
 	wallets := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {

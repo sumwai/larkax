@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/calendar"
 	calendarstore "github.com/sumwai/larkax/internal/calendar/store"
 )
@@ -252,8 +253,8 @@ func TestCalendarListDocIsMachineReadable(t *testing.T) {
 		},
 	}), &got)
 
-	if got.Status != jsonOK || got.ExitCode != exitOK {
-		t.Errorf("status=%q exit_code=%d，想要 %q / %d", got.Status, got.ExitCode, jsonOK, exitOK)
+	if got.Status != cli.JSONOK || got.ExitCode != cli.ExitOK {
+		t.Errorf("status=%q exit_code=%d，想要 %q / %d", got.Status, got.ExitCode, cli.JSONOK, cli.ExitOK)
 	}
 	if got.Summary.Total != 2 || len(got.Calendars) != 2 {
 		t.Fatalf("summary.total=%d、清单 %d 条，想要 2 / 2", got.Summary.Total, len(got.Calendars))
@@ -311,8 +312,8 @@ func TestCalendarListRejectsPositional(t *testing.T) {
 	if !strings.Contains(err.Error(), "不接受位置参数") {
 		t.Errorf("错误信息 %q 里没有「不接受位置参数」", err.Error())
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 	}
 }
 
@@ -383,7 +384,7 @@ func TestCalendarListJSONStdoutIsMachineReadable(t *testing.T) {
 		{region, 2031, "synced", 365, []string{}, true, "", time.Now().UTC()},
 	})
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	var err error
 	stdout, stderr := captureStreams(t, func() { err = runCalendarList(nil) })
 	if err != nil {
@@ -662,8 +663,8 @@ func TestSyncYearRejectsBadValues(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("报错里应当提到 %q，实际为 %v", tc.want, err)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -684,8 +685,8 @@ func TestPriceCalendarSyncRejectsMultipleYears(t *testing.T) {
 	if !strings.Contains(err.Error(), "--year") {
 		t.Errorf("报错应当说的是 --year，实际为 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 	}
 }
 
@@ -699,8 +700,8 @@ func TestPriceCalendarSyncRejectsPositionalArguments(t *testing.T) {
 	if !strings.Contains(err.Error(), "不接受位置参数") {
 		t.Errorf("报错应该点出位置参数，实际为 %v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitUsage)
 	}
 }
 
@@ -1082,8 +1083,8 @@ func TestPriceCalendarSyncRecordsDegradedOnNetworkFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("连不上数据源时应当失败")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitFailure)
 	}
 
 	row := readCalendarYear(t, year)
@@ -1133,8 +1134,8 @@ func TestPriceCalendarSyncLeavesSyncedYearUntouched(t *testing.T) {
 	if err == nil {
 		t.Fatal("连不上数据源时应当失败")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitFailure)
 	}
 
 	after := readCalendarYear(t, year)
@@ -1211,8 +1212,8 @@ func TestPriceCalendarSyncKeepsSyncedYearWhenSourceSaysUnpublished(t *testing.T)
 			if syncErr != nil {
 				t.Fatalf("数据源说未发布不该让命令失败: %v", syncErr)
 			}
-			if got := exitCode(syncErr); got != exitOK {
-				t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, exitOK)
+			if got := cli.ExitCode(syncErr); got != cli.ExitOK {
+				t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, cli.ExitOK)
 			}
 			// 整行逐字断言：措辞是给用户看的，改一个字都要在这里体现。
 			want := fmt.Sprintf("CN %d 年库里已有定论（synced），数据源这次表示未发布，未改动。\n", tc.year)
@@ -1333,8 +1334,8 @@ func TestPriceCalendarImportPendingKeepsSyncedYear(t *testing.T) {
 	if importErr != nil {
 		t.Fatalf("不带 days 的文件在已有定论的年份上不该失败: %v", importErr)
 	}
-	if got := exitCode(importErr); got != exitOK {
-		t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, exitOK)
+	if got := cli.ExitCode(importErr); got != cli.ExitOK {
+		t.Errorf("退出码 = %d，期望 %d（「没写」不是失败）", got, cli.ExitOK)
 	}
 	// 整行逐字断言：措辞是给用户看的，改一个字都要在这里体现。
 	want := fmt.Sprintf("CN %d 年库里已有定论（synced），这份文件只记年份状态，未改动。\n", year)

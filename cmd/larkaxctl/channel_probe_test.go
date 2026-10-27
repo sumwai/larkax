@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/upstream"
 )
@@ -142,8 +143,8 @@ func TestChannelAdaptersRejectsPositionalArgs(t *testing.T) {
 	if !strings.Contains(err.Error(), "不接受位置参数") {
 		t.Errorf("错误信息应当点出位置参数，得到 %q", err.Error())
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 	}
 }
 
@@ -230,7 +231,7 @@ func TestChannelProbeUnsupportedUpstreamIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("上游不支持模型列表不是错误，实际返回 %v（stderr=%q）", err, stderr)
 	}
-	if got := exitCode(err); got != exitOK {
+	if got := cli.ExitCode(err); got != cli.ExitOK {
 		t.Errorf("退出码 = %d，期望 0", got)
 	}
 	want := "这家上游（systemone）不提供模型列表，这不算错误。\n"
@@ -266,8 +267,8 @@ func TestChannelProbeFailureRedactsCredential(t *testing.T) {
 	if err == nil {
 		t.Fatal("上游返回 401 时探测应当失败")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望其他失败的 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望其他失败的 %d", got, cli.ExitFailure)
 	}
 	msg := err.Error()
 	if strings.Contains(msg, credential) {
@@ -347,8 +348,8 @@ func TestChannelProbeRejectsBadArguments(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%v 应当被拒", tc.args)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d：%v", got, exitUsage, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d：%v", got, cli.ExitUsage, err)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息 = %q，期望含 %q", err.Error(), tc.want)
@@ -379,7 +380,7 @@ func TestChannelProbeRejectsBadArguments(t *testing.T) {
 // json 档下两个新命令都要显式报参数错，而不是打一张给人看的表。
 func TestChannelProbeAndAdaptersRejectJSONFormat(t *testing.T) {
 	withoutDatabase(t)
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	cases := []struct {
 		command string
@@ -397,8 +398,8 @@ func TestChannelProbeAndAdaptersRejectJSONFormat(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
 				t.Errorf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -423,8 +424,8 @@ func TestChannelAdaptersEmptyRegistryIsInternalError(t *testing.T) {
 	if err == nil {
 		t.Fatal("空注册表应当报错")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望其他失败的 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望其他失败的 %d", got, cli.ExitFailure)
 	}
 	const want = "内部错误: 内置适配器注册表为空：这个二进制的装配不完整"
 	if got := err.Error(); got != want {

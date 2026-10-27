@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/idempotency"
 	"github.com/sumwai/larkax/internal/settings"
@@ -67,8 +68,8 @@ var idempotencyActions = []string{"cleanup"}
 
 func runIdempotency(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, maintenanceIdempotencyShortUsage)
-		return usageErr(errors.New("idempotency 需要子命令"))
+		cli.PrintUsage(os.Stderr, maintenanceIdempotencyShortUsage)
+		return cli.UsageErr(errors.New("idempotency 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -76,14 +77,14 @@ func runIdempotency(args []string) error {
 	case "cleanup":
 		return runIdempotencyCleanup(rest)
 	case "help":
-		printUsage(os.Stdout, maintenanceIdempotencyUsage)
+		cli.PrintUsage(os.Stdout, maintenanceIdempotencyUsage)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, maintenanceIdempotencyShortUsage)
+		cli.PrintUsage(os.Stdout, maintenanceIdempotencyShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, maintenanceIdempotencyShortUsage)
-		return usageErr(fmt.Errorf("未知的 idempotency 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, maintenanceIdempotencyShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 idempotency 子命令 %q", action))
 	}
 }
 
@@ -105,28 +106,28 @@ const cleanupExpiredPredicate = `created_at < now() - ($1::bigint * interval '1 
 // 它是留存承诺的兑现方式，所以输出的是**删了多少条**而不是一句「完成」：
 // 一条都没到期时，命令的输出必须与「根本没跑成」区分得开。
 func runIdempotencyCleanup(args []string) error {
-	if err := jsonUnsupported("maintenance idempotency"); err != nil {
+	if err := cli.JSONUnsupported("maintenance idempotency"); err != nil {
 		return err
 	}
 
 	// `maintenance idempotency help`（以及旧写法 `idempotency cleanup help`）
 	// 给长版；`-h` / `--help` 归下面的 flag 解析，给短版。
 	if len(args) > 0 && args[0] == "help" {
-		printUsage(os.Stdout, maintenanceIdempotencyUsage)
+		cli.PrintUsage(os.Stdout, maintenanceIdempotencyUsage)
 		return nil
 	}
 
-	fs := newFlagSet("maintenance idempotency", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, maintenanceIdempotencyShortUsage) }
+	fs := cli.NewFlagSet("maintenance idempotency", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, maintenanceIdempotencyShortUsage) }
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	// 位置参数一律拒绝，而不是忽略：少写一个横线的 `dry-run` 会被 flag 当成
 	// 普通参数留在 NArg 里，`*dryRun` 仍是 false，于是「只想数一遍」变成真删。
 	// 对一条会删数据的命令，多出来的一截必须让命令停下来，提示里说清该写什么。
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"maintenance idempotency 不接受位置参数，得到 %q：干跑请写 --dry-run", fs.Arg(0)))
 	}
 
@@ -136,7 +137,7 @@ func runIdempotencyCleanup(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -198,8 +199,8 @@ func countExpired(ctx context.Context, db *sql.DB, retention time.Duration) (int
 // （见 LESSONS.md 第 16 条）。
 func printCleanup(verb string, n int64) {
 	if n == 0 {
-		_, _ = fmt.Fprintf(humanStdout(), "%s：0 条（没有到期记录）\n", verb)
+		_, _ = fmt.Fprintf(cli.HumanStdout(), "%s：0 条（没有到期记录）\n", verb)
 		return
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "%s %d 条\n", verb, n)
+	_, _ = fmt.Fprintf(cli.HumanStdout(), "%s %d 条\n", verb, n)
 }

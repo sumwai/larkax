@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // secretHelp 是 secret 的两版帮助文本（见 helpText）。
@@ -47,8 +49,8 @@ var secretActions = []string{"rotate"}
 // runSecret 处理 secret 子命令。
 func runSecret(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, secretShortUsage)
-		return usageErr(errors.New("secret 需要子命令"))
+		cli.PrintUsage(os.Stderr, secretShortUsage)
+		return cli.UsageErr(errors.New("secret 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -58,10 +60,10 @@ func runSecret(args []string) error {
 		// （见 main.go 的 legacyCommands）。
 		return runRotate(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, secretShortUsage)
+		cli.PrintUsage(os.Stdout, secretShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, secretShortUsage)
-		return usageErr(fmt.Errorf("未知的 secret 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, secretShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 secret 子命令 %q", action))
 	}
 }

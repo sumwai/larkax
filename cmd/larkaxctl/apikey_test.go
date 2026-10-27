@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/expiry"
 	"github.com/sumwai/larkax/internal/money"
@@ -737,7 +738,7 @@ func assertOnlyJSON(t *testing.T, stdout string) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", err, stdout)
 	}
-	if strings.ContainsRune(stdout, escByte) {
+	if strings.ContainsRune(stdout, cli.EscByte) {
 		t.Errorf("json 模式的 stdout 里不许有转义序列：%q", stdout)
 	}
 }
@@ -785,8 +786,8 @@ func TestAPIKeyListDocIsMachineReadable(t *testing.T) {
 	}
 	decodeDoc(t, doc, &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q：清单类命令的结论一律是 ok", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q：清单类命令的结论一律是 ok", got.Status, cli.JSONOK)
 	}
 	if got.Summary.Total != 2 {
 		t.Errorf("summary.total = %d，想要 2", got.Summary.Total)
@@ -904,7 +905,7 @@ func TestAPIKeyListDocEmptyListIsEmptyArray(t *testing.T) {
 // 而不是「还不支持 --format json」（退出码 2）。写类命令上这个顺序是硬要求
 // ——先做了再报不支持，库里那一行已经改了，而调用方只看到一句参数错，于是重跑。
 func TestAPIKeyWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
@@ -934,8 +935,8 @@ func TestAPIKeyWriteCommandsRejectJSONFormatBeforeTouchingTheDB(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误信息里要点名是哪条命令（%q）：%v", tc.want, err)
 			}
-			if code := exitCode(err); code != exitUsage {
-				t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+			if code := cli.ExitCode(err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 			}
 			if stdout != "" {
 				t.Errorf("被拦下时 stdout 应当为空，得到 %q", stdout)
@@ -958,7 +959,7 @@ func TestAPIKeyListJSONStdoutIsMachineReadable(t *testing.T) {
 		t.Fatalf("建一把 key 失败: %v", err)
 	}
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	userRef := strconv.FormatInt(owner, 10)
 	stdout, _ := captureStreams(t, func() {
 		err = runAPIKeyList([]string{"--user", userRef})
@@ -980,8 +981,8 @@ func TestAPIKeyListJSONStdoutIsMachineReadable(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("解不回来: %v\n%s", err, stdout)
 	}
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q", got.Status, cli.JSONOK)
 	}
 	if len(got.Keys) != 1 {
 		t.Fatalf("这个用户下应当只有一把 key，得到 %d 把：\n%s", len(got.Keys), stdout)
@@ -1003,11 +1004,11 @@ func TestAPIKeyListJSONStdoutIsMachineReadable(t *testing.T) {
 //
 // 命令在产出结果之前就失败（连不上库、查询失败）时，这份文档的 exit_code 契约
 // 覆盖不了它——不过没有 exit_code 可填，一份「全零、0 条」的 JSON 更坏：它读起来
-// 正是一次成功的空查询（见 format.go 里那条「还没有结果」的约定）。错误照旧返回，
+// 正是一次成功的空查询（见 cli 包的 format.go 里那条「还没有结果」的约定）。错误照旧返回，
 // 由 main 打到 stderr。
 func TestAPIKeyListJSONWithoutResultWritesNothingToStdout(t *testing.T) {
 	setupEnv(t)
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	// 指向一个没人听的端口：连接立刻被拒。
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
@@ -1016,8 +1017,8 @@ func TestAPIKeyListJSONWithoutResultWritesNothingToStdout(t *testing.T) {
 	if err == nil {
 		t.Fatal("连不上库时应当报错")
 	}
-	if code := exitCode(err); code != exitDBUnreach {
-		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, exitDBUnreach)
+	if code := cli.ExitCode(err); code != cli.ExitDBUnreach {
+		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, cli.ExitDBUnreach)
 	}
 	if stdout != "" {
 		t.Errorf("还没有结果时 stdout 应当为空，得到 %q", stdout)
@@ -1118,8 +1119,8 @@ func TestAPIKeyGetDocIsMachineReadable(t *testing.T) {
 	}
 	raw := decodeDoc(t, apiKeyGetDoc(key), &got)
 
-	if got.Status != jsonOK {
-		t.Errorf("status = %q，想要 %q：看一把 key 的结论也是 ok", got.Status, jsonOK)
+	if got.Status != cli.JSONOK {
+		t.Errorf("status = %q，想要 %q：看一把 key 的结论也是 ok", got.Status, cli.JSONOK)
 	}
 	if got.Key.ID != 3 || got.Key.Prefix != "larkax_abcd" || got.Key.Username != "user-placeholder" {
 		t.Errorf("key 的标识对不上：%+v", got.Key)
@@ -1190,7 +1191,7 @@ func TestAPIKeyGetDocIsMachineReadable(t *testing.T) {
 // 「连接数据库失败」（退出码 3），而不是「还不支持 --format json」（退出码 2）。
 // 拿一句「不支持」把它当写类命令拦下来，脚本就再也拿不到单把 key 的字段了。
 func TestAPIKeyGetSupportsJSONFormat(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	// 连不上的库：真的去连就会以 exitDBUnreach 收场。
 	t.Setenv("LARKAX_DB_DSN", "postgres://larkax:placeholder@127.0.0.1:1/larkax?sslmode=disable")
 
@@ -1202,8 +1203,8 @@ func TestAPIKeyGetSupportsJSONFormat(t *testing.T) {
 	if strings.Contains(err.Error(), "不支持 --format json") {
 		t.Fatalf("apikey get 是读类命令，不该被拦下：%v", err)
 	}
-	if code := exitCode(err); code != exitDBUnreach {
-		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, exitDBUnreach)
+	if code := cli.ExitCode(err); code != cli.ExitDBUnreach {
+		t.Errorf("退出码 = %d，想要 %d（连不上库）", code, cli.ExitDBUnreach)
 	}
 	if stdout != "" {
 		t.Errorf("还没有结果时 stdout 应当为空，得到 %q", stdout)
@@ -1228,8 +1229,8 @@ func TestAPIKeyGetMissingKeyExitsFour(t *testing.T) {
 	if !errors.Is(err, auth.ErrKeyNotFound) {
 		t.Fatalf("错误 %v 不满足 errors.Is(err, auth.ErrKeyNotFound)", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，想要 %d（要查的那一行不存在）", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，想要 %d（要查的那一行不存在）", got, cli.ExitConflict)
 	}
 }
 
@@ -1322,8 +1323,8 @@ func TestAPIKeyUpdateWithNoFieldsChangesNothing(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("一个字段都没给时应当报错，而不是静默空转")
 	}
-	if code := exitCode(runErr); code != exitUsage {
-		t.Errorf("退出码 = %d，想要 %d（参数错）", code, exitUsage)
+	if code := cli.ExitCode(runErr); code != cli.ExitUsage {
+		t.Errorf("退出码 = %d，想要 %d（参数错）", code, cli.ExitUsage)
 	}
 	if !strings.Contains(runErr.Error(), "没有要改的东西") {
 		t.Errorf("错误信息 %q 里没说清缺什么", runErr.Error())

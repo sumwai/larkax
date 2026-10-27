@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/config"
 )
@@ -108,8 +109,8 @@ var aliasActions = []string{"create", "list", "update", "delete", "resolve"}
 
 func runAlias(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, aliasShortUsage)
-		return usageErr(errors.New("alias 需要子命令"))
+		cli.PrintUsage(os.Stderr, aliasShortUsage)
+		return cli.UsageErr(errors.New("alias 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -128,22 +129,22 @@ func runAlias(args []string) error {
 	case "resolve":
 		return runAliasResolve(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, aliasShortUsage)
+		cli.PrintUsage(os.Stdout, aliasShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, aliasShortUsage)
-		return usageErr(fmt.Errorf("未知的 alias 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, aliasShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 alias 子命令 %q", action))
 	}
 }
 
 func runAliasCreate(args []string) error {
-	if err := jsonUnsupported("alias create"); err != nil {
+	if err := cli.JSONUnsupported("alias create"); err != nil {
 		return err
 	}
 
 	req, err := parseAliasCreate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -152,7 +153,7 @@ func runAliasCreate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -162,15 +163,15 @@ func runAliasCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	printCreatedAlias(humanStdout(), humanStderr(), id, req)
+	printCreatedAlias(cli.HumanStdout(), cli.HumanStderr(), id, req)
 	return nil
 }
 
 func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
-	fs := newFlagSet("alias create", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	fs := cli.NewFlagSet("alias create", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, aliasShortUsage) }
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	upstream := fs.String("upstream", "", "")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
 	overrides := fs.String("overrides", "", "")
@@ -190,7 +191,7 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 	}
 	// 上游模型名进 alias list 的「上游模型名」那一栏：控制字符在连库之前
 	// 拒掉（判据在 catalog 的 normalizeUpstreamModel）。
-	if err := checkDisplayText("--upstream（上游模型名）", strings.TrimSpace(*upstream)); err != nil {
+	if err := cli.CheckDisplayText("--upstream（上游模型名）", strings.TrimSpace(*upstream)); err != nil {
 		return catalog.CreateAliasRequest{}, err
 	}
 	if *channelID < 0 {
@@ -211,27 +212,27 @@ func parseAliasCreate(args []string) (catalog.CreateAliasRequest, error) {
 }
 
 func runAliasList(args []string) error {
-	fs := newFlagSet("alias list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
+	fs := cli.NewFlagSet("alias list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, aliasShortUsage) }
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示平台级别名")
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	// 判据要连旧名与简写一起看：写 `--canonical` 或 `-m` 时 Visit 记的是它们，
 	// 不是 --model（见 flagGiven）。
-	if given["channel"] && flagGiven(given, modelFlagNames...) {
-		return usageErr(errors.New("--channel 与 --model 只能给一个：" +
+	if given["channel"] && cli.FlagGiven(given, cli.ModelFlagNames...) {
+		return cli.UsageErr(errors.New("--channel 与 --model 只能给一个：" +
 			"前者按渠道列，后者按规范名列（它的结果里两种范围都有）"))
 	}
 	if *channelID < 0 {
-		return usageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
+		return cli.UsageErr(fmt.Errorf("--channel %d 无效：渠道 ID 从 1 开始", *channelID))
 	}
 
 	cfg, err := config.LoadOps()
@@ -240,7 +241,7 @@ func runAliasList(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -256,21 +257,21 @@ func runAliasList(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, aliasListDoc(aliases), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, aliasListDoc(aliases), nil)
 	}
-	printAliasList(humanStdout(), aliases, "别名", "alias create")
+	printAliasList(cli.HumanStdout(), aliases, "别名", "alias create")
 	return nil
 }
 
 func runAliasUpdate(args []string) error {
-	if err := jsonUnsupported("alias update"); err != nil {
+	if err := cli.JSONUnsupported("alias update"); err != nil {
 		return err
 	}
 
 	req, err := parseAliasUpdate(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -279,7 +280,7 @@ func runAliasUpdate(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -288,7 +289,7 @@ func runAliasUpdate(args []string) error {
 	if err := catalog.NewAdmin(db).UpdateAlias(ctx, req); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "已更新别名 %d。\n", req.ID)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已更新别名 %d。\n", req.ID)
 	return nil
 }
 
@@ -297,8 +298,8 @@ func runAliasUpdate(args []string) error {
 // 没有 --channel 与 --model：那两栏不可改，见 catalog.UpdateAliasRequest。
 // 把它们做成标志再拒绝，比根本没有这两个标志更容易让人以为改得动。
 func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
-	fs := newFlagSet("alias update", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
+	fs := cli.NewFlagSet("alias update", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, aliasShortUsage) }
 	id := fs.Int64("id", 0, "要改的别名 ID")
 	upstream := fs.String("upstream", "", "")
 	overrides := fs.String("overrides", "", "")
@@ -319,7 +320,7 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 	req := catalog.UpdateAliasRequest{ID: *id}
 	changes := 0
 	if given["upstream"] {
-		if err := checkDisplayText("--upstream（上游模型名）", strings.TrimSpace(*upstream)); err != nil {
+		if err := cli.CheckDisplayText("--upstream（上游模型名）", strings.TrimSpace(*upstream)); err != nil {
 			return catalog.UpdateAliasRequest{}, err
 		}
 		req.UpstreamModel = upstream
@@ -344,22 +345,22 @@ func parseAliasUpdate(args []string) (catalog.UpdateAliasRequest, error) {
 }
 
 func runAliasDelete(args []string) error {
-	if err := jsonUnsupported("alias delete"); err != nil {
+	if err := cli.JSONUnsupported("alias delete"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("alias delete", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
+	fs := cli.NewFlagSet("alias delete", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, aliasShortUsage) }
 	id := fs.Int64("id", 0, "要删的别名 ID")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"delete 不接受位置参数，得到 %q：要删的别名用 --id 指定", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id（要删的别名 ID）"))
+		return cli.UsageErr(errors.New("缺少 --id（要删的别名 ID）"))
 	}
 
 	cfg, err := config.LoadOps()
@@ -368,7 +369,7 @@ func runAliasDelete(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -377,7 +378,7 @@ func runAliasDelete(args []string) error {
 	if err := catalog.NewAdmin(db).DeleteAlias(ctx, *id); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(humanStderr(), "已删除别名 %d。\n", *id)
+	_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除别名 %d。\n", *id)
 	return nil
 }
 
@@ -387,23 +388,23 @@ func runAliasDelete(args []string) error {
 // 「渠道级优先于平台级」这条判据只有一处，两处各写一份时，漂移的表现是
 // 「同一次请求，选路与计费用了两个上游名」，而账单看上去完全正常。
 func runAliasResolve(args []string) error {
-	fs := newFlagSet("alias resolve", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, aliasShortUsage) }
-	canonical := legacyStringFlag(fs, "model", "canonical", "")
-	stringAlias(fs, canonical, "m")
+	fs := cli.NewFlagSet("alias resolve", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, aliasShortUsage) }
+	canonical := cli.LegacyStringFlag(fs, "model", "canonical", "")
+	cli.StringAlias(fs, canonical, "m")
 	channelID := fs.Int64("channel", 0, "渠道 ID，留空表示不针对具体渠道（只看平台级那条）")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"resolve 不接受位置参数，得到 %q：规范名用 --model 指定", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*canonical) == "" {
-		return usageErr(errors.New("缺少 --model"))
+		return cli.UsageErr(errors.New("缺少 --model"))
 	}
 	if *channelID < 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"--channel %d 无效：渠道 ID 从 1 开始，留空表示不针对具体渠道", *channelID))
 	}
 
@@ -413,7 +414,7 @@ func runAliasResolve(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -426,16 +427,16 @@ func runAliasResolve(args []string) error {
 	if err != nil {
 		return err
 	}
-	if jsonOutput() {
-		return emitJSON(os.Stdout, aliasResolveDoc(*canonical, *channelID, upstream), nil)
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, aliasResolveDoc(*canonical, *channelID, upstream), nil)
 	}
-	printResolvedAlias(humanStdout(), humanStderr(), *canonical, *channelID, upstream)
+	printResolvedAlias(cli.HumanStdout(), cli.HumanStderr(), *canonical, *channelID, upstream)
 	// 映射本身改在 channel map 下；resolve 留在这里，只把配置的去向点出来。
 	// 这句在每一次成功运行里都会出现，按 streams_test.go 的判据它不属于默认
 	// 输出（见那条用例注释里「那种话属于 -v，或者属于 --help 的用法文本」），
 	// 所以只在 -v 下打。
-	if verboseOutput {
-		_, _ = fmt.Fprintf(humanStderr(),
+	if cli.VerboseOutput {
+		_, _ = fmt.Fprintf(cli.HumanStderr(),
 			"出站映射的配置命令在 larkaxctl channel map（map / unmap / list）。\n")
 	}
 	return nil
@@ -481,19 +482,19 @@ func printCreatedAlias(stdout, stderr io.Writer, id int64, req catalog.CreateAli
 // 与 printAliasList 是同一份数据的另一条渲染路径：那一档把范围打成「平台」
 // 「渠道 3」，这一档给 channel_id 的原始值（null 才是平台级）。
 func aliasListDoc(aliases []catalog.Alias) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(aliases)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(aliases))
 	for _, a := range aliases {
 		entries = append(entries, map[string]any{
 			"id": a.ID,
 			// null 表示平台级别名（库里 channel_id 为 NULL），不是「渠道 0」。
-			"channel_id":     jsonID(a.ChannelID),
+			"channel_id":     cli.JSONID(a.ChannelID),
 			"upstream_model": a.UpstreamModel,
 			"canonical_name": a.CanonicalName,
-			"overrides":      jsonObject(a.Overrides),
+			"overrides":      cli.JSONObject(a.Overrides),
 		})
 	}
 	doc["aliases"] = entries
@@ -506,10 +507,10 @@ func aliasListDoc(aliases []catalog.Alias) map[string]any {
 // 「问的是谁」一并带上：同一个规范名在渠道级与平台级各有一条时会给出不同的
 // 上游名，只给结果的那份输出事后对不上是哪一次提问（见 resolveScopeLabel）。
 func aliasResolveDoc(canonical string, channelID int64, upstream string) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["canonical"] = canonical
 	// null 表示这次没针对具体渠道（只看平台级那条）。
-	doc["channel_id"] = jsonID(channelID)
+	doc["channel_id"] = cli.JSONID(channelID)
 	doc["upstream_model"] = upstream
 	return doc
 }
@@ -521,17 +522,17 @@ func aliasResolveDoc(canonical string, channelID int64, upstream string) map[str
 // 命令不相同。
 func printAliasList(w io.Writer, aliases []catalog.Alias, entity, addAction string) {
 	if len(aliases) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote(entity, addAction))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote(entity, addAction))
 		return
 	}
 
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-		p.bold("ID"), p.bold("范围"), p.bold("上游模型名"), p.bold("规范名"), p.bold("覆盖"))
+		p.Bold("ID"), p.Bold("范围"), p.Bold("上游模型名"), p.Bold("规范名"), p.Bold("覆盖"))
 	for _, a := range aliases {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.FormatInt(a.ID, 10)), aliasScope(a.ChannelID), p.bold(a.UpstreamModel),
+			p.Bold(strconv.FormatInt(a.ID, 10)), aliasScope(a.ChannelID), p.Bold(a.UpstreamModel),
 			a.CanonicalName, overridesLabel(a.Overrides))
 	}
 	_ = tw.Flush()

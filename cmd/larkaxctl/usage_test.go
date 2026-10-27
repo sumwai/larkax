@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // ── 根帮助页：分组、层级与「每条命令都有话说」 ──────────────────────────
@@ -197,7 +199,7 @@ func TestEveryFirstLevelCommandAnswersHelp(t *testing.T) {
 				stdout, stderr := captureStreams(t, func() { err = c.run([]string{"--help"}) })
 				// flag 解析到 --help 时返回 ErrHelp，而那时用法已经打过了：
 				// 那不是失败，main 也照这个判据收尾（见 helpRequested）。
-				if err != nil && !helpRequested(err) {
+				if err != nil && !cli.HelpRequested(err) {
 					t.Fatalf("%s --help 报错了: %v", c.name, err)
 				}
 				if out := stdout + stderr; !strings.Contains(out, "larkaxctl "+c.name) {
@@ -248,7 +250,7 @@ func TestRootUsageFitsOneScreen(t *testing.T) {
 		t.Errorf("根帮助页 %d 行，超过一屏的 %d 行", len(lines), maxLines)
 	}
 	for i, line := range lines {
-		if w := displayWidth(line); w > maxWidth {
+		if w := cli.DisplayWidth(line); w > maxWidth {
 			t.Errorf("第 %d 行宽 %d 列，超过 %d：%q", i+1, w, maxWidth, line)
 		}
 	}
@@ -397,7 +399,7 @@ func TestSubcommandHelpHasTwoLevels(t *testing.T) {
 
 				var err error
 				stdout, stderr := captureStreams(t, func() { err = c.run([]string{"--help"}) })
-				if err != nil && !helpRequested(err) {
+				if err != nil && !cli.HelpRequested(err) {
 					t.Fatalf("%s --help 报错了: %v", c.name, err)
 				}
 				if out := stdout + stderr; !strings.Contains(out, c.help.short) {
@@ -455,7 +457,7 @@ func helpTextsForGate(t *testing.T) []struct{ what, text string } {
 		} {
 			var err error
 			stdout, stderr := captureStreams(t, func() { err = dispatch(form.args) })
-			if err != nil && !helpRequested(err) {
+			if err != nil && !cli.HelpRequested(err) {
 				t.Fatalf("%s 的%s取不到：%v（stderr=%q）", path, form.what, err, stderr)
 			}
 			texts = append(texts,
@@ -506,8 +508,8 @@ func TestHelpPointersTargetRealDocSections(t *testing.T) {
 // 这一条容易在收口时丢掉：帮助文本一旦改走 humanStdout()，`larkaxctl -q help
 // doctor` 就会安静地什么都不打——而那正是最需要它的人（脚本作者）会遇到的情形。
 func TestQuietDoesNotSuppressHelp(t *testing.T) {
-	quietOutput = true
-	t.Cleanup(func() { quietOutput = false })
+	cli.QuietOutput = true
+	t.Cleanup(func() { cli.QuietOutput = false })
 
 	for _, tc := range []struct {
 		what     string
@@ -519,7 +521,7 @@ func TestQuietDoesNotSuppressHelp(t *testing.T) {
 	} {
 		var err error
 		stdout, stderr := captureStreams(t, func() { err = dispatch(tc.args) })
-		if err != nil && !helpRequested(err) {
+		if err != nil && !cli.HelpRequested(err) {
 			t.Fatalf("%v 报错了: %v", tc.args, err)
 		}
 		if out := stdout + stderr; !strings.Contains(out, tc.contains) {

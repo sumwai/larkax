@@ -1,8 +1,8 @@
-package main
+package cli
 
 import "os"
 
-// helpOnly 判断这次调用是不是「只要帮助」：参数恰好是一个 -h 或 --help。
+// HelpOnly 判断这次调用是不是「只要帮助」：参数恰好是一个 -h 或 --help。
 //
 // **只认这两种写法**，尽管 `flag` 包也认 `-help` 与 `--h`。理由是基线版本对这两种
 // 写法本身就不一致：`plan -help` 退出码 0、`wallet -help` 却是 2。这一层若把四种
@@ -22,20 +22,20 @@ import "os"
 //   - `credit -h --dry-run` 这种混写也不认：helpOnly 要的是「没别的参数」，
 //     混写时仍按原路解析，行为与今天逐字相同。
 //
-// **收集补全数据期间一律返回 false**：那时 `collectCommandFlags` 正是拿
-// `dispatch(<路径> -h)` 去把各命令的旗标集注册出来的（见 completion.go），
+// **收集补全数据期间一律返回 false**：那时 CollectFlags 正是拿
+// `dispatch(<路径> -h)` 去把各命令的旗标集注册出来的（见 collect.go），
 // 在这里短路等于让那些命令一个旗标都记不下——补全脚本会安静地少掉一片旗标。
-// 与 takeOperand / takeLeadingOperand 在同一个开关上让路，是同一件事。
+// 与 takeOperand / TakeLeadingOperand 在同一个会话状态上让路，是同一件事。
 //
 // 于是这条判据的影响面正好是「在基线版本上会报参数错的那 20 条叶子」。
-func helpOnly(args []string) bool {
-	if collectingCommandFlags {
+func HelpOnly(args []string) bool {
+	if CollectingFlags() {
 		return false
 	}
 	return len(args) == 1 && (args[0] == "-h" || args[0] == "--help")
 }
 
-// answerHelpFlag 处理「参数只有一个 -h 或 --help」：把短版打到 stderr 并返回
+// AnswerHelpFlag 处理「参数只有一个 -h 或 --help」：把短版打到 stderr 并返回
 // true（调用方直接 return nil，收尾与 `flag` 返回 ErrHelp 时一致）。
 //
 // 打 stderr 而不打 stdout，是跟着**叶子**的既有做法：走 flag 集的那一批
@@ -45,10 +45,10 @@ func helpOnly(args []string) bool {
 // 因为那一份是「接下来还有哪些子命令」的导览，会被人往下翻。
 //
 // 走 printUsage 而不是自己 Fprint，是为了让「帮助只有一个出口」这条仍然成立。
-func answerHelpFlag(args []string, short string) bool {
-	if !helpOnly(args) {
+func AnswerHelpFlag(args []string, short string) bool {
+	if !HelpOnly(args) {
 		return false
 	}
-	printUsage(os.Stderr, short)
+	PrintUsage(os.Stderr, short)
 	return true
 }

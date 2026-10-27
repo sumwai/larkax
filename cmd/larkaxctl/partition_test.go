@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/snapshotwire"
 )
@@ -68,8 +69,8 @@ func TestParsePartitionMonthsRejectsBadValues(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%v 应当报错", tc.args)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -118,19 +119,19 @@ func TestPartitionCheckLinesHealthyIsExplicit(t *testing.T) {
 		t.Fatalf("体检有 %d 项，期望 3 项", len(lines))
 	}
 	for i, l := range lines {
-		if l.kind != glyphPass {
+		if l.Kind != cli.GlyphPass {
 			t.Errorf("第 %d 项在干净时的状态符是 %q，期望通过（%q）",
-				i+1, l.kind.symbol(), glyphPass.symbol())
+				i+1, l.Kind.Symbol(), cli.GlyphPass.Symbol())
 		}
 	}
-	if !strings.Contains(lines[0].conclusion, "都在") {
-		t.Errorf("没有缺失时的结论应当明说分区都在：%q", lines[0].conclusion)
+	if !strings.Contains(lines[0].Conclusion, "都在") {
+		t.Errorf("没有缺失时的结论应当明说分区都在：%q", lines[0].Conclusion)
 	}
 	// 两张兜底分区的行数照打：0 行是「查过了」的证据。
 	for i, table := range []string{store.UsageEventDefaultPartition, snapshotwire.DefaultPartition} {
-		if !strings.Contains(lines[1+i].conclusion, table) ||
-			!strings.Contains(lines[1+i].conclusion, "0 行") {
-			t.Errorf("兜底分区 %s 那一行应当带上表名与行数：%q", table, lines[1+i].conclusion)
+		if !strings.Contains(lines[1+i].Conclusion, table) ||
+			!strings.Contains(lines[1+i].Conclusion, "0 行") {
+			t.Errorf("兜底分区 %s 那一行应当带上表名与行数：%q", table, lines[1+i].Conclusion)
 		}
 	}
 }
@@ -144,16 +145,16 @@ func TestPartitionCheckLinesNamesMissingPartitions(t *testing.T) {
 	lines := partitionCheckLines(names, 0, 0)
 
 	missing := lines[0]
-	if missing.kind != glyphFail {
-		t.Errorf("缺月分区时那一项应当是失败，得到 %q", missing.kind.symbol())
+	if missing.Kind != cli.GlyphFail {
+		t.Errorf("缺月分区时那一项应当是失败，得到 %q", missing.Kind.Symbol())
 	}
-	if !strings.Contains(missing.conclusion, names[0]) {
-		t.Errorf("默认那一行要点名缺的第一个分区：%q", missing.conclusion)
+	if !strings.Contains(missing.Conclusion, names[0]) {
+		t.Errorf("默认那一行要点名缺的第一个分区：%q", missing.Conclusion)
 	}
-	if !strings.Contains(missing.conclusion, "另有 2 个") {
-		t.Errorf("其余几个要折成一句指向 -v：%q", missing.conclusion)
+	if !strings.Contains(missing.Conclusion, "另有 2 个") {
+		t.Errorf("其余几个要折成一句指向 -v：%q", missing.Conclusion)
 	}
-	detail := strings.Join(missing.detail, "\n")
+	detail := strings.Join(missing.Detail, "\n")
 	for _, n := range names {
 		if !strings.Contains(detail, n) {
 			t.Errorf("-v 的细节里应当有 %s，实际为 %q", n, detail)
@@ -169,28 +170,28 @@ func TestPartitionCheckLinesKeepsDefaultPartitionsApart(t *testing.T) {
 	lines := partitionCheckLines(nil, 3, 0)
 	usage, snapshot := lines[1], lines[2]
 
-	if usage.kind != glyphFail {
+	if usage.Kind != cli.GlyphFail {
 		t.Errorf("%s 有行时那一项应当失败，得到 %q",
-			store.UsageEventDefaultPartition, usage.kind.symbol())
+			store.UsageEventDefaultPartition, usage.Kind.Symbol())
 	}
-	if !strings.Contains(usage.conclusion, store.UsageEventDefaultPartition) ||
-		!strings.Contains(usage.conclusion, "3 行") {
-		t.Errorf("usage 那一行应当带上表名与 3 行：%q", usage.conclusion)
+	if !strings.Contains(usage.Conclusion, store.UsageEventDefaultPartition) ||
+		!strings.Contains(usage.Conclusion, "3 行") {
+		t.Errorf("usage 那一行应当带上表名与 3 行：%q", usage.Conclusion)
 	}
-	if snapshot.kind != glyphPass {
+	if snapshot.Kind != cli.GlyphPass {
 		t.Errorf("%s 是空的，那一项应当通过，得到 %q",
-			snapshotwire.DefaultPartition, snapshot.kind.symbol())
+			snapshotwire.DefaultPartition, snapshot.Kind.Symbol())
 	}
-	if !strings.Contains(snapshot.conclusion, snapshotwire.DefaultPartition) ||
-		!strings.Contains(snapshot.conclusion, "0 行") {
-		t.Errorf("快照那一行应当带上表名与 0 行：%q", snapshot.conclusion)
+	if !strings.Contains(snapshot.Conclusion, snapshotwire.DefaultPartition) ||
+		!strings.Contains(snapshot.Conclusion, "0 行") {
+		t.Errorf("快照那一行应当带上表名与 0 行：%q", snapshot.Conclusion)
 	}
 
 	// 反过来也要成立：只有快照那张有行时，不能连 usage 一起判成失败。
 	flipped := partitionCheckLines(nil, 0, 7)
-	if flipped[1].kind != glyphPass || flipped[2].kind != glyphFail {
+	if flipped[1].Kind != cli.GlyphPass || flipped[2].Kind != cli.GlyphFail {
 		t.Errorf("表名接反了：usage=%q snapshot=%q",
-			flipped[1].kind.symbol(), flipped[2].kind.symbol())
+			flipped[1].Kind.Symbol(), flipped[2].Kind.Symbol())
 	}
 }
 
@@ -216,7 +217,7 @@ func TestPartitionCheckGlyphAgreesWithExitCode(t *testing.T) {
 			lines := partitionCheckLines(tc.missing, tc.usageRows, tc.snapshotRows)
 			linesFailed := false
 			for _, l := range lines {
-				if l.kind == glyphFail {
+				if l.Kind == cli.GlyphFail {
 					linesFailed = true
 				}
 			}
@@ -389,8 +390,8 @@ func TestPartitionCheckFailsOnMissingMonth(t *testing.T) {
 	if err == nil {
 		t.Fatal("缺月分区时应当非零退出")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("退出码 = %d，期望 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitFailure)
 	}
 	if !strings.Contains(out, "usage_events_") {
 		t.Errorf("输出里应当列出缺的分区名，实际为 %q", out)
@@ -449,8 +450,8 @@ func TestPartitionCheckFailsWhenUsageDefaultPartitionHasRows(t *testing.T) {
 		t.Errorf("usage 兜底分区那一行应当把表名与行数打在一起，实际输出为 %q", out)
 	}
 	// 不通过那一项的状态符要出现在屏幕上：退出码与屏幕说的是同一件事。
-	if !strings.Contains(out, glyphFail.symbol()) {
-		t.Errorf("有一项不通过时屏幕上要有 %q，实际输出为 %q", glyphFail.symbol(), out)
+	if !strings.Contains(out, cli.GlyphFail.Symbol()) {
+		t.Errorf("有一项不通过时屏幕上要有 %q，实际输出为 %q", cli.GlyphFail.Symbol(), out)
 	}
 }
 
@@ -542,12 +543,12 @@ func TestPartitionCheckPassesWhenClean(t *testing.T) {
 	}
 	// 三项通过时屏幕上要有三个 ✓：一屏全是说明文字时，「都查过了」与
 	// 「什么都没查」在安静的终端里长得一样（LESSONS 第 16 条）。
-	if got := strings.Count(out, glyphPass.symbol()); got != 3 {
+	if got := strings.Count(out, cli.GlyphPass.Symbol()); got != 3 {
 		t.Errorf("三项都通过时屏幕上应当有 3 个 %q，实际 %d 个：\n%s",
-			glyphPass.symbol(), got, out)
+			cli.GlyphPass.Symbol(), got, out)
 	}
-	if strings.Contains(out, glyphFail.symbol()) {
-		t.Errorf("干净的一轮不该出现 %q：\n%s", glyphFail.symbol(), out)
+	if strings.Contains(out, cli.GlyphFail.Symbol()) {
+		t.Errorf("干净的一轮不该出现 %q：\n%s", cli.GlyphFail.Symbol(), out)
 	}
 }
 
@@ -663,9 +664,9 @@ func TestPartitionCheckDocStatusAgreesWithExitCode(t *testing.T) {
 		wantStatus string
 		wantExit   int
 	}{
-		{"干净", nil, jsonOK, exitOK},
-		{"缺分区", []string{"usage_events 缺 2 个月分区"}, jsonFailed, exitFailure},
-		{"兜底分区有行", []string{"兜底分区里有 3 行"}, jsonFailed, exitFailure},
+		{"干净", nil, cli.JSONOK, cli.ExitOK},
+		{"缺分区", []string{"usage_events 缺 2 个月分区"}, cli.JSONFailed, cli.ExitFailure},
+		{"兜底分区有行", []string{"兜底分区里有 3 行"}, cli.JSONFailed, cli.ExitFailure},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -673,7 +674,7 @@ func TestPartitionCheckDocStatusAgreesWithExitCode(t *testing.T) {
 			if doc["status"] != tc.wantStatus {
 				t.Errorf("status = %v，想要 %q", doc["status"], tc.wantStatus)
 			}
-			if got := exitCode(partitionCheckErr(tc.problems)); got != tc.wantExit {
+			if got := cli.ExitCode(partitionCheckErr(tc.problems)); got != tc.wantExit {
 				t.Errorf("退出码 = %d，想要 %d", got, tc.wantExit)
 			}
 		})
@@ -704,7 +705,7 @@ func TestPartitionCheckDocEmptyMissingIsArray(t *testing.T) {
 func TestPartitionCheckJSONStdoutIsPure(t *testing.T) {
 	testDB(t)
 	setupEnv(t)
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	var err error
 	stdout, _ := captureStreams(t, func() {
@@ -713,10 +714,10 @@ func TestPartitionCheckJSONStdoutIsPure(t *testing.T) {
 	if err == nil {
 		t.Fatal("缺月分区时应当非零退出")
 	}
-	if got := exitCode(err); got != exitFailure {
-		t.Errorf("json 模式下退出码 = %d，想要 %d", got, exitFailure)
+	if got := cli.ExitCode(err); got != cli.ExitFailure {
+		t.Errorf("json 模式下退出码 = %d，想要 %d", got, cli.ExitFailure)
 	}
-	if strings.ContainsRune(stdout, escByte) {
+	if strings.ContainsRune(stdout, cli.EscByte) {
 		t.Errorf("json 模式下 stdout 里不许有转义序列：%q", stdout)
 	}
 
@@ -729,9 +730,9 @@ func TestPartitionCheckJSONStdoutIsPure(t *testing.T) {
 	if jsonErr := json.Unmarshal([]byte(stdout), &got); jsonErr != nil {
 		t.Fatalf("json 模式下 stdout 不是一份合法的 JSON: %v\n%s", jsonErr, stdout)
 	}
-	if got.Status != jsonFailed || got.ExitCode != exitFailure {
+	if got.Status != cli.JSONFailed || got.ExitCode != cli.ExitFailure {
 		t.Errorf("status=%q exit_code=%d，想要 %q / %d",
-			got.Status, got.ExitCode, jsonFailed, exitFailure)
+			got.Status, got.ExitCode, cli.JSONFailed, cli.ExitFailure)
 	}
 	if len(got.Missing) == 0 {
 		t.Error("缺的分区名要列出来，只给一个计数看不出是哪几个")

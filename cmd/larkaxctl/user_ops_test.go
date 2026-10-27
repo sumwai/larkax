@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // ── 用户级履约操作：新路径与旧路径 ──────────────────────────────────────
@@ -413,8 +415,8 @@ func TestLegacyUserPathsStayQuietOnUsageErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Fatalf("应当是参数错（%d），得到 %d（%v）", exitUsage, got, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Fatalf("应当是参数错（%d），得到 %d（%v）", cli.ExitUsage, got, err)
 			}
 			if strings.Contains(stderr, "提示：") {
 				t.Errorf("参数错时不该打搬家提示：\n%s", stderr)
@@ -431,9 +433,9 @@ func TestLegacyUserPathsHintIsSuppressedByQuiet(t *testing.T) {
 	_, userID, _ := newUserOpsFixture(t)
 	user := strconv.FormatInt(userID, 10)
 
-	saved := quietOutput
-	quietOutput = true
-	t.Cleanup(func() { quietOutput = saved })
+	saved := cli.QuietOutput
+	cli.QuietOutput = true
+	t.Cleanup(func() { cli.QuietOutput = saved })
 
 	_, stderr, err := runStream(t, func() error {
 		return runUsage([]string{"events", "--user", user})
@@ -477,8 +479,8 @@ func TestUserSubgroupsAskForTheirOperand(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("缺宾语是参数错（%d），得到 %d（%v）", exitUsage, got, err)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("缺宾语是参数错（%d），得到 %d（%v）", cli.ExitUsage, got, err)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("报错里没有点名 %q：%v", tc.want, err)

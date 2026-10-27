@@ -158,6 +158,7 @@ LARKAX_INTERNAL_ADDR="127.0.0.1:8082"
 ```
 cmd/larkax/                       服务二进制
 cmd/larkaxctl/                    迁移与运维命令行
+cmd/larkaxctl/internal/cli/       命令行的框架层：退出码分类、样式、表格、旗标注册、全局选项
 internal/api/                     公共 HTTP 入口：路径、解析、响应形状
 internal/assembly/                把入口层装配成能跑的服务
 internal/auth/                    把请求带的凭证换成它属于哪个用户

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
 )
@@ -63,8 +64,8 @@ func TestChannelCreateRejectsBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -88,8 +89,8 @@ func TestChannelUpdateRejectsBadFlags(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("期望报错且含 %q，得到 %v", tc.want, err)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -187,8 +188,8 @@ func assertUsageRefusal(t *testing.T, err error, raw, want string) {
 	if !strings.Contains(err.Error(), want) {
 		t.Errorf("错误 %q 里没有点出 %q", err.Error(), want)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -216,8 +217,8 @@ func TestChannelCredentialIsNotACommandLineArgument(t *testing.T) {
 	if strings.Contains(err.Error(), testSecret) {
 		t.Errorf("错误信息里出现了凭证本身：%v", err)
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("未知标志是参数错，退出码应当是 %d，得到 %d", exitUsage, got)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("未知标志是参数错，退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 	}
 }
 
@@ -942,8 +943,8 @@ func TestChannelDeleteSoftDeletes(t *testing.T) {
 	if !errors.Is(err, channels.ErrChannelNotFound) {
 		t.Fatalf("删不存在的 id 应当报 ErrChannelNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("删不存在的 id 的退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("删不存在的 id 的退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 
@@ -1080,8 +1081,8 @@ func jsonObjectField(t *testing.T, doc map[string]any, key string) map[string]an
 // 或一个着色转义就会让 `| jq` 报错，而报错的是 jq，看起来像 jq 的问题。
 func assertJSONStdout(t *testing.T, stdout string) map[string]any {
 	t.Helper()
-	if strings.ContainsRune(stdout, escByte) {
-		t.Errorf("stdout 里有 ANSI 转义（0x%x）:\n%s", escByte, stdout)
+	if strings.ContainsRune(stdout, cli.EscByte) {
+		t.Errorf("stdout 里有 ANSI 转义（0x%x）:\n%s", cli.EscByte, stdout)
 	}
 	var got map[string]any
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
@@ -1113,7 +1114,7 @@ func TestChannelListDocIsMachineReadable(t *testing.T) {
 	}
 
 	got := jsonRoundTrip(t, channelListDoc(infos, true))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 
 	summary := jsonObjectField(t, got, "summary")
 	assertJSONField(t, summary, "total", float64(2))
@@ -1157,7 +1158,7 @@ func TestChannelListDocIsMachineReadable(t *testing.T) {
 
 	t.Run("空清单是空数组，不是 null", func(t *testing.T) {
 		empty := jsonRoundTrip(t, channelListDoc(nil, false))
-		assertJSONField(t, empty, "status", jsonOK)
+		assertJSONField(t, empty, "status", cli.JSONOK)
 		assertJSONField(t, jsonObjectField(t, empty, "summary"), "total", float64(0))
 		if len(jsonEntries(t, empty, "channels")) != 0 {
 			t.Error("空清单应当是空数组")
@@ -1175,7 +1176,7 @@ func TestChannelListDocIsMachineReadable(t *testing.T) {
 // 那条错：它证明守卫在参数解析与连库之前，而不是「先把事情做完再报不支持」。
 // 写类命令上后者的代价是一次真的写入，而脚本只看到一句参数错。
 func TestChannelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 
 	cases := []struct {
 		command string
@@ -1202,8 +1203,8 @@ func TestChannelWriteCommandsRejectJSONBeforeDoingAnything(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.command+" 还不支持 --format json") {
 				t.Fatalf("错误信息应当指出 %s 不支持 json，得到 %q", tc.command, err.Error())
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望参数错的 %d", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望参数错的 %d", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -1217,7 +1218,7 @@ func TestChannelListJSONStdoutIsPure(t *testing.T) {
 	_ = testDB(t)
 	setupEnv(t)
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	stdout, _ := captureStreams(t, func() {
 		if err := runChannelList(nil); err != nil {
 			t.Fatalf("channel list 失败: %v", err)
@@ -1225,7 +1226,7 @@ func TestChannelListJSONStdoutIsPure(t *testing.T) {
 	})
 
 	got := assertJSONStdout(t, stdout)
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	if len(jsonEntries(t, got, "channels")) == 0 && got["summary"] == nil {
 		t.Error("清单与 summary 至少要有一个")
 	}
@@ -1248,7 +1249,7 @@ func TestChannelGetJSONStdoutIsPure(t *testing.T) {
 	// 夹具要在切到 json 之前造好：json 档下写类命令直接报不支持。
 	id := createTestChannel(t, uniqueName("get-json"), uniqueName("model"))
 
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	stdout, stderr := captureStreams(t, func() {
 		if err := runChannelGet([]string{"--id", strconv.FormatInt(id, 10)}); err != nil {
 			t.Fatalf("channel get 失败: %v", err)
@@ -1259,7 +1260,7 @@ func TestChannelGetJSONStdoutIsPure(t *testing.T) {
 	}
 
 	got := assertJSONStdout(t, stdout)
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	entry := jsonObjectField(t, got, "channel")
 	assertJSONField(t, entry, "id", float64(id))
 	if _, ok := entry["created_at"]; !ok {
@@ -1322,8 +1323,8 @@ func TestChannelGetHealthRestoreRejectBadFlags(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("错误信息 %q 里没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("参数错的退出码应当是 %d，得到 %d", exitUsage, got)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("参数错的退出码应当是 %d，得到 %d", cli.ExitUsage, got)
 			}
 		})
 	}
@@ -1406,7 +1407,7 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	}}
 
 	got := jsonRoundTrip(t, channelHealthDoc(rows, now, since, true, buckets, true))
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 
 	summary := jsonObjectField(t, got, "summary")
 	assertJSONField(t, summary, "total", float64(2))
@@ -1581,7 +1582,7 @@ func TestChannelGetDocIsMachineReadable(t *testing.T) {
 		CreatedAt:      created, UpdatedAt: updated,
 	}))
 
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	entry := jsonObjectField(t, got, "channel")
 	assertJSONField(t, entry, "id", float64(7))
 	assertJSONField(t, entry, "name", "c1")
@@ -1635,7 +1636,7 @@ func setQuotaHealth(t *testing.T, db *sql.DB, id int64, health string, probeAt t
 // healthJSON 跑一遍 channel health -o json，把那份文档解回来。
 func healthJSON(t *testing.T, args ...string) map[string]any {
 	t.Helper()
-	withFormat(t, formatJSON)
+	withFormat(t, cli.FormatJSON)
 	stdout, _ := captureStreams(t, func() {
 		if err := runChannelHealth(args); err != nil {
 			t.Fatalf("channel health %v 失败: %v", args, err)
@@ -1803,8 +1804,8 @@ func TestChannelHealthUnknownIDIsNotFound(t *testing.T) {
 	if !errors.Is(err, channels.ErrChannelNotFound) {
 		t.Fatalf("读一条不存在的渠道应当报 ErrChannelNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 
@@ -1861,8 +1862,8 @@ func TestChannelGetReadsOneChannel(t *testing.T) {
 		if !errors.Is(err, channels.ErrChannelNotFound) {
 			t.Fatalf("期望 ErrChannelNotFound，得到 %v", err)
 		}
-		if got := exitCode(err); got != exitConflict {
-			t.Errorf("退出码 = %d，期望 %d", got, exitConflict)
+		if got := cli.ExitCode(err); got != cli.ExitConflict {
+			t.Errorf("退出码 = %d，期望 %d", got, cli.ExitConflict)
 		}
 	})
 }
@@ -1975,8 +1976,8 @@ func TestChannelRestoreRoundTrip(t *testing.T) {
 	if !errors.Is(err, channels.ErrChannelNotFound) {
 		t.Fatalf("恢复不存在的 id 应当报 ErrChannelNotFound，得到 %v", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("恢复不存在的 id 的退出码 = %d，期望 %d", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("恢复不存在的 id 的退出码 = %d，期望 %d", got, cli.ExitConflict)
 	}
 }
 
@@ -1986,7 +1987,7 @@ func TestChannelHealthJSONStdoutIsPure(t *testing.T) {
 	setupEnv(t)
 
 	got := healthJSON(t, "--since", "24h")
-	assertJSONField(t, got, "status", jsonOK)
+	assertJSONField(t, got, "status", cli.JSONOK)
 	summary := jsonObjectField(t, got, "summary")
 	total, _ := summary["total"].(float64)
 	if int(total) != len(jsonEntries(t, got, "channels")) {

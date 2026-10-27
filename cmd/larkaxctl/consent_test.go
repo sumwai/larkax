@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/snapshotwire"
 )
 
@@ -110,9 +111,9 @@ func rfc3339(d time.Duration) string {
 // 以一句「不支持 json」失败，看起来像授权命令坏了。
 func listJSON(t *testing.T, args []string) string {
 	t.Helper()
-	saved := outputFormat
-	outputFormat = formatJSON
-	defer func() { outputFormat = saved }()
+	saved := cli.OutputFormat
+	cli.OutputFormat = cli.FormatJSON
+	defer func() { cli.OutputFormat = saved }()
 
 	var err error
 	stdout, _ := captureStreams(t, func() { err = runConsentList(args) })
@@ -148,8 +149,8 @@ func TestConsentGrantNeedsAgree(t *testing.T) {
 	if !strings.Contains(err.Error(), "未确认") {
 		t.Errorf("错误 = %q，没说清是没确认", err.Error())
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（补一个 --agree 重发就能成）", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（补一个 --agree 重发就能成）", got, cli.ExitUsage)
 	}
 
 	// 文案要在**没同意**的那条路上就打出来：不带 --agree 时它就是这次运行的全部
@@ -231,8 +232,8 @@ func TestConsentRejectsBadArgs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误 = %q，里面没有 %q", err.Error(), tc.want)
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 			}
 		})
 	}
@@ -383,8 +384,8 @@ func TestConsentSingleRequestRoundTrip(t *testing.T) {
 	if !errors.Is(err, snapshotwire.ErrConsentNotFound) {
 		t.Errorf("错误 = %v，期望包住 ErrConsentNotFound", err)
 	}
-	if got := exitCode(err); got != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（冲突）", got, exitConflict)
+	if got := cli.ExitCode(err); got != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（冲突）", got, cli.ExitConflict)
 	}
 }
 
@@ -494,8 +495,8 @@ func TestConsentGrantRejectsOverLimit(t *testing.T) {
 			t.Errorf("错误 = %q，里面没有 %q（上限与申请值都要给）", err.Error(), want)
 		}
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（改一下时长重发就能成）", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（改一下时长重发就能成）", got, cli.ExitUsage)
 	}
 
 	// 上限是 settings 里的那个值，不是写死的 24。
@@ -570,8 +571,8 @@ func TestConsentGrantForeverIsStillCapped(t *testing.T) {
 	if !strings.Contains(err.Error(), "超过上限") {
 		t.Errorf("错误 = %q，里面没有「超过上限」", err.Error())
 	}
-	if got := exitCode(err); got != exitUsage {
-		t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+	if got := cli.ExitCode(err); got != cli.ExitUsage {
+		t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 	}
 	if n := countConsents(t, db, userID); n != 0 {
 		t.Errorf("被拒的申请写进了 %d 行授权", n)
@@ -608,8 +609,8 @@ func TestConsentGrantRejectsExpiryFlagMixups(t *testing.T) {
 			if err == nil {
 				t.Fatal("应当报参数错")
 			}
-			if got := exitCode(err); got != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错）", got, exitUsage)
+			if got := cli.ExitCode(err); got != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错）", got, cli.ExitUsage)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("错误 = %q，里面没有 %q", err.Error(), tc.want)

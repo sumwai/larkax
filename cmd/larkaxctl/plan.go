@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/plans"
@@ -121,16 +122,16 @@ const planTimeout = 30 * time.Second
 var planActions = []string{"add", "list", "get", "enable", "disable", "grant", "void", "subscriptions", "key", "order"}
 
 func runPlan(args []string) error {
-	fs := newFlagSet("plan", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
-		return usageErr(errors.New("plan 需要子命令"))
+		return cli.UsageErr(errors.New("plan 需要子命令"))
 	}
 	action, rest := rest[0], rest[1:]
 
@@ -163,32 +164,32 @@ func runPlan(args []string) error {
 		return runLegacyUserPath("plan order 已搬到 larkaxctl user plan order <show|set> <用户>",
 			func() error { return runPlanOrder(rest) })
 	default:
-		return usageErr(fmt.Errorf("未知的 plan 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 plan 子命令 %q", action))
 	}
 }
 
 // planKeyOperand 是 plan add 的位置参数：额度包的键。
-var planKeyOperand = operandSpec{
-	what:  "额度包的键",
-	flag:  "key",
-	usage: "写成第一个位置参数（larkaxctl plan add <key> …）",
+var planKeyOperand = cli.OperandSpec{
+	What:  "额度包的键",
+	Flag:  "key",
+	Usage: "写成第一个位置参数（larkaxctl plan add <key> …）",
 }
 
 func runPlanCreate(args []string) error {
-	// 写类命令在 json 模式下必须在做任何事之前拦下来（见 format.go）。
+	// 写类命令在 json 模式下必须在做任何事之前拦下来（见 cli 包的 format.go）。
 	// 命令名写正式名 add：那句会把命令名打给人看，而 create 是旧写法
 	// （见 planUsage 的「旧名仍可用」）。
-	if err := jsonUnsupported("plan add"); err != nil {
+	if err := cli.JSONUnsupported("plan add"); err != nil {
 		return err
 	}
 
-	operand, rest, takeErr := takeLeadingOperand(args, planKeyOperand)
+	operand, rest, takeErr := cli.TakeLeadingOperand(args, planKeyOperand)
 	if takeErr != nil {
 		return takeErr
 	}
 
-	fs := newFlagSet("plan add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	name := fs.String("name", "", "")
 	description := fs.String("description", "", "")
@@ -199,39 +200,39 @@ func runPlanCreate(args []string) error {
 	models := fs.String("models", "", "")
 	asset := fs.String("asset", string(ledger.AssetCNY), "")
 	if err := fs.Parse(rest); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"add 不接受多余的参数，得到 %q：key 要写成第一个位置参数，排在旗标前面", fs.Arg(0)))
 	}
 	given := visitedFlags(fs)
-	planKey, err := resolveOperand(operand, *key, given["key"], planKeyOperand)
+	planKey, err := cli.ResolveOperand(operand, *key, given["key"], planKeyOperand)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if strings.TrimSpace(*name) == "" {
-		return usageErr(errors.New("缺少 --name（展示名）"))
+		return cli.UsageErr(errors.New("缺少 --name（展示名）"))
 	}
 	if strings.TrimSpace(*unit) == "" {
-		return usageErr(errors.New("缺少 --unit"))
+		return cli.UsageErr(errors.New("缺少 --unit"))
 	}
-	if err = checkDisplayText("--key", planKey); err != nil {
+	if err = cli.CheckDisplayText("--key", planKey); err != nil {
 		return err
 	}
-	if err = checkDisplayText("--name", strings.TrimSpace(*name)); err != nil {
+	if err = cli.CheckDisplayText("--name", strings.TrimSpace(*name)); err != nil {
 		return err
 	}
-	if err = checkDisplayText("--description", strings.TrimSpace(*description)); err != nil {
+	if err = cli.CheckDisplayText("--description", strings.TrimSpace(*description)); err != nil {
 		return err
 	}
-	if err = checkDisplayList("--models", splitOptionalList(*models)); err != nil {
+	if err = cli.CheckDisplayList("--models", splitOptionalList(*models)); err != nil {
 		return err
 	}
 
 	assetValue := ledger.Asset(strings.ToUpper(strings.TrimSpace(*asset)))
 	if !assetValue.Valid() {
-		return usageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", *asset, ledger.AssetCNY))
+		return cli.UsageErr(fmt.Errorf("资产 %q 不受支持（目前只有 %s）", *asset, ledger.AssetCNY))
 	}
 
 	in := plans.CreatePlanInput{
@@ -245,7 +246,7 @@ func runPlanCreate(args []string) error {
 	switch in.Unit {
 	case plans.UnitAmount, plans.UnitToken, plans.UnitRequest:
 	default:
-		return usageErr(fmt.Errorf("--unit 只能是 %s、%s 或 %s，得到 %q",
+		return cli.UsageErr(fmt.Errorf("--unit 只能是 %s、%s 或 %s，得到 %q",
 			plans.UnitAmount, plans.UnitToken, plans.UnitRequest, *unit))
 	}
 	if strings.TrimSpace(*quota) != "" {
@@ -260,7 +261,7 @@ func runPlanCreate(args []string) error {
 	}
 	if given["validity-days"] {
 		if *validityDays <= 0 {
-			return usageErr(fmt.Errorf(
+			return cli.UsageErr(fmt.Errorf(
 				"--validity-days 必须是正数天，得到 %d：0 天等于发出去就已经到期", *validityDays))
 		}
 		days := *validityDays
@@ -272,19 +273,19 @@ func runPlanCreate(args []string) error {
 		if err != nil {
 			return err
 		}
-		printCreatedPlan(humanStderr(), created)
+		printCreatedPlan(cli.HumanStderr(), created)
 		return nil
 	})
 }
 
 func runPlanList(args []string) error {
-	fs := newFlagSet("plan list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("list 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -292,26 +293,26 @@ func runPlanList(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, planListDoc(list), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, planListDoc(list), nil)
 		}
-		printPlanList(humanStdout(), list)
+		printPlanList(cli.HumanStdout(), list)
 		return nil
 	})
 }
 
 func runPlanGet(args []string) error {
-	fs := newFlagSet("plan get", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan get", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("get 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("get 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if strings.TrimSpace(*key) == "" {
-		return usageErr(errors.New("缺少 --key"))
+		return cli.UsageErr(errors.New("缺少 --key"))
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -320,10 +321,10 @@ func runPlanGet(args []string) error {
 			return err
 		}
 		// 与 list 同一条约定：JSON 是另一条渲染路径，不是把详情表转成 JSON。
-		if jsonOutput() {
-			return emitJSON(os.Stdout, planDoc(p), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, planDoc(p), nil)
 		}
-		printPlanDetail(humanStdout(), p)
+		printPlanDetail(cli.HumanStdout(), p)
 		return nil
 	})
 }
@@ -333,21 +334,21 @@ func runPlanEnable(args []string, enabled bool) error {
 	if !enabled {
 		command = "plan disable"
 	}
-	if err := jsonUnsupported(command); err != nil {
+	if err := cli.JSONUnsupported(command); err != nil {
 		return err
 	}
 
-	fs := newFlagSet(command, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet(command, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	key := fs.String("key", "", "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("%s 不接受位置参数，得到 %q", strings.TrimPrefix(command, "plan "), fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("%s 不接受位置参数，得到 %q", strings.TrimPrefix(command, "plan "), fs.Arg(0)))
 	}
 	if strings.TrimSpace(*key) == "" {
-		return usageErr(errors.New("缺少 --key"))
+		return cli.UsageErr(errors.New("缺少 --key"))
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -358,56 +359,56 @@ func runPlanEnable(args []string, enabled bool) error {
 		if err != nil {
 			return err
 		}
-		printPlanEnabled(humanStderr(), p)
+		printPlanEnabled(cli.HumanStderr(), p)
 		return nil
 	})
 }
 
 func runPlanGrant(args []string) error {
-	if err := jsonUnsupported("plan grant"); err != nil {
+	if err := cli.JSONUnsupported("plan grant"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plan grant", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan grant", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	planKey := fs.String("plan", "", "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	expiresAt := fs.String("expires-at", "", "")
 	ttl := fs.String("ttl", "", "")
 	forever := fs.Bool("forever", false, "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("grant 不接受位置参数，得到 %q；干跑请写 --dry-run", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("grant 不接受位置参数，得到 %q；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if *user == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 	if strings.TrimSpace(*planKey) == "" {
-		return usageErr(errors.New("缺少 --plan"))
+		return cli.UsageErr(errors.New("缺少 --plan"))
 	}
-	grantRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError("它是这次发放的幂等键"))
+	grantRef, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError("它是这次发放的幂等键"))
 	if refErr != nil {
 		return refErr
 	}
-	if err := checkDisplayText("--ref", grantRef); err != nil {
+	if err := cli.CheckDisplayText("--ref", grantRef); err != nil {
 		return err
 	}
-	expires, err := resolveExpiry(providedFlags(fs), expiryFlags{
-		expiresAt: *expiresAt, ttl: *ttl, forever: *forever,
-	}, expiryNow(), func(v string) (time.Time, error) {
+	expires, err := cli.ResolveExpiry(providedFlags(fs), cli.ExpiryFlags{
+		ExpiresAt: *expiresAt, TTL: *ttl, Forever: *forever,
+	}, cli.ExpiryNow(), func(v string) (time.Time, error) {
 		return parseFutureExpiresAt(v, "这份额度发出去就已经到期了")
 	})
-	if errors.Is(err, errExpiryNotGiven) {
-		return usageErr(errors.New("缺少过期时间：--expires-at、--ttl 或 --forever 给一个"))
+	if errors.Is(err, cli.ErrExpiryNotGiven) {
+		return cli.UsageErr(errors.New("缺少过期时间：--expires-at、--ttl 或 --forever 给一个"))
 	}
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -431,7 +432,7 @@ func runPlanGrant(args []string) error {
 			applied bool
 		)
 		if *dryRun {
-			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			dryErr := cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				var postErr error
 				up, applied, postErr = plans.New(db).GrantTx(ctx, tx, input)
 				return postErr
@@ -446,44 +447,44 @@ func runPlanGrant(args []string) error {
 				return grantErr
 			}
 		}
-		printPlanGrant(humanStderr(), owner, up, applied, *dryRun)
+		printPlanGrant(cli.HumanStderr(), owner, up, applied, *dryRun)
 		return nil
 	})
 }
 
 func runPlanVoid(args []string) error {
-	if err := jsonUnsupported("plan void"); err != nil {
+	if err := cli.JSONUnsupported("plan void"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plan void", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan void", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	ref := fs.String("ref", "", "")
-	autoRef := autoRefFlag(fs)
+	autoRef := cli.AutoRefFlag(fs)
 	status := fs.String("status", string(plans.UserPlanCancelled), "")
 	dryRun := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("void 不接受位置参数，得到 %q；干跑请写 --dry-run", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("void 不接受位置参数，得到 %q；干跑请写 --dry-run", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id：要作废哪一条订阅"))
+		return cli.UsageErr(errors.New("缺少 --id：要作废哪一条订阅"))
 	}
-	voidRef, refErr := resolveOrderRef(*ref, *autoRef, missingRefError("它是这次作废的幂等键"))
+	voidRef, refErr := cli.ResolveOrderRef(*ref, *autoRef, cli.MissingRefError("它是这次作废的幂等键"))
 	if refErr != nil {
 		return refErr
 	}
-	if err := checkDisplayText("--ref", voidRef); err != nil {
+	if err := cli.CheckDisplayText("--ref", voidRef); err != nil {
 		return err
 	}
 	final := plans.UserPlanStatus(strings.TrimSpace(*status))
 	switch final {
 	case plans.UserPlanExpired, plans.UserPlanCancelled:
 	default:
-		return usageErr(fmt.Errorf("--status 只能是 %s 或 %s，得到 %q",
+		return cli.UsageErr(fmt.Errorf("--status 只能是 %s 或 %s，得到 %q",
 			plans.UserPlanExpired, plans.UserPlanCancelled, *status))
 	}
 
@@ -501,7 +502,7 @@ func runPlanVoid(args []string) error {
 			applied bool
 		)
 		if *dryRun {
-			dryErr := inRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
+			dryErr := cli.InRolledBackTx(ctx, db, func(ctx context.Context, tx *sql.Tx) error {
 				var postErr error
 				up, applied, postErr = plans.New(db).VoidTx(ctx, tx, input)
 				return postErr
@@ -516,24 +517,24 @@ func runPlanVoid(args []string) error {
 				return voidErr
 			}
 		}
-		printPlanVoid(humanStderr(), up, applied, *dryRun)
+		printPlanVoid(cli.HumanStderr(), up, applied, *dryRun)
 		return nil
 	})
 }
 
 func runPlanSubscriptions(args []string) error {
-	fs := newFlagSet("plan subscriptions", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan subscriptions", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("subscriptions 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("subscriptions 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *user == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -545,10 +546,10 @@ func runPlanSubscriptions(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, userPlansDoc(owner, list), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, userPlansDoc(owner, list), nil)
 		}
-		printUserPlans(humanStdout(), list)
+		printUserPlans(cli.HumanStdout(), list)
 		return nil
 	})
 }
@@ -560,8 +561,8 @@ var planKeyActions = []string{"show", "set"}
 func runPlanKey(args []string) error {
 	rest := args
 	if len(rest) == 0 {
-		printUsage(os.Stderr, planShortUsage)
-		return usageErr(errors.New("plan key 需要 show 或 set"))
+		cli.PrintUsage(os.Stderr, planShortUsage)
+		return cli.UsageErr(errors.New("plan key 需要 show 或 set"))
 	}
 	action, rest := rest[0], rest[1:]
 	switch action {
@@ -573,28 +574,28 @@ func runPlanKey(args []string) error {
 		// 这一组没有自己的两版文本：它由 plan 拆出来，读者要的仍是 plan 那一份
 		// 里关于 Key 额度包的那几行。所以 -h 给 plan 的短版、help 给它长版，
 		// 与「帮助文案只有一处来源」这条一致。
-		printUsage(os.Stdout, planShortUsage)
+		cli.PrintUsage(os.Stdout, planShortUsage)
 		return nil
 	case "help":
-		printUsage(os.Stdout, planUsage)
+		cli.PrintUsage(os.Stdout, planUsage)
 		return nil
 	default:
-		return usageErr(fmt.Errorf("未知的 plan key 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 plan key 子命令 %q", action))
 	}
 }
 
 func runPlanKeyShow(args []string) error {
-	fs := newFlagSet("plan key show", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan key show", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("show 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("show 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id：要看哪一把 API Key"))
+		return cli.UsageErr(errors.New("缺少 --id：要看哪一把 API Key"))
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -607,39 +608,39 @@ func runPlanKeyShow(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, apiKeyPlansDoc(*id, declared, list), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, apiKeyPlansDoc(*id, declared, list), nil)
 		}
-		printAPIKeyPlans(humanStdout(), *id, declared, list)
+		printAPIKeyPlans(cli.HumanStdout(), *id, declared, list)
 		return nil
 	})
 }
 
 func runPlanKeySet(args []string) error {
-	if err := jsonUnsupported("plan key set"); err != nil {
+	if err := cli.JSONUnsupported("plan key set"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plan key set", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan key set", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	id := fs.Int64("id", 0, "")
 	raw := fs.String("plans", "", "")
 	all := fs.Bool("all", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("set 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *id <= 0 {
-		return usageErr(errors.New("缺少 --id：要改哪一把 API Key"))
+		return cli.UsageErr(errors.New("缺少 --id：要改哪一把 API Key"))
 	}
 	given := providedFlags(fs)
 	switch {
 	case *all && given["plans"]:
-		return usageErr(errors.New("--all 与 --plans 不能同时给：一个表示全部，一个表示指定几条"))
+		return cli.UsageErr(errors.New("--all 与 --plans 不能同时给：一个表示全部，一个表示指定几条"))
 	case !*all && !given["plans"]:
-		return usageErr(errors.New("要么用 --plans 给出名单，要么用 --all 恢复成全部"))
+		return cli.UsageErr(errors.New("要么用 --plans 给出名单，要么用 --all 恢复成全部"))
 	}
 
 	var ids []int64
@@ -649,7 +650,7 @@ func runPlanKeySet(args []string) error {
 			return err
 		}
 		if len(ids) == 0 {
-			return usageErr(errors.New("--plans 给了一个空名单：要恢复成全部用 --all"))
+			return cli.UsageErr(errors.New("--plans 给了一个空名单：要恢复成全部用 --all"))
 		}
 	}
 
@@ -658,7 +659,7 @@ func runPlanKeySet(args []string) error {
 		if err != nil {
 			return err
 		}
-		printAPIKeyPlansSet(humanStderr(), *id, *all, got)
+		printAPIKeyPlansSet(cli.HumanStderr(), *id, *all, got)
 		return nil
 	})
 }
@@ -670,8 +671,8 @@ var planOrderActions = []string{"show", "set"}
 func runPlanOrder(args []string) error {
 	rest := args
 	if len(rest) == 0 {
-		printUsage(os.Stderr, planShortUsage)
-		return usageErr(errors.New("plan order 需要 show 或 set"))
+		cli.PrintUsage(os.Stderr, planShortUsage)
+		return cli.UsageErr(errors.New("plan order 需要 show 或 set"))
 	}
 	action, rest := rest[0], rest[1:]
 	switch action {
@@ -681,29 +682,29 @@ func runPlanOrder(args []string) error {
 		return runPlanOrderSet(rest)
 	case "-h", "--help":
 		// 与 plan key 同理：这一组没有自己的两版文本，给 plan 的那一份。
-		printUsage(os.Stdout, planShortUsage)
+		cli.PrintUsage(os.Stdout, planShortUsage)
 		return nil
 	case "help":
-		printUsage(os.Stdout, planUsage)
+		cli.PrintUsage(os.Stdout, planUsage)
 		return nil
 	default:
-		return usageErr(fmt.Errorf("未知的 plan order 子命令 %q", action))
+		return cli.UsageErr(fmt.Errorf("未知的 plan order 子命令 %q", action))
 	}
 }
 
 func runPlanOrderShow(args []string) error {
-	fs := newFlagSet("plan order show", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan order show", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("show 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("show 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *user == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 
 	return withDB(planTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -715,44 +716,44 @@ func runPlanOrderShow(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, planOrderDoc(owner, order, source), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, planOrderDoc(owner, order, source), nil)
 		}
-		printPlanOrder(humanStdout(), owner, order, source)
+		printPlanOrder(cli.HumanStdout(), owner, order, source)
 		return nil
 	})
 }
 
 func runPlanOrderSet(args []string) error {
-	if err := jsonUnsupported("plan order set"); err != nil {
+	if err := cli.JSONUnsupported("plan order set"); err != nil {
 		return err
 	}
 
-	fs := newFlagSet("plan order set", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, planShortUsage) }
+	fs := cli.NewFlagSet("plan order set", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, planShortUsage) }
 	user := fs.String("user", "", "")
-	stringAlias(fs, user, "u")
+	cli.StringAlias(fs, user, "u")
 	order := fs.String("order", "", "")
 	clear := fs.Bool("clear", false, "")
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return usageErr(fmt.Errorf("set 不接受位置参数，得到 %q", fs.Arg(0)))
+		return cli.UsageErr(fmt.Errorf("set 不接受位置参数，得到 %q", fs.Arg(0)))
 	}
 	if *user == "" {
-		return usageErr(errors.New("缺少 --user"))
+		return cli.UsageErr(errors.New("缺少 --user"))
 	}
 	given := providedFlags(fs)
 	switch {
 	case *clear && given["order"]:
-		return usageErr(errors.New("--clear 与 --order 不能同时给：一个清掉覆盖，一个设值"))
+		return cli.UsageErr(errors.New("--clear 与 --order 不能同时给：一个清掉覆盖，一个设值"))
 	case !*clear && !given["order"]:
-		return usageErr(errors.New("要么用 --order 给出顺序，要么用 --clear 回到平台默认"))
+		return cli.UsageErr(errors.New("要么用 --order 给出顺序，要么用 --clear 回到平台默认"))
 	}
 	value := plans.ChargeOrder(strings.TrimSpace(*order))
 	if !*clear && !value.Valid() {
-		return usageErr(fmt.Errorf("--order 只能是 %s、%s 或 %s，得到 %q",
+		return cli.UsageErr(fmt.Errorf("--order 只能是 %s、%s 或 %s，得到 %q",
 			plans.ChargeOrderPlanFirst, plans.ChargeOrderBalanceFirst,
 			plans.ChargeOrderBalanceOnly, *order))
 	}
@@ -767,13 +768,13 @@ func runPlanOrderSet(args []string) error {
 			if err := svc.ClearUserChargeOrder(ctx, owner.ID); err != nil {
 				return err
 			}
-			printPlanOrderSet(humanStderr(), owner, "", true)
+			printPlanOrderSet(cli.HumanStderr(), owner, "", true)
 			return nil
 		}
 		if err := svc.SetUserChargeOrder(ctx, owner.ID, value); err != nil {
 			return err
 		}
-		printPlanOrderSet(humanStderr(), owner, value, false)
+		printPlanOrderSet(cli.HumanStderr(), owner, value, false)
 		return nil
 	})
 }
@@ -785,11 +786,11 @@ func parseIDList(raw string) ([]int64, error) {
 	for i, part := range parts {
 		text := strings.TrimSpace(part)
 		if text == "" {
-			return nil, usageErr(fmt.Errorf("名单里第 %d 项是空的", i+1))
+			return nil, cli.UsageErr(fmt.Errorf("名单里第 %d 项是空的", i+1))
 		}
 		id, err := strconv.ParseInt(text, 10, 64)
 		if err != nil || id <= 0 {
-			return nil, usageErr(fmt.Errorf("名单里第 %d 项 %q 不是正的整数 id", i+1, part))
+			return nil, cli.UsageErr(fmt.Errorf("名单里第 %d 项 %q 不是正的整数 id", i+1, part))
 		}
 		ids = append(ids, id)
 	}
@@ -840,8 +841,8 @@ func printCreatedPlan(w io.Writer, p plans.Plan) {
 
 // printPlanDetail 打印一个额度包的详情，一栏一行。
 func printPlanDetail(w io.Writer, p plans.Plan) {
-	pal := newPalette(w)
-	tw := newTableWriter(w)
+	pal := cli.NewPalette(w)
+	tw := cli.NewTableWriter(w)
 	status := "启用"
 	if !p.Enabled {
 		status = "停用"
@@ -862,7 +863,7 @@ func printPlanDetail(w io.Writer, p plans.Plan) {
 	}
 	rows = append(rows, [2]string{"状态", status})
 	for _, row := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", pal.bold(row[0]), row[1])
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", pal.Bold(row[0]), row[1])
 	}
 	_ = tw.Flush()
 }
@@ -879,15 +880,15 @@ func printPlanEnabled(w io.Writer, p plans.Plan) {
 // printPlanList 打印额度包清单。
 func printPlanList(w io.Writer, list []plans.Plan) {
 	if len(list) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("额度包", "plan add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("额度包", "plan add"))
 		return
 	}
 
-	pal := newPalette(w)
-	tw := newTableWriter(w)
+	pal := cli.NewPalette(w)
+	tw := cli.NewTableWriter(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		pal.bold("KEY"), pal.bold("名称"), pal.bold("单位"), pal.bold("可用量"),
-		pal.bold("面值"), pal.bold("售卖"), pal.bold("模型"), pal.bold("状态"))
+		pal.Bold("KEY"), pal.Bold("名称"), pal.Bold("单位"), pal.Bold("可用量"),
+		pal.Bold("面值"), pal.Bold("售卖"), pal.Bold("模型"), pal.Bold("状态"))
 	for _, p := range list {
 		status := "启用"
 		if !p.Enabled {
@@ -896,7 +897,7 @@ func printPlanList(w io.Writer, list []plans.Plan) {
 		// 「售卖」这一栏回答的是「哪些包能卖」：有天数才卖，空表示不出售。
 		// 它与「状态」是两件事——停用的包也可能配了天数，只是暂时不上架。
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			pal.bold(p.Key), p.Name, unitLabel(p.Unit), p.QuotaTotal.String(),
+			pal.Bold(p.Key), p.Name, unitLabel(p.Unit), p.QuotaTotal.String(),
 			p.FaceValue.String(), planValidityLabel(p), planModelsLabel(p), status)
 	}
 	_ = tw.Flush()
@@ -905,19 +906,19 @@ func printPlanList(w io.Writer, list []plans.Plan) {
 // printUserPlans 打印一组订阅。
 func printUserPlans(w io.Writer, list []plans.UserPlan) {
 	if len(list) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("额度包订阅", "plan grant"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("额度包订阅", "plan grant"))
 		return
 	}
 
-	pal := newPalette(w)
-	tw := newTableWriter(w)
+	pal := cli.NewPalette(w)
+	tw := cli.NewTableWriter(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-		pal.bold("ID"), pal.bold("用户"), pal.bold("额度包"), pal.bold("单位"),
-		pal.bold("状态"), pal.bold("到期"), pal.bold("面值"), pal.bold("剩余"),
-		pal.bold("发放单号"))
+		pal.Bold("ID"), pal.Bold("用户"), pal.Bold("额度包"), pal.Bold("单位"),
+		pal.Bold("状态"), pal.Bold("到期"), pal.Bold("面值"), pal.Bold("剩余"),
+		pal.Bold("发放单号"))
 	for _, up := range list {
 		_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			pal.bold(strconv.FormatInt(up.ID, 10)), up.UserID, up.PlanKey,
+			pal.Bold(strconv.FormatInt(up.ID, 10)), up.UserID, up.PlanKey,
 			unitLabel(up.Unit), string(up.Status),
 			formatTimeShort(up.ExpiresAt, "不过期"),
 			up.FaceValue.String(), up.FaceValueRemaining.String(), up.Ref)
@@ -1008,7 +1009,7 @@ func printPlanOrderSet(w io.Writer, owner auth.User, order plans.ChargeOrder, cl
 
 // planListDoc 组装 plan list 的机器可读输出。
 func planListDoc(list []plans.Plan) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(list)}
 	entries := make([]map[string]any, 0, len(list))
 	for _, p := range list {
@@ -1026,9 +1027,9 @@ func planEntry(p plans.Plan) map[string]any {
 		"description": p.Description,
 		"asset":       string(p.Asset),
 		"unit":        string(p.Unit),
-		"quota_total": jsonAmount(p.QuotaTotal),
-		"face_value":  jsonAmount(p.FaceValue),
-		"models":      jsonList(p.Models),
+		"quota_total": cli.JSONAmount(p.QuotaTotal),
+		"face_value":  cli.JSONAmount(p.FaceValue),
+		"models":      cli.JSONList(p.Models),
 		"enabled":     p.Enabled,
 		// nil 会被编码成 null：那一栏的含义是「这个包不出售」。
 		"validity_days": p.ValidityDays,
@@ -1038,7 +1039,7 @@ func planEntry(p plans.Plan) map[string]any {
 
 // planDoc 组装 plan get 的机器可读输出：单个包而不是数组。
 func planDoc(p plans.Plan) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["plan"] = planEntry(p)
 	return doc
 }
@@ -1053,20 +1054,20 @@ func userPlanEntry(up plans.UserPlan) map[string]any {
 		"asset":                string(up.Asset),
 		"unit":                 string(up.Unit),
 		"status":               string(up.Status),
-		"starts_at":            jsonTime(up.StartsAt),
-		"expires_at":           jsonTimePtr(up.ExpiresAt),
-		"quota_total":          jsonAmount(up.QuotaTotal),
-		"face_value":           jsonAmount(up.FaceValue),
-		"face_value_remaining": jsonAmount(up.FaceValueRemaining),
+		"starts_at":            cli.JSONTime(up.StartsAt),
+		"expires_at":           cli.JSONTimePtr(up.ExpiresAt),
+		"quota_total":          cli.JSONAmount(up.QuotaTotal),
+		"face_value":           cli.JSONAmount(up.FaceValue),
+		"face_value_remaining": cli.JSONAmount(up.FaceValueRemaining),
 		"ref":                  up.Ref,
-		"void_ref":             nullableString(up.VoidRef),
-		"voided_at":            jsonTimePtr(up.VoidedAt),
+		"void_ref":             cli.NullableString(up.VoidRef),
+		"voided_at":            cli.JSONTimePtr(up.VoidedAt),
 	}
 }
 
 // userPlansDoc 组装 plan subscriptions 的机器可读输出。
 func userPlansDoc(owner auth.User, list []plans.UserPlan) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(list)}
 	doc["user"] = map[string]any{"id": owner.ID, "username": owner.Username}
 	entries := make([]map[string]any, 0, len(list))
@@ -1083,11 +1084,11 @@ func userPlansDoc(owner auth.User, list []plans.UserPlan) map[string]any {
 // 「全部」，这一档必须能用布尔分开，而展开后的 subscriptions 两种情况下都
 // 是同一份「允许集」。
 func apiKeyPlansDoc(keyID int64, declared []int64, list []plans.UserPlan) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["summary"] = map[string]any{"total": len(list)}
 	doc["api_key_id"] = keyID
 	doc["restricted"] = len(declared) > 0
-	doc["plan_ids"] = jsonList(declared)
+	doc["plan_ids"] = cli.JSONList(declared)
 	entries := make([]map[string]any, 0, len(list))
 	for _, up := range list {
 		entries = append(entries, userPlanEntry(up))
@@ -1098,7 +1099,7 @@ func apiKeyPlansDoc(keyID int64, declared []int64, list []plans.UserPlan) map[st
 
 // planOrderDoc 组装 plan order show 的机器可读输出。
 func planOrderDoc(owner auth.User, order plans.ChargeOrder, source plans.ChargeOrderSource) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["user"] = map[string]any{"id": owner.ID, "username": owner.Username}
 	doc["order"] = string(order)
 	doc["source"] = string(source)

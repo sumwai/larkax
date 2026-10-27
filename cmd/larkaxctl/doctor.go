@@ -21,6 +21,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/catalog"
 	"github.com/sumwai/larkax/internal/channel"
 	"github.com/sumwai/larkax/internal/channels"
@@ -348,7 +349,7 @@ type doctorOptions struct {
 func runDoctor(args []string) error {
 	opts, err := parseDoctorOptions(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	cfg, err := config.LoadOps()
@@ -364,7 +365,7 @@ func runDoctor(args []string) error {
 
 	// 连不上库时**不直接返回**：报告里「第 1 项没跑成、其余八项也没跑成」
 	// 比一句「连接数据库失败」有用得多，而那是这个命令最要紧的一次输出。
-	db, dbErr := openDB(ctx, cfg)
+	db, dbErr := cli.OpenDB(ctx, cfg)
 
 	var rep doctorReport
 	if dbErr != nil {
@@ -378,7 +379,7 @@ func runDoctor(args []string) error {
 	// 仍然退出 1（与交互模式一致），而 JSON 里的 exit_code 也是同一个数——
 	// 各算一遍的话，两处迟早分叉，分叉的表现是「报告说 failed、
 	// 脚本读到的退出码是 0」。
-	return emitDoctorReport(os.Stdout, rep, dbErr, verboseOutput)
+	return emitDoctorReport(os.Stdout, rep, dbErr, cli.VerboseOutput)
 }
 
 // emitDoctorReport 把一份报告按选定的格式打出去，并把该用的退出码返回。
@@ -391,12 +392,12 @@ func runDoctor(args []string) error {
 // globals.go 的 humanStdout。
 func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) error {
 	cause := rep.exitErr(dbErr)
-	if jsonOutput() {
+	if cli.JSONOutput() {
 		// verbose 在这里没有意义：JSON 那份本来就把 -v 才打的细节全带上了。
-		return emitJSON(w, doctorDoc(rep), cause)
+		return cli.EmitJSON(w, doctorDoc(rep), cause)
 	}
 
-	printDoctorReport(humanOut(w), rep, verbose)
+	printDoctorReport(cli.HumanOut(w), rep, verbose)
 	return cause
 }
 
@@ -405,19 +406,19 @@ func emitDoctorReport(w io.Writer, rep doctorReport, dbErr error, verbose bool) 
 // 全部检查发生在连库之前（与其余子命令同一条约定）：一个写错的命令不该先
 // 连上生产库再报错。
 func parseDoctorOptions(args []string) (doctorOptions, error) {
-	fs := newFlagSet("doctor", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, doctorShortUsage) }
+	fs := cli.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, doctorShortUsage) }
 	live := fs.Bool("live", false, "")
 	model := fs.String("model", "", "")
-	stringAlias(fs, model, "m")
+	cli.StringAlias(fs, model, "m")
 	endpoint := fs.String("endpoint", doctorEndpointChat, "")
 	// 默认值留空：它跟着本次解析出来的监听地址走，而那份配置要等参数校验完
 	// 才读得到（见 resolveDoctorBaseURL）。--live 没给时这一项本来也用不上。
 	baseURL := fs.String("base-url", "", "")
 	credentialStdin := fs.Bool("credential-stdin", false, "")
-	boolAlias(fs, credentialStdin, "stdin")
+	cli.BoolAlias(fs, credentialStdin, "stdin")
 	credentialEnv := fs.String("credential-env", "", "")
-	stringAlias(fs, credentialEnv, "env")
+	cli.StringAlias(fs, credentialEnv, "env")
 	if err := fs.Parse(args); err != nil {
 		return doctorOptions{}, err
 	}
@@ -440,13 +441,13 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 		// 只有 --live 才用得上这些标志。静默忽略它们会让「我给了 --model
 		// 但它没生效」看起来像一次成功的检查——而那正是这一项要防的东西。
 		for _, group := range [][]string{
-			modelFlagNames,
+			cli.ModelFlagNames,
 			{"endpoint"},
 			{"base-url"},
-			credentialStdinFlagNames,
-			credentialEnvFlagNames,
+			cli.CredentialStdinFlagNames,
+			cli.CredentialEnvFlagNames,
 		} {
-			if flagGiven(given, group...) {
+			if cli.FlagGiven(given, group...) {
 				return doctorOptions{}, fmt.Errorf(
 					"--%s 只在 --live 时才有意义：默认那九项不碰网络", group[0])
 			}
@@ -465,7 +466,7 @@ func parseDoctorOptions(args []string) (doctorOptions, error) {
 	}
 	opts.endpoint = spec.name
 
-	if flagGiven(given, "base-url") {
+	if cli.FlagGiven(given, "base-url") {
 		if baseErr := validateDoctorBaseURL(*baseURL); baseErr != nil {
 			return doctorOptions{}, baseErr
 		}
@@ -612,14 +613,14 @@ type doctorTable struct {
 }
 
 // glyph 把结论折成默认输出里的那个状态符。
-func (c doctorCheck) glyph() glyphKind {
+func (c doctorCheck) glyph() cli.GlyphKind {
 	switch c.status() {
 	case doctorFailed:
-		return glyphFail
+		return cli.GlyphFail
 	case doctorSkipped:
-		return glyphSkip
+		return cli.GlyphSkip
 	default:
-		return glyphPass
+		return cli.GlyphPass
 	}
 }
 
@@ -684,7 +685,7 @@ func (t *doctorTable) lines() []string {
 		return nil
 	}
 	var sb strings.Builder
-	tw := newTableWriter(&sb)
+	tw := cli.NewTableWriter(&sb)
 	_, _ = fmt.Fprintln(tw, strings.Join(t.header, "\t"))
 	for _, row := range t.rows {
 		_, _ = fmt.Fprintln(tw, strings.Join(row, "\t"))
@@ -774,10 +775,10 @@ func (r doctorReport) exitErr(dbErr error) error {
 		// 结论已经在上面那份报告里（每一项一行 `✗` / `!`），这里只给退出码：
 		// reportedErr 让 main 不再补打一行 `larkaxctl: …`——那是同一句话说
 		// 第二遍，形状还像一次崩溃。
-		return reportedErr(fmt.Errorf("doctor 不通过：%d 项有问题、%d 项没跑成", failed, skipped))
+		return cli.ReportedErr(fmt.Errorf("doctor 不通过：%d 项有问题、%d 项没跑成", failed, skipped))
 	}
 	if r.live.enabled && !r.live.ok() {
-		return reportedErr(errors.New("doctor 不通过：真打上游那一次没有成功"))
+		return cli.ReportedErr(errors.New("doctor 不通过：真打上游那一次没有成功"))
 	}
 	return nil
 }
@@ -1631,7 +1632,7 @@ func checkDoctorWallets(in doctorChainInput) doctorCheck {
 			// 这一条就是「用户清单是空的」那件事，所以它说清单空状态那一句
 			// （style.go 的 emptyListNote）：同一个状态在两处各说各的措辞时，
 			// 读的人分不清它们是同一件事还是两个不同的状态。
-			headline: emptyListNote("用户", "user add"),
+			headline: cli.EmptyListNote("用户", "user add"),
 			detail:   "没有任何一把 API Key 能挂上去，请求会回 401",
 		})
 		return c
@@ -1825,7 +1826,7 @@ func doctorEndpointNames() []string {
 // 之后不会跟着变，而「报错里列的还是老的那几条」没有任何东西会报出来。
 // 分隔规则在 joinChoiceNames，与 --format 那份共用。
 func doctorEndpointChoices() string {
-	return joinChoiceNames(doctorEndpointNames())
+	return cli.JoinChoiceNames(doctorEndpointNames())
 }
 
 func lookupDoctorEndpoint(name string) (doctorEndpointSpec, error) {
@@ -2133,7 +2134,7 @@ func printDoctorReport(w io.Writer, rep doctorReport, verbose bool) {
 	_, _ = fmt.Fprintln(w, "larkaxctl doctor：逐项检查「配好的链路能不能接一次请求」。")
 	_, _ = fmt.Fprintln(w)
 
-	printStatusLines(w, statusLines(rep), verbose)
+	cli.PrintStatusLines(w, statusLines(rep), verbose)
 
 	passed, failed, skipped := rep.counts()
 	_, _ = fmt.Fprintf(w, "\n  doctor: %d 项异常, %d 项跳过, %d 项通过 (运行 -v 查看细节)\n",
@@ -2141,43 +2142,43 @@ func printDoctorReport(w io.Writer, rep doctorReport, verbose bool) {
 }
 
 // statusLines 把报告折成默认输出的那几行。
-func statusLines(rep doctorReport) []statusLine {
+func statusLines(rep doctorReport) []cli.StatusLine {
 	checks := rep.checks()
-	lines := make([]statusLine, 0, len(checks)+1)
+	lines := make([]cli.StatusLine, 0, len(checks)+1)
 	for _, c := range checks {
-		lines = append(lines, statusLine{
-			kind:       c.glyph(),
-			title:      c.title,
-			conclusion: c.conclusion(),
-			detail:     c.detailLines(),
+		lines = append(lines, cli.StatusLine{
+			Kind:       c.glyph(),
+			Title:      c.title,
+			Conclusion: c.conclusion(),
+			Detail:     c.detailLines(),
 		})
 	}
 	return append(lines, doctorLiveLine(rep.live))
 }
 
 // doctorLiveLine 把真打上游那一次折成一行。
-func doctorLiveLine(l doctorLive) statusLine {
-	line := statusLine{title: "上游连通", detail: liveDetail(l)}
+func doctorLiveLine(l doctorLive) cli.StatusLine {
+	line := cli.StatusLine{Title: "上游连通", Detail: liveDetail(l)}
 	switch {
 	case !l.enabled:
-		line.kind = glyphNone
-		line.conclusion = "没跑：加 --live 才会真打一次上游（会花钱、要凭证）"
+		line.Kind = cli.GlyphNone
+		line.Conclusion = "没跑：加 --live 才会真打一次上游（会花钱、要凭证）"
 
 	case l.sendErr != nil:
 		// 「没发出去」与「发出去了、上游回了失败」是两件事，现场完全不同
 		// （一个是地址/网络，一个是链路配置），所以结论里也是两句话。
-		line.kind = glyphFail
-		line.conclusion = fmt.Sprintf("请求没发出去：%v", l.sendErr)
+		line.Kind = cli.GlyphFail
+		line.Conclusion = fmt.Sprintf("请求没发出去：%v", l.sendErr)
 
 	case l.ok():
-		line.kind = glyphPass
-		line.conclusion = liveOKLabel(l)
+		line.Kind = cli.GlyphPass
+		line.Conclusion = liveOKLabel(l)
 
 	default:
-		line.kind = glyphFail
+		line.Kind = cli.GlyphFail
 		// 归因那一句（谁拒的）就是这一项的根因，所以它进默认那一行：
 		// #381 那次事故里缺的正是这一句，而它在 -v 里等于没打。
-		line.conclusion = l.attribution()
+		line.Conclusion = l.attribution()
 	}
 	return line
 }
@@ -2303,12 +2304,12 @@ func (l doctorLive) attribution() string {
 func (r doctorReport) jsonStatus() string {
 	_, failed, skipped := r.counts()
 	if failed > 0 || (r.live.enabled && !r.live.ok()) {
-		return jsonFailed
+		return cli.JSONFailed
 	}
 	if skipped > 0 {
-		return jsonSkipped
+		return cli.JSONSkipped
 	}
-	return jsonOK
+	return cli.JSONOK
 }
 
 // doctorDoc 把一份体检报告折成机器可读输出。
@@ -2318,7 +2319,7 @@ func (r doctorReport) jsonStatus() string {
 // 给出不同的 total，而两者的区别在 live 那个对象里。
 func doctorDoc(r doctorReport) map[string]any {
 	passed, failed, skipped := r.counts()
-	doc := jsonDoc(r.jsonStatus())
+	doc := cli.JSONDoc(r.jsonStatus())
 	doc["summary"] = map[string]any{
 		"total":   len(r.checks()),
 		"passed":  passed,
@@ -2341,7 +2342,7 @@ func doctorCheckDoc(name string, c doctorCheck) map[string]any {
 	for _, p := range c.findings {
 		problems = append(problems, map[string]any{
 			"headline": p.headline,
-			"detail":   nullableString(p.detail),
+			"detail":   cli.NullableString(p.detail),
 		})
 	}
 
@@ -2351,13 +2352,13 @@ func doctorCheckDoc(name string, c doctorCheck) map[string]any {
 		"status":     c.status().jsonLabel(),
 		"subject":    c.subject,
 		"conclusion": c.conclusion(),
-		"ok":         nullableString(c.ok),
-		"notes":      jsonList(c.notes),
+		"ok":         cli.NullableString(c.ok),
+		"notes":      cli.JSONList(c.notes),
 		"problems":   problems,
 		// skip 与 problems 是两种不同的坏消息，分开两栏：前者是「没查成」，
 		// 后者是「查了，有问题」。合成一栏会让脚本分不出「这项没问题」
-		// 与「这项没查」——而这个项目为这一条单独立过一个状态符（见 style.go）。
-		"skip_reason": nullableString(c.skip),
+		// 与「这项没查」——而这个项目为这一条单独立过一个状态符（见 cli 包的 style.go）。
+		"skip_reason": cli.NullableString(c.skip),
 		"table":       doctorTableDoc(c.table),
 	}
 	return out
@@ -2375,9 +2376,9 @@ func doctorTableDoc(t *doctorTable) any {
 	}
 	rows := make([][]string, 0, len(t.rows))
 	for _, row := range t.rows {
-		rows = append(rows, jsonList(row))
+		rows = append(rows, cli.JSONList(row))
 	}
-	return map[string]any{"header": jsonList(t.header), "rows": rows}
+	return map[string]any{"header": cli.JSONList(t.header), "rows": rows}
 }
 
 // doctorLiveDoc 把真打上游那一次折成机器可读的一条。
@@ -2400,15 +2401,15 @@ func doctorLiveDoc(l doctorLive) map[string]any {
 		// 状态码 0 表示请求根本没拿到 HTTP 响应（发不出去、或读响应体失败），
 		// 这里给 null 而不是 0：0 不是一个 HTTP 状态码，读成「上游回了 0」
 		// 比读成「没拿到」坏得多。
-		"status_code":     nullableInt(l.status),
+		"status_code":     cli.NullableInt(l.status),
 		"elapsed_ms":      l.elapsed.Milliseconds(),
-		"response_model":  nullableString(l.respModel),
-		"usage":           nullableString(l.usage),
-		"error":           nullableString(l.errMsg),
-		"error_code":      nullableString(l.errCode),
-		"send_error":      nullableError(l.sendErr),
-		"gateway_version": nullableString(l.version),
-		"retry_after":     nullableString(l.retryAfter),
+		"response_model":  cli.NullableString(l.respModel),
+		"usage":           cli.NullableString(l.usage),
+		"error":           cli.NullableString(l.errMsg),
+		"error_code":      cli.NullableString(l.errCode),
+		"send_error":      cli.NullableError(l.sendErr),
+		"gateway_version": cli.NullableString(l.version),
+		"retry_after":     cli.NullableString(l.retryAfter),
 		"from_gateway":    l.fromGateway(),
 		"rejected_by_us":  l.rejectedByUs(),
 		// 归因那一句只在失败时给：成功时 attribution 会去打 200 的

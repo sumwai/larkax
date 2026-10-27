@@ -130,17 +130,17 @@ var emptyListPaths = []string{
 
 // TestEveryStatusRenderPathIsRegistered 钉住诊断体检类的调用点集合。
 func TestEveryStatusRenderPathIsRegistered(t *testing.T) {
-	checkCallSiteRegistry(t, "printStatusLines", statusRenderPaths)
+	checkCallSiteRegistry(t, "PrintStatusLines", statusRenderPaths)
 }
 
 // TestEveryTableRenderPathIsRegistered 钉住清单表的调用点集合。
 func TestEveryTableRenderPathIsRegistered(t *testing.T) {
-	checkCallSiteRegistry(t, "newTableWriter", tableRenderPaths)
+	checkCallSiteRegistry(t, "NewTableWriter", tableRenderPaths)
 }
 
 // TestEveryEmptyListNoteIsRegistered 钉住空状态文案的调用点集合。
 func TestEveryEmptyListNoteIsRegistered(t *testing.T) {
-	checkCallSiteRegistry(t, "emptyListNote", emptyListPaths)
+	checkCallSiteRegistry(t, "EmptyListNote", emptyListPaths)
 }
 
 // TestEmptyStateWordingHasASingleSource 钉住「暂无」只有一个出处。
@@ -153,7 +153,7 @@ func TestEmptyStateWordingHasASingleSource(t *testing.T) {
 	const note = "暂无"
 
 	var hits []string
-	forEachNonTestFile(t, func(name string, file *ast.File) {
+	forEachNonTestFileBoth(t, func(name string, file *ast.File) {
 		exempt := usageTextLiterals(file)
 		forEachStringLiteral(file, func(lit *ast.BasicLit, value string) {
 			if exempt[lit.Pos()] {
@@ -167,11 +167,12 @@ func TestEmptyStateWordingHasASingleSource(t *testing.T) {
 		})
 	})
 
-	if len(hits) == 1 && strings.HasPrefix(hits[0], "style.go:") {
+	if len(hits) == 1 && strings.HasPrefix(hits[0], frameworkStylePath+":") {
 		return
 	}
-	t.Errorf("「%s」在非测试源码的字面量里出现 %d 次，期望正好 1 次、且在 style.go 里：\n%s\n"+
-		"空清单走 emptyListNote，别自己拼一句。", note, len(hits), strings.Join(hits, "\n"))
+	t.Errorf("「%s」在非测试源码的字面量里出现 %d 次，期望正好 1 次、且在 %s 里：\n%s\n"+
+		"空清单走 EmptyListNote，别自己拼一句。", note, len(hits), frameworkStylePath,
+		strings.Join(hits, "\n"))
 }
 
 // TestOnlyThePalettePaints 钉住「转义序列只在 style.go 拼得出来」。
@@ -184,7 +185,7 @@ func TestEmptyStateWordingHasASingleSource(t *testing.T) {
 // 还没有用例走过的路径。两处都留着。
 func TestOnlyThePalettePaints(t *testing.T) {
 	var hits []string
-	forEachNonTestFile(t, func(name string, file *ast.File) {
+	forEachNonTestFileBoth(t, func(name string, file *ast.File) {
 		forEachStringLiteral(file, func(lit *ast.BasicLit, value string) {
 			if strings.Contains(value, "\x1b[") {
 				hits = append(hits, name+": "+lit.Value)
@@ -196,16 +197,17 @@ func TestOnlyThePalettePaints(t *testing.T) {
 		t.Fatal("一处转义序列都没扫到：palette 被拆了，或者这个扫描器坏了——两种都不算通过")
 	}
 	for _, hit := range hits {
-		if !strings.HasPrefix(hit, "style.go:") {
-			t.Errorf("转义序列出现在 style.go 之外：%s\n上色只有 palette 一个出口，"+
-				"调用点自己拼控制码的地方会绕过 NO_COLOR 与重定向判断。", hit)
+		if !strings.HasPrefix(hit, frameworkStylePath+":") {
+			t.Errorf("转义序列出现在 %s 之外：%s\n上色只有 palette 一个出口，"+
+				"调用点自己拼控制码的地方会绕过 NO_COLOR 与重定向判断。",
+				frameworkStylePath, hit)
 		}
 	}
 }
 
 // TestStatusGlyphsHaveASingleSource 钉住 ✓ 与 ✗ 只从 glyphKind.symbol 出来。
 //
-// 状态符与它的颜色是同一档意思的两半（见 style.go 的 glyphKind）：谁在调用点
+// 状态符与它的颜色是同一档意思的两半（见 cli 包的 style.go 的 glyphKind）：谁在调用点
 // 直接写一个 ✓，那一处的颜色就与别的处不在一条路径上，而「这一屏各档状态符是
 // 什么」正是诊断体检类命令唯一的共同语言。
 //
@@ -217,7 +219,7 @@ func TestStatusGlyphsHaveASingleSource(t *testing.T) {
 
 	for _, glyph := range glyphs {
 		var hits []string
-		forEachNonTestFile(t, func(name string, file *ast.File) {
+		forEachNonTestFileBoth(t, func(name string, file *ast.File) {
 			exempt := usageTextLiterals(file)
 			forEachStringLiteral(file, func(lit *ast.BasicLit, value string) {
 				if exempt[lit.Pos()] {
@@ -228,9 +230,9 @@ func TestStatusGlyphsHaveASingleSource(t *testing.T) {
 				}
 			})
 		})
-		if len(hits) != 1 || !strings.HasPrefix(hits[0], "style.go:") {
-			t.Errorf("%s 在非测试源码里出现 %d 次，期望正好 1 次、且在 style.go 里：%q",
-				glyph, len(hits), hits)
+		if len(hits) != 1 || !strings.HasPrefix(hits[0], frameworkStylePath+":") {
+			t.Errorf("%s 在非测试源码里出现 %d 次，期望正好 1 次、且在 %s 里：%q",
+				glyph, len(hits), frameworkStylePath, hits)
 		}
 	}
 }
@@ -247,7 +249,7 @@ func TestNoParenthesisedIDInHumanOutput(t *testing.T) {
 
 	for _, opening := range brackets {
 		var hits []string
-		forEachNonTestFile(t, func(name string, file *ast.File) {
+		forEachNonTestFileBoth(t, func(name string, file *ast.File) {
 			forEachStringLiteral(file, func(lit *ast.BasicLit, value string) {
 				if strings.Contains(value, opening) {
 					hits = append(hits, name+": "+lit.Value)
@@ -291,7 +293,7 @@ func nonTestCallSites(t *testing.T, callee string) []string {
 	t.Helper()
 
 	var found []string
-	forEachNonTestFile(t, func(name string, file *ast.File) {
+	forEachNonTestFileBoth(t, func(name string, file *ast.File) {
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
@@ -326,10 +328,44 @@ func nonTestCallSites(t *testing.T, callee string) []string {
 // "."——不去找模块根：找到了也要再猜一次包的相对路径。
 func forEachNonTestFile(t *testing.T, visit func(name string, file *ast.File)) {
 	t.Helper()
+	forEachNonTestFileIn(t, ".", visit)
+}
 
-	entries, err := os.ReadDir(".")
+// forEachFrameworkFile 把框架包（internal/cli）下每个非测试的 .go 文件交给 visit。
+//
+// 框架那一层（样式、表格、格式、退出码）已经搬进 internal/cli，但它仍然是
+// 「输出只有一个出口」这条约定的一部分：上色只在 style.go 拼、状态符只有一处
+// 出处、空状态文案只有一句。只扫 main 的话，这些字面量一条都扫不到——而
+// 「扫不到」与「全都对」在输出上长得一样（见 LESSONS.md 第 16 条）。
+func forEachFrameworkFile(t *testing.T, visit func(name string, file *ast.File)) {
+	t.Helper()
+	forEachNonTestFileIn(t, frameworkDir, visit)
+}
+
+// frameworkDir 是框架包的相对路径（测试的工作目录是 main 包目录）。
+var frameworkDir = filepath.Join("internal", "cli")
+
+// frameworkStylePath 是上色那一份的路径。两条判据（转义序列只有一处出处、
+// 空状态文案只有一句）都钉在它上面——搬进 internal/cli 之前它就是 style.go。
+const frameworkStylePath = "internal/cli/style.go"
+
+// forEachNonTestFileBoth 扫 main 包与框架包两处。
+//
+// 输出层的约定横跨两处：风格与文案在 internal/cli，调用点在 main。只扫一处时
+// 「另一处违规」与「全都对」在输出上长得一样。
+func forEachNonTestFileBoth(t *testing.T, visit func(name string, file *ast.File)) {
+	t.Helper()
+	forEachNonTestFile(t, visit)
+	forEachFrameworkFile(t, visit)
+}
+
+// forEachNonTestFileIn 是上面两个的共用部分：扫一个目录里的非测试 .go 文件。
+func forEachNonTestFileIn(t *testing.T, dir string, visit func(name string, file *ast.File)) {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("读包目录失败：%v", err)
+		t.Fatalf("读包目录 %s 失败：%v", dir, err)
 	}
 
 	fset := token.NewFileSet()
@@ -339,12 +375,13 @@ func forEachNonTestFile(t *testing.T, visit func(name string, file *ast.File)) {
 		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(fset, name, nil, 0)
+		rel := filepath.Join(dir, name)
+		file, err := parser.ParseFile(fset, rel, nil, 0)
 		if err != nil {
-			t.Fatalf("解析 %s 失败：%v", name, err)
+			t.Fatalf("解析 %s 失败：%v", rel, err)
 		}
 		scanned++
-		visit(name, file)
+		visit(rel, file)
 	}
 
 	if scanned == 0 {

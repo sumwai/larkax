@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/ledger"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/money"
@@ -216,8 +217,8 @@ func TestWalletRefundReceiptAndReplay(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("同一把幂等键配另一个金额应当被拒")
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（约束冲突）：%v", code, exitConflict, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（约束冲突）：%v", code, cli.ExitConflict, r.err)
 	}
 	// 报错要点名撞上的是**这一把幂等键**推出来的那笔交易：原文只说「交易号已存在
 	// 但内容不同」，而交易号是哈希，操作者从它回不到自己写的那个 --ref。
@@ -286,8 +287,8 @@ func TestWalletRefundRejectsHalfGivenSplit(t *testing.T) {
 			if r.err == nil {
 				t.Fatal("这条旗标组合应当被拒")
 			}
-			if code := exitCode(r.err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, exitUsage)
+			if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, cli.ExitUsage)
 			}
 			if !strings.Contains(r.err.Error(), tc.want) {
 				t.Errorf("报错里没有 %q：%v", tc.want, r.err)
@@ -360,8 +361,8 @@ func TestWalletPayoutRequestRejectsBadDestination(t *testing.T) {
 			if r.err == nil {
 				t.Fatalf("--destination %q 应当被拒", destination)
 			}
-			if code := exitCode(r.err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, exitUsage)
+			if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, cli.ExitUsage)
 			}
 			assertHas(t, r.err.Error(), "--destination", "JSON 对象")
 		})
@@ -394,8 +395,8 @@ func TestWalletPayoutRequestDestinationCannotChange(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("同一把键配另一份收款信息应当被拒")
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d（约束冲突）：%v", code, exitConflict, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d（约束冲突）：%v", code, cli.ExitConflict, r.err)
 	}
 	assertHas(t, r.err.Error(), "收款信息")
 
@@ -427,7 +428,7 @@ func TestWalletPayoutRequestRejectsInsufficientPayable(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("分成不够时申请应当被拒")
 	}
-	if code := exitCode(r.err); code != 1 {
+	if code := cli.ExitCode(r.err); code != 1 {
 		t.Errorf("退出码 = %d，期望 1（其他失败）：%v", code, r.err)
 	}
 	assertHas(t, r.err.Error(), "2.00000000", "3.00000000")
@@ -515,8 +516,8 @@ func TestWalletPayoutSettleReceiptAndReplay(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("同一张清算单换收款信息应当被拒")
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d：%v", code, exitConflict, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d：%v", code, cli.ExitConflict, r.err)
 	}
 	var stored string
 	if err := db.QueryRowContext(t.Context(),
@@ -550,7 +551,7 @@ func TestWalletPayoutSettleRejectsInsufficientPayable(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("分成不够时清算应当被拒")
 	}
-	if code := exitCode(r.err); code != 1 {
+	if code := cli.ExitCode(r.err); code != 1 {
 		t.Errorf("退出码 = %d，期望 1（其他失败）：%v", code, r.err)
 	}
 	assertHas(t, r.err.Error(), "2.00000000", "3.00000000")
@@ -595,8 +596,8 @@ func TestWalletPayoutSettleRejectsMissingOrBadDestination(t *testing.T) {
 			if r.err == nil {
 				t.Fatal("这一份 --destination 应当被拒")
 			}
-			if code := exitCode(r.err); code != exitUsage {
-				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, exitUsage)
+			if code := cli.ExitCode(r.err); code != cli.ExitUsage {
+				t.Errorf("退出码 = %d，期望 %d（参数错，连库之前就该拒）", code, cli.ExitUsage)
 			}
 			assertHas(t, r.err.Error(), tc.want...)
 		})
@@ -620,9 +621,9 @@ func TestWalletPayoutPaidRefusesUnapproved(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("没经过批准就打款应当被拒")
 	}
-	if code := exitCode(r.err); code != exitConflict {
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
 		t.Errorf("退出码 = %d，期望 %d（约束冲突，不是参数错也不是其他失败）：%v",
-			code, exitConflict, r.err)
+			code, cli.ExitConflict, r.err)
 	}
 	// 报错要说清现在停在哪一步、这一步要哪一步：只说「不允许」看不出下一步该做什么。
 	assertHas(t, r.err.Error(), "pending", "待审批", "approved", "已批准")
@@ -672,8 +673,8 @@ func TestWalletPayoutPaidRefusesUnapproved(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("驳回一条已经打款的单子应当被拒")
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d：%v", code, exitConflict, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d：%v", code, cli.ExitConflict, r.err)
 	}
 	if got := payoutStatus(t, db, id); got != "paid" {
 		t.Errorf("被拒的驳回把状态改成了 %q，期望仍是 paid", got)
@@ -727,8 +728,8 @@ func TestWalletPayoutRejectReleasesFreeze(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("给一张驳回了的单子打款应当被拒")
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d：%v", code, exitConflict, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d：%v", code, cli.ExitConflict, r.err)
 	}
 	if n := txnEntryCount(t, db, string(txnIDForPayoutPaid(id))); n != 0 {
 		t.Errorf("被拒的打款写下了 %d 条分录", n)
@@ -757,8 +758,8 @@ func TestWalletPayoutRefChangeIsNotANewPayment(t *testing.T) {
 	if r.err == nil {
 		t.Fatal("同一张单换一个凭据号应当撞成冲突，而不是再打一次款")
 	}
-	if code := exitCode(r.err); code != exitConflict {
-		t.Errorf("退出码 = %d，期望 %d：%v", code, exitConflict, r.err)
+	if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+		t.Errorf("退出码 = %d，期望 %d：%v", code, cli.ExitConflict, r.err)
 	}
 	var left string
 	if err := db.QueryRowContext(t.Context(),
@@ -834,8 +835,8 @@ func TestWalletPayoutUnknownIDIsAConflict(t *testing.T) {
 			if r.err == nil {
 				t.Fatal("一条不存在的提现单应当被拒")
 			}
-			if code := exitCode(r.err); code != exitConflict {
-				t.Errorf("退出码 = %d，期望 %d：%v", code, exitConflict, r.err)
+			if code := cli.ExitCode(r.err); code != cli.ExitConflict {
+				t.Errorf("退出码 = %d，期望 %d：%v", code, cli.ExitConflict, r.err)
 			}
 			if !strings.Contains(r.err.Error(), "1099511627776") {
 				t.Errorf("报错里没有那个 id：%v", r.err)

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/auth"
 	"github.com/sumwai/larkax/internal/pricing"
 )
@@ -87,8 +88,8 @@ var pricePeakActions = []string{"add", "list", "remove"}
 // runPricePeak 处理 price 下的 peak 子命令。
 func runPricePeak(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, pricePeakShortUsage)
-		return usageErr(errors.New("price peak 需要子命令"))
+		cli.PrintUsage(os.Stderr, pricePeakShortUsage)
+		return cli.UsageErr(errors.New("price peak 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -100,14 +101,14 @@ func runPricePeak(args []string) error {
 	case "remove":
 		return runPricePeakRemove(rest)
 	case "help":
-		printUsage(os.Stdout, pricePeakUsage)
+		cli.PrintUsage(os.Stdout, pricePeakUsage)
 		return nil
 	case "-h", "--help":
-		printUsage(os.Stdout, pricePeakShortUsage)
+		cli.PrintUsage(os.Stdout, pricePeakShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, pricePeakShortUsage)
-		return usageErr(fmt.Errorf("未知的 price peak 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, pricePeakShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 price peak 子命令 %q", action))
 	}
 }
 
@@ -132,12 +133,12 @@ type pricePeakRequest struct {
 }
 
 func runPricePeakAdd(args []string) error {
-	if err := jsonUnsupported("price peak add"); err != nil {
+	if err := cli.JSONUnsupported("price peak add"); err != nil {
 		return err
 	}
 	req, err := parsePricePeakAdd(args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -146,7 +147,7 @@ func runPricePeakAdd(args []string) error {
 			return err
 		}
 		if tzErr := checkScheduleTZ(info.Schedule, req.tz); tzErr != nil {
-			return usageErr(tzErr)
+			return cli.UsageErr(tzErr)
 		}
 		actor, err := auth.New(db).ResolveUser(ctx, req.by)
 		if err != nil {
@@ -175,11 +176,11 @@ func runPricePeakAdd(args []string) error {
 		}); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(),
+		_, _ = fmt.Fprintf(cli.HumanStderr(),
 			"已为计价规则 %d 加上第 %d 段峰段：%s %s%s，改写 %s。\n",
 			info.ID, segment, peakWeekdaysLabel(req.weekdays), req.window,
 			peakExtraCondition(req.excludeHolidays, req.above), slotPricesLabel(req.prices))
-		_, _ = fmt.Fprintln(humanStdout(), segment)
+		_, _ = fmt.Fprintln(cli.HumanStdout(), segment)
 		return nil
 	})
 }
@@ -200,13 +201,13 @@ func peakExtraCondition(excludeHolidays bool, above *int64) string {
 }
 
 func parsePricePeakAdd(args []string) (pricePeakRequest, error) {
-	locator, rest, err := takeLeadingOperand(args, priceSegmentLocatorOperand)
+	locator, rest, err := cli.TakeLeadingOperand(args, priceSegmentLocatorOperand)
 	if err != nil {
 		return pricePeakRequest{}, err
 	}
 
-	fs := newFlagSet("price peak add", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pricePeakShortUsage) }
+	fs := cli.NewFlagSet("price peak add", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pricePeakShortUsage) }
 	tz := fs.String("tz", "", "")
 	window := fs.String("window", "", "")
 	weekdays := fs.String("weekdays", "", "")
@@ -410,13 +411,13 @@ func checkScheduleTZ(schedule *pricing.Schedule, tz string) error {
 }
 
 func runPricePeakList(args []string) error {
-	fs := newFlagSet("price peak list", flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, pricePeakShortUsage) }
+	fs := cli.NewFlagSet("price peak list", flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, pricePeakShortUsage) }
 	if err := fs.Parse(args); err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 	if fs.NArg() != 1 {
-		return usageErr(fmt.Errorf(
+		return cli.UsageErr(fmt.Errorf(
 			"list 需要一个规则名或规则 ID，得到 %d 个参数：用法 larkaxctl price peak list <规则名 或 ID>",
 			fs.NArg()))
 	}
@@ -428,21 +429,21 @@ func runPricePeakList(args []string) error {
 			return err
 		}
 		peaks := collectPricePeaks(info.Schedule)
-		if jsonOutput() {
-			return emitJSON(os.Stdout, pricePeakListDoc(info, peaks), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, pricePeakListDoc(info, peaks), nil)
 		}
-		printPeakList(humanStdout(), peaks)
+		printPeakList(cli.HumanStdout(), peaks)
 		return nil
 	})
 }
 
 func runPricePeakRemove(args []string) error {
-	if err := jsonUnsupported("price peak remove"); err != nil {
+	if err := cli.JSONUnsupported("price peak remove"); err != nil {
 		return err
 	}
 	locator, segment, by, err := parsePriceSegmentRemove("price peak", pricePeakShortUsage, args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -475,7 +476,7 @@ func runPricePeakRemove(args []string) error {
 		}); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(humanStderr(), "已删除计价规则 %d 的第 %d 段峰段（时段 %s）。\n",
+		_, _ = fmt.Fprintf(cli.HumanStderr(), "已删除计价规则 %d 的第 %d 段峰段（时段 %s）。\n",
 			info.ID, segment, removed)
 		return nil
 	})
@@ -527,20 +528,20 @@ func collectPricePeaks(schedule *pricing.Schedule) []pricePeakInfo {
 // printPeakList 打印一张峰段表。
 func printPeakList(w io.Writer, peaks []pricePeakInfo) {
 	if len(peaks) == 0 {
-		_, _ = fmt.Fprintln(w, emptyListNote("峰段", "price peak add"))
+		_, _ = fmt.Fprintln(w, cli.EmptyListNote("峰段", "price peak add"))
 		return
 	}
-	tw := newTableWriter(w)
-	p := newPalette(w)
+	tw := cli.NewTableWriter(w)
+	p := cli.NewPalette(w)
 	headers := []string{"段号", "时段", "星期", "条件", "单价（每 token）"}
 	bolded := make([]string, len(headers))
 	for i, h := range headers {
-		bolded[i] = p.bold(h)
+		bolded[i] = p.Bold(h)
 	}
 	_, _ = fmt.Fprintln(tw, strings.Join(bolded, "\t"))
 	for _, peak := range peaks {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			p.bold(strconv.Itoa(peak.segment)), peak.window, peakWeekdaysLabel(peak.weekdays),
+			p.Bold(strconv.Itoa(peak.segment)), peak.window, peakWeekdaysLabel(peak.weekdays),
 			peakConditionLabel(peak.dayKind, peak.holidays, peak.above),
 			slotPricesLabel(peak.prices))
 	}
@@ -549,7 +550,7 @@ func printPeakList(w io.Writer, peaks []pricePeakInfo) {
 
 // pricePeakListDoc 组装 price peak list 的机器可读输出。
 func pricePeakListDoc(rule pricing.RuleInfo, peaks []pricePeakInfo) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["rule"] = map[string]any{
 		"id":    rule.ID,
 		"name":  rule.Name,

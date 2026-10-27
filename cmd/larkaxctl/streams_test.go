@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // 这一组是「提示也一样」那条规格的判据：错误只在用户输入出错时出现，提示也只在
@@ -44,9 +46,9 @@ const ruleExpr = `{"prompt": 0.0000015, "completion": 0.0000075}`
 // 跟着跑在 -v 上，而那种连带失效看起来像别处坏了，最难查。
 func withVerbose(t *testing.T, on bool) {
 	t.Helper()
-	saved := verboseOutput
-	verboseOutput = on
-	t.Cleanup(func() { verboseOutput = saved })
+	saved := cli.VerboseOutput
+	cli.VerboseOutput = on
+	t.Cleanup(func() { cli.VerboseOutput = saved })
 }
 
 // ── 门一：成功路径上不出现提示 ──────────────────────────────────────────
@@ -94,9 +96,9 @@ func TestSuccessPathsPrintNoPrompts(t *testing.T) {
 		t.Run(tc.command+"/"+tc.what, func(t *testing.T) {
 			stdout, stderr, err := runStream(t, tc.run)
 			// 失败分两类：真失败，与「体检不通过」——后者的结论已经打在那份
-			// 报告里了，非零退出是设计的一部分（见 exit.go 的 reportedErr）。
+			// 报告里了，非零退出是设计的一部分（见 cli 包的 exit.go 的 reportedErr）。
 			// 写成具名的一步：摊成一个德摩根表达式就没法读了。
-			concluded := tc.reportOnly && reportedOnly(err)
+			concluded := tc.reportOnly && cli.ReportedOnly(err)
 			if err != nil && !concluded {
 				t.Fatalf("这条命令没走成功路径：%v\nstderr:\n%s", err, stderr)
 			}
@@ -897,8 +899,8 @@ func newStreamFixture(t *testing.T) *streamFixture {
 	db := testDB(t)
 	setupEnv(t)
 
-	outputFormat, verboseOutput, quietOutput = formatTable, false, false
-	t.Cleanup(func() { outputFormat, verboseOutput, quietOutput = formatTable, false, false })
+	cli.OutputFormat, cli.VerboseOutput, cli.QuietOutput = cli.FormatTable, false, false
+	t.Cleanup(func() { cli.OutputFormat, cli.VerboseOutput, cli.QuietOutput = cli.FormatTable, false, false })
 
 	fx := &streamFixture{db: db, modelName: uniqueName("stream-model")}
 	fx.userID = createTestUser(t)

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -12,23 +12,23 @@ import (
 // 这一层管**全局控制选项**里那两个开关：--verbose / -v 与 --quiet / -q。
 //
 // 它们与 --format / -o 同一档：写在子命令**前或后**都认，所以都在最外层从参数
-// 里摘掉再分派（见 main.go 的 run），而不是逐条子命令各注册一遍——二十来条
+// 里摘掉再分派（见 cmd/larkaxctl 的 main.go 的 run），而不是逐条子命令各注册一遍——二十来条
 // 子命令各注册一遍时，漏掉一条的表现是那条命令认不出这个选项。
 //
 // 两个都是布尔开关，取值的拼法也一致：`--quiet`、`-quiet`、`-q`，以及
 // `--quiet=false` 这种显式给值的写法（与 flag 包对布尔选项的处理一致）。
 
-// verboseOutput 是本次运行要不要打细节。
+// VerboseOutput 是本次运行要不要打细节。
 //
 // 目前只有 doctor 用它（每项多打一段检查范围、读到的数、表，以及每条问题的
 // 完整原文）；其余命令接受这个参数、输出不变，--help 里那份全局选项说明把
 // 这件事写出来了。
-var verboseOutput bool
+var VerboseOutput bool
 
-// quietOutput 是本次运行要不要压掉「给人看」那一档的输出。
-var quietOutput bool
+// QuietOutput 是本次运行要不要压掉「给人看」那一档的输出。
+var QuietOutput bool
 
-// humanStdout 是「给人看」那一档写 stdout 的地方：--quiet 之下它丢弃一切。
+// HumanStdout 是「给人看」那一档写 stdout 的地方：--quiet 之下它丢弃一切。
 //
 // -q 说的是「没有人看着，成功就一声不吭，只在出错的时候说话」——脚本与守护
 // 调用要的正是这个。所以压掉的是**整档**人读输出，而不是挑几行提示：挑着压
@@ -42,18 +42,18 @@ var quietOutput bool
 //     存在致命错误时输出」这句话里的那个输出，指的就是它。
 //
 // 用法那一档（fs.Usage、--help）也照常打：那是使用者主动要的，不是刷屏。
-func humanStdout() io.Writer { return humanOut(os.Stdout) }
+func HumanStdout() io.Writer { return HumanOut(os.Stdout) }
 
-// humanStderr 是提示与警告写 stderr 的地方：--quiet 之下它丢弃一切。
+// HumanStderr 是提示与警告写 stderr 的地方：--quiet 之下它丢弃一切。
 //
 // 与 humanStdout 分开成两个函数，是为了让调用点写出来的那句话就能读出它属于
 // 哪一档：`printCreatedKey(humanStdout(), humanStderr(), ...)` 一眼看得出前者
 // 是结果、后者是附注。
-func humanStderr() io.Writer { return humanOut(os.Stderr) }
+func HumanStderr() io.Writer { return HumanOut(os.Stderr) }
 
-// humanOut 是上面两个的共用部分。
-func humanOut(w io.Writer) io.Writer {
-	if quietOutput {
+// HumanOut 是上面两个的共用部分。
+func HumanOut(w io.Writer) io.Writer {
+	if QuietOutput {
 		return io.Discard
 	}
 	return w
@@ -69,19 +69,19 @@ var (
 	quietFlagNames   = []string{"--quiet", "-quiet", "-q"}
 )
 
-// takeVerboseFlag 从参数里摘出全局开关 --verbose，返回它这次是不是开着。
-func takeVerboseFlag(args []string) (bool, []string, error) {
-	_, on, rest, err := takeBoolFlag(args, verboseFlagNames, "--verbose")
+// TakeVerboseFlag 从参数里摘出全局开关 --verbose，返回它这次是不是开着。
+func TakeVerboseFlag(args []string) (bool, []string, error) {
+	_, on, rest, err := TakeBoolFlag(args, verboseFlagNames, "--verbose")
 	return on, rest, err
 }
 
-// takeQuietFlag 从参数里摘出全局开关 --quiet，返回它这次是不是开着。
-func takeQuietFlag(args []string) (bool, []string, error) {
-	_, on, rest, err := takeBoolFlag(args, quietFlagNames, "--quiet")
+// TakeQuietFlag 从参数里摘出全局开关 --quiet，返回它这次是不是开着。
+func TakeQuietFlag(args []string) (bool, []string, error) {
+	_, on, rest, err := TakeBoolFlag(args, quietFlagNames, "--quiet")
 	return on, rest, err
 }
 
-// takeBoolFlag 从参数里摘出一个布尔开关，返回它有没有出现过、最终的取值，
+// TakeBoolFlag 从参数里摘出一个布尔开关，返回它有没有出现过、最终的取值，
 // 以及剩下的参数。
 //
 // 「有没有出现过」与「取值是不是 true」是两件事：`migrate down --allow-missing=false`
@@ -94,7 +94,7 @@ func takeQuietFlag(args []string) (bool, []string, error) {
 // 被子命令的 flag 集当成「flag provided but not defined」，而使用者写的是这个
 // 选项的显式取值——报「不认识 --quiet=false」会把人引到选项名上去，问题却在
 // 取值的拼法。取值不是布尔时报参数错，不静默当成 true。
-func takeBoolFlag(args []string, names []string, canonical string) (bool, bool, []string, error) {
+func TakeBoolFlag(args []string, names []string, canonical string) (bool, bool, []string, error) {
 	present, on := false, false
 	rest := make([]string, 0, len(args))
 
@@ -112,7 +112,7 @@ func takeBoolFlag(args []string, names []string, canonical string) (bool, bool, 
 		}
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
-			return false, false, nil, usageErr(fmt.Errorf(
+			return false, false, nil, UsageErr(fmt.Errorf(
 				"%s 的取值 %q 不是布尔值：%s 要 true 或 false", canonical, value, canonical))
 		}
 		on = parsed

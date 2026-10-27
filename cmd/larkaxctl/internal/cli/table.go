@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"bytes"
@@ -37,8 +37,8 @@ type tableWriter struct {
 	rows [][]string
 }
 
-// newTableWriter 建一个按显示宽度对齐的表格写入器。
-func newTableWriter(w io.Writer) *tableWriter {
+// NewTableWriter 建一个按显示宽度对齐的表格写入器。
+func NewTableWriter(w io.Writer) *tableWriter {
 	return &tableWriter{w: w}
 }
 
@@ -79,7 +79,7 @@ func (tw *tableWriter) Flush() error {
 			}
 			sb.WriteString(cell)
 			if i < len(cells)-1 {
-				sb.WriteString(strings.Repeat(" ", widths[i]-displayWidth(cell)))
+				sb.WriteString(strings.Repeat(" ", widths[i]-DisplayWidth(cell)))
 			}
 		}
 		sb.WriteString("\n")
@@ -106,7 +106,7 @@ func (tw *tableWriter) columnWidths() []int {
 			if i == len(widths) {
 				widths = append(widths, 0)
 			}
-			if w := displayWidth(cells[i]); w > widths[i] {
+			if w := DisplayWidth(cells[i]); w > widths[i] {
 				widths[i] = w
 			}
 		}
@@ -114,7 +114,7 @@ func (tw *tableWriter) columnWidths() []int {
 	return widths
 }
 
-// displayWidth 返回 s 在终端里占的列数：东亚宽与全角字符记 2，其余记 1。
+// DisplayWidth 返回 s 在终端里占的列数：东亚宽与全角字符记 2，其余记 1。
 //
 // **样式码不占列**：整段 ANSI 转义序列按 0 算（见 ansiSeqLen）。上色之后栏宽
 // 仍然对得上，就是靠这一条——`\x1b[1m` 有 4 个字节、0 列，把它算进去会让
@@ -132,12 +132,12 @@ func (tw *tableWriter) columnWidths() []int {
 //     不该出现 emoji；真出现了，那一栏会差一列，而不是被静默算对。
 //
 // 另有**歧义宽度（A）**一类，按窄的算。本包唯一用到的是省略号 `…`
-// （见 channel.go 的 credentialKeysLabel）：它在东亚字体下可能占两列，而
+// （见 cmd/larkaxctl 的 channel.go 的 credentialKeysLabel）：它在东亚字体下可能占两列，而
 // 绝大多数终端与字体按一列渲染——取多数的那一侧。
-func displayWidth(s string) int {
+func DisplayWidth(s string) int {
 	n := 0
 	for i := 0; i < len(s); {
-		if s[i] == escByte {
+		if s[i] == EscByte {
 			i += ansiSeqLen(s[i:])
 			continue
 		}

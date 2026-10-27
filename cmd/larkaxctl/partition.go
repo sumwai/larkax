@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/config"
 	"github.com/sumwai/larkax/internal/ledger/store"
 	"github.com/sumwai/larkax/internal/snapshotwire"
@@ -78,8 +79,8 @@ var partitionActions = []string{"check", "ensure"}
 // runPartition 处理 partition 子命令。
 func runPartition(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stderr, partitionShortUsage)
-		return usageErr(errors.New("partition 需要子命令"))
+		cli.PrintUsage(os.Stderr, partitionShortUsage)
+		return cli.UsageErr(errors.New("partition 需要子命令"))
 	}
 	action, rest := args[0], args[1:]
 
@@ -89,11 +90,11 @@ func runPartition(args []string) error {
 	case "check":
 		return runPartitionCheck(rest)
 	case "-h", "--help":
-		printUsage(os.Stdout, partitionShortUsage)
+		cli.PrintUsage(os.Stdout, partitionShortUsage)
 		return nil
 	default:
-		printUsage(os.Stderr, partitionShortUsage)
-		return usageErr(fmt.Errorf("未知的 partition 子命令 %q", action))
+		cli.PrintUsage(os.Stderr, partitionShortUsage)
+		return cli.UsageErr(fmt.Errorf("未知的 partition 子命令 %q", action))
 	}
 }
 
@@ -101,19 +102,19 @@ func runPartition(args []string) error {
 //
 // 校验放在这里而不是只靠 store 那一层的错误：`--months 0` 是**参数**问题
 // （调度器里的变量没填上），脚本对它的处置是「去改命令」，与「库里出了状况」
-// 不是同一件事，退出码也该不同（见 exit.go）。
+// 不是同一件事，退出码也该不同（见 cli 包的 exit.go）。
 func parsePartitionMonths(args []string, name string) (int, error) {
-	fs := newFlagSet(name, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, partitionShortUsage) }
+	fs := cli.NewFlagSet(name, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, partitionShortUsage) }
 	months := fs.Int("months", partitionMonthsDefault, "")
 	if err := fs.Parse(args); err != nil {
-		return 0, usageErr(err)
+		return 0, cli.UsageErr(err)
 	}
 	if fs.NArg() > 0 {
-		return 0, usageErr(fmt.Errorf("%s 不接受位置参数，得到 %q", name, fs.Arg(0)))
+		return 0, cli.UsageErr(fmt.Errorf("%s 不接受位置参数，得到 %q", name, fs.Arg(0)))
 	}
 	if *months <= 0 {
-		return 0, usageErr(fmt.Errorf("--months 必须为正数，当前为 %d", *months))
+		return 0, cli.UsageErr(fmt.Errorf("--months 必须为正数，当前为 %d", *months))
 	}
 	return *months, nil
 }
@@ -124,7 +125,7 @@ func parsePartitionMonths(args []string, name string) (int, error) {
 // 明确输出——「没有缺失的分区」与「命令根本没跑成」在安静的终端里长得一样
 // （见 LESSONS.md 第 16 条）。判据与 snapshot cleanup 相同。
 func runPartitionEnsure(args []string) error {
-	if err := jsonUnsupported("partition ensure"); err != nil {
+	if err := cli.JSONUnsupported("partition ensure"); err != nil {
 		return err
 	}
 
@@ -139,7 +140,7 @@ func runPartitionEnsure(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), partitionTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -150,7 +151,7 @@ func runPartitionEnsure(args []string) error {
 
 	// 先打结果再处理错误：跑了一半的结果比一句「失败了」有用得多——
 	// 它至少说明建成了哪几个、卡在哪一个。与 reconcile 的处置一致。
-	printPartitionSpan(humanStdout(), from, months)
+	printPartitionSpan(cli.HumanStdout(), from, months)
 	printCreatedPartitions(created)
 	if ensureErr != nil {
 		return ensureErr
@@ -181,7 +182,7 @@ func runPartitionCheck(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), partitionTimeout)
 	defer cancel()
-	db, err := openDB(ctx, cfg)
+	db, err := cli.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -205,18 +206,18 @@ func runPartitionCheck(args []string) error {
 	problems := partitionProblems(missing, usageDefaultRows, snapshotDefaultRows)
 	cause := partitionCheckErr(problems)
 
-	if jsonOutput() {
-		return emitJSON(os.Stdout, partitionCheckDoc(
+	if cli.JSONOutput() {
+		return cli.EmitJSON(os.Stdout, partitionCheckDoc(
 			from, months, missing, usageDefaultRows, snapshotDefaultRows, problems), cause)
 	}
 
-	printPartitionCheck(humanStdout(), from, months, missing, usageDefaultRows, snapshotDefaultRows)
+	printPartitionCheck(cli.HumanStdout(), from, months, missing, usageDefaultRows, snapshotDefaultRows)
 	return cause
 }
 
 // printPartitionCheck 打一次体检的默认输出：一行一个检查项。
 //
-// 三项各自一行状态符（见 style.go 的 statusLine），判据是 partitionProblems
+// 三项各自一行状态符（见 cli 包的 style.go 的 statusLine），判据是 partitionProblems
 // 与 partitionCheckErr 用的同一套——两处各判一遍时会出现「屏幕上三项全 ✓、
 // 退出码却是 1」这种自相矛盾的输出，而脚本正是按退出码分派的。
 //
@@ -229,9 +230,9 @@ func printPartitionCheck(w io.Writer, from time.Time, months int, missing []stri
 	_, _ = fmt.Fprintln(w)
 
 	lines := partitionCheckLines(missing, usageDefaultRows, snapshotDefaultRows)
-	printStatusLines(w, lines, verboseOutput)
+	cli.PrintStatusLines(w, lines, cli.VerboseOutput)
 
-	_, failed, _ := countStatusLines(lines)
+	_, failed, _ := cli.CountStatusLines(lines)
 	_, _ = fmt.Fprintf(w, "\n  partition check: %d 项异常, %d 项通过 (运行 -v 查看细节)\n",
 		failed, len(lines)-failed)
 }
@@ -240,22 +241,22 @@ func printPartitionCheck(w io.Writer, from time.Time, months int, missing []stri
 //
 // 三项各占一行、各有自己的状态符（而不是三句平铺的说明）：调度器与运维扫的
 // 就是「哪一项 ✗ 了」，三项合成一段话时那句话得读到最后一个字才知道有没有问题。
-func partitionCheckLines(missing []string, usageDefaultRows, snapshotDefaultRows int64) []statusLine {
-	lines := make([]statusLine, 0, 3)
+func partitionCheckLines(missing []string, usageDefaultRows, snapshotDefaultRows int64) []cli.StatusLine {
+	lines := make([]cli.StatusLine, 0, 3)
 
-	partitions := statusLine{kind: glyphPass, title: "月分区"}
+	partitions := cli.StatusLine{Kind: cli.GlyphPass, Title: "月分区"}
 	if len(missing) == 0 {
-		partitions.conclusion = "usage_events 应当存在的月分区都在"
+		partitions.Conclusion = "usage_events 应当存在的月分区都在"
 	} else {
-		partitions.kind = glyphFail
+		partitions.Kind = cli.GlyphFail
 		// 默认只点名第一个：一次坏掉的运行里要看的先是「坏了哪几处」，
 		// 整份清单折在 -v 后面（与 doctor 同一取舍）。
-		partitions.conclusion = fmt.Sprintf("usage_events 缺 %d 个月分区：%s",
+		partitions.Conclusion = fmt.Sprintf("usage_events 缺 %d 个月分区：%s",
 			len(missing), missing[0])
 		if extra := len(missing) - 1; extra > 0 {
-			partitions.conclusion += fmt.Sprintf("（另有 %d 个，用 -v 看）", extra)
+			partitions.Conclusion += fmt.Sprintf("（另有 %d 个，用 -v 看）", extra)
 		}
-		partitions.detail = []string{"缺的月分区：" + strings.Join(missing, "、")}
+		partitions.Detail = []string{"缺的月分区：" + strings.Join(missing, "、")}
 	}
 	lines = append(lines, partitions)
 
@@ -266,15 +267,15 @@ func partitionCheckLines(missing []string, usageDefaultRows, snapshotDefaultRows
 		{store.UsageEventDefaultPartition, usageDefaultRows},
 		{snapshotwire.DefaultPartition, snapshotDefaultRows},
 	} {
-		line := statusLine{kind: glyphPass, title: "兜底分区"}
+		line := cli.StatusLine{Kind: cli.GlyphPass, Title: "兜底分区"}
 		if d.rows == 0 {
 			// 行数照打：0 行是这一项**查过**的证据，不打的话它与「没查」
 			// 在输出上分不开（见 LESSONS.md 第 16 条）。
-			line.conclusion = fmt.Sprintf("%s 0 行", d.table)
+			line.Conclusion = fmt.Sprintf("%s 0 行", d.table)
 		} else {
-			line.kind = glyphFail
-			line.conclusion = fmt.Sprintf("%s %d 行（越界写入落进了这里）", d.table, d.rows)
-			line.detail = []string{
+			line.Kind = cli.GlyphFail
+			line.Conclusion = fmt.Sprintf("%s %d 行（越界写入落进了这里）", d.table, d.rows)
+			line.Detail = []string{
 				"这一张表里的行挡着它对应的那个月的月分区建不出来，要人工先把行搬走。",
 			}
 		}
@@ -292,7 +293,7 @@ func partitionCheckErr(problems []string) error {
 	if len(problems) > 0 {
 		// 结论已经在体检打出来的那一行状态与清单里了，标成 reportedErr：
 		// main 不再补打一行 `larkaxctl: …`，退出码照旧非零给调度器。
-		return reportedErr(fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；")))
+		return cli.ReportedErr(fmt.Errorf("usage_events 月分区体检不通过：%s", strings.Join(problems, "；")))
 	}
 	return nil
 }
@@ -312,16 +313,16 @@ func partitionCheckDoc(
 	start, _ := store.UsageEventMonthBounds(from)
 	end, _ := store.UsageEventMonthBounds(start.AddDate(0, months-1, 0))
 
-	status := jsonOK
+	status := cli.JSONOK
 	if len(problems) > 0 {
-		status = jsonFailed
+		status = cli.JSONFailed
 	}
-	doc := jsonDoc(status)
+	doc := cli.JSONDoc(status)
 	doc["summary"] = map[string]any{"months": months, "missing": len(missing)}
 	doc["from_month"] = start.Format("2006-01")
 	doc["to_month"] = end.Format("2006-01")
-	doc["missing"] = jsonList(missing)
-	doc["problems"] = jsonList(problems)
+	doc["missing"] = cli.JSONList(missing)
+	doc["problems"] = cli.JSONList(problems)
 	// 两个兜底分区的**行数**按表名给：它们是库里真实的表名，脚本要按它去查
 	// 那几行是什么，翻译一遍就多一层对应关系。行数不进 summary——同一个事实
 	// 有两个键时，改了其中一处另一处就开始说谎。
@@ -371,11 +372,11 @@ func printPartitionSpan(w io.Writer, from time.Time, months int) {
 // 一个都没建时也打印一行明确的说明，理由见 runPartitionEnsure。
 func printCreatedPartitions(created []string) {
 	if len(created) == 0 {
-		_, _ = fmt.Fprintln(humanStdout(), "没有缺失的分区，本次没有建任何东西。")
+		_, _ = fmt.Fprintln(cli.HumanStdout(), "没有缺失的分区，本次没有建任何东西。")
 		return
 	}
-	_, _ = fmt.Fprintf(humanStdout(), "已建立 %d 个分区：\n", len(created))
-	_, _ = fmt.Fprintln(humanStdout(), "  "+strings.Join(created, "\n  "))
+	_, _ = fmt.Fprintf(cli.HumanStdout(), "已建立 %d 个分区：\n", len(created))
+	_, _ = fmt.Fprintln(cli.HumanStdout(), "  "+strings.Join(created, "\n  "))
 }
 
 // countRows 统计一张表的行数。

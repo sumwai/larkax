@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/expiry"
 )
 
@@ -15,9 +16,9 @@ import (
 // 得到的是另一个值，那样比等于把同一个值抄两遍，钉不住任何东西。
 func withExpiryNow(t *testing.T, at time.Time) {
 	t.Helper()
-	saved := expiryNow
-	expiryNow = func() time.Time { return at }
-	t.Cleanup(func() { expiryNow = saved })
+	saved := cli.ExpiryNow
+	cli.ExpiryNow = func() time.Time { return at }
+	t.Cleanup(func() { cli.ExpiryNow = saved })
 }
 
 // TestTTLExpiry 钉住相对时长到绝对时刻的换算，重点在月末与闰年。
@@ -57,7 +58,7 @@ func TestTTLExpiry(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ttlExpiry(tc.now, tc.ttl)
+			got, err := cli.TTLExpiry(tc.now, tc.ttl)
 			if err != nil {
 				t.Fatalf("换算失败: %v", err)
 			}
@@ -74,7 +75,7 @@ func TestTTLExpiry(t *testing.T) {
 func TestTTLExpiryUsesUTC(t *testing.T) {
 	shanghai := time.FixedZone("UTC+8", 8*60*60)
 	now := time.Date(2026, 1, 31, 8, 0, 0, 0, shanghai) // 2026-01-31T00:00:00Z
-	got, err := ttlExpiry(now, "1m")
+	got, err := cli.TTLExpiry(now, "1m")
 	if err != nil {
 		t.Fatalf("换算失败: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestTTLExpiryRejectsBadInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.ttl, func(t *testing.T) {
-			_, err := ttlExpiry(time.Now(), tc.ttl)
+			_, err := cli.TTLExpiry(time.Now(), tc.ttl)
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}
@@ -119,7 +120,7 @@ func TestTTLExpiryRejectsBadInput(t *testing.T) {
 // TestTTLExpiryRejectsBeyondStorage 钉住远期上限：换算结果超过 9999 年时
 // 在参数这一层报错，而不是把一句数据库的 out of range 丢给使用者。
 func TestTTLExpiryRejectsBeyondStorage(t *testing.T) {
-	_, err := ttlExpiry(time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), "1y")
+	_, err := cli.TTLExpiry(time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), "1y")
 	if err == nil {
 		t.Fatal("期望报错，却通过了")
 	}
@@ -136,16 +137,16 @@ func TestResolveExpiry(t *testing.T) {
 	}
 
 	t.Run("没给任何一个", func(t *testing.T) {
-		_, err := resolveExpiry(map[string]bool{}, expiryFlags{}, now, absolute)
-		if !errors.Is(err, errExpiryNotGiven) {
+		_, err := cli.ResolveExpiry(map[string]bool{}, cli.ExpiryFlags{}, now, absolute)
+		if !errors.Is(err, cli.ErrExpiryNotGiven) {
 			t.Fatalf("错误 = %v，期望 errExpiryNotGiven", err)
 		}
 	})
 
 	t.Run("expires-at", func(t *testing.T) {
 		want := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
-		got, err := resolveExpiry(map[string]bool{"expires-at": true},
-			expiryFlags{expiresAt: "2030-01-02T03:04:05Z"}, now, absolute)
+		got, err := cli.ResolveExpiry(map[string]bool{"expires-at": true},
+			cli.ExpiryFlags{ExpiresAt: "2030-01-02T03:04:05Z"}, now, absolute)
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -155,8 +156,8 @@ func TestResolveExpiry(t *testing.T) {
 	})
 
 	t.Run("ttl 用注入的现在", func(t *testing.T) {
-		got, err := resolveExpiry(map[string]bool{"ttl": true},
-			expiryFlags{ttl: "30d"}, now, absolute)
+		got, err := cli.ResolveExpiry(map[string]bool{"ttl": true},
+			cli.ExpiryFlags{TTL: "30d"}, now, absolute)
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -167,8 +168,8 @@ func TestResolveExpiry(t *testing.T) {
 	})
 
 	t.Run("forever", func(t *testing.T) {
-		got, err := resolveExpiry(map[string]bool{"forever": true},
-			expiryFlags{forever: true}, now, absolute)
+		got, err := cli.ResolveExpiry(map[string]bool{"forever": true},
+			cli.ExpiryFlags{Forever: true}, now, absolute)
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -178,8 +179,8 @@ func TestResolveExpiry(t *testing.T) {
 	})
 
 	t.Run("旧名 clear-expires-at 与 forever 同义", func(t *testing.T) {
-		got, err := resolveExpiry(map[string]bool{"clear-expires-at": true},
-			expiryFlags{forever: true}, now, absolute)
+		got, err := cli.ResolveExpiry(map[string]bool{"clear-expires-at": true},
+			cli.ExpiryFlags{Forever: true}, now, absolute)
 		if err != nil {
 			t.Fatalf("出错: %v", err)
 		}
@@ -191,20 +192,20 @@ func TestResolveExpiry(t *testing.T) {
 	conflicts := []struct {
 		name string
 		seen map[string]bool
-		f    expiryFlags
+		f    cli.ExpiryFlags
 	}{
 		{"expires-at 与 ttl", map[string]bool{"expires-at": true, "ttl": true},
-			expiryFlags{expiresAt: "2030-01-02T03:04:05Z", ttl: "30d"}},
+			cli.ExpiryFlags{ExpiresAt: "2030-01-02T03:04:05Z", TTL: "30d"}},
 		{"expires-at 与 forever", map[string]bool{"expires-at": true, "forever": true},
-			expiryFlags{expiresAt: "2030-01-02T03:04:05Z", forever: true}},
+			cli.ExpiryFlags{ExpiresAt: "2030-01-02T03:04:05Z", Forever: true}},
 		{"ttl 与 forever", map[string]bool{"ttl": true, "forever": true},
-			expiryFlags{ttl: "30d", forever: true}},
+			cli.ExpiryFlags{TTL: "30d", Forever: true}},
 		{"旧名 clear-expires-at 与 expires-at", map[string]bool{"expires-at": true, "clear-expires-at": true},
-			expiryFlags{expiresAt: "2030-01-02T03:04:05Z", forever: true}},
+			cli.ExpiryFlags{ExpiresAt: "2030-01-02T03:04:05Z", Forever: true}},
 	}
 	for _, tc := range conflicts {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := resolveExpiry(tc.seen, tc.f, now, absolute)
+			_, err := cli.ResolveExpiry(tc.seen, tc.f, now, absolute)
 			if err == nil {
 				t.Fatal("期望报错，却通过了")
 			}

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"database/sql"
@@ -20,21 +20,22 @@ import (
 // 而不是先把表格转成 JSON——那样金额会变成字符串、nil 会变成占位符，
 // 而这两件事正是机器可读输出最不能有的（见 docs/cli-output.md）。
 
-// formatKind 是 `--format` 选中的那一档渲染路径。
+// FormatKind 是 `--format` 选中的那一档渲染路径。
 //
 // 只有两档：面向终端的那一档与机器可读的那一档。不给 `--format` 就是前者，
 // 所以脚本要多写一个参数、人什么都不用改。
-type formatKind int
+type FormatKind int
 
+// 两档渲染路径：FormatTable 面向终端，FormatJSON 是机器可读那一档。
 const (
-	formatTable formatKind = iota // 面向终端：表格、状态符、着色
-	formatJSON                    // 机器可读：stdout 只有一份 JSON
+	FormatTable FormatKind = iota // 面向终端：表格、状态符、着色
+	FormatJSON                    // 机器可读：stdout 只有一份 JSON
 )
 
 // formatSpec 是 `--format` 认的一个取值：命令行上写的名字与它对应的那一档。
 type formatSpec struct {
 	name string
-	kind formatKind
+	kind FormatKind
 }
 
 // formatSpecs 是 `--format` 认的全部取值，顺序就是报错里列出的顺序。
@@ -43,8 +44,8 @@ type formatSpec struct {
 // 要改好几处，而漏改报错那一处没有任何东西会报出来——它看起来完全正常，
 // 只是说了「明明支持却说没有」的一句。
 var formatSpecs = []formatSpec{
-	{"table", formatTable},
-	{"json", formatJSON},
+	{"table", FormatTable},
+	{"json", FormatJSON},
 }
 
 // 这一档**不给 formatKind 写 String()**：`--format` 在命令行上的取值由
@@ -55,16 +56,16 @@ var formatSpecs = []formatSpec{
 // 而不是去把白名单的 MAX_ENTRIES 往上调：留一个没人调的方法只换来测试失败
 // 信息里多一个词。将来真要用到再就地加回来。
 
-// outputFormat 是本次运行选定的输出格式。
+// OutputFormat 是本次运行选定的输出格式。
 //
 // 它是一个包级变量而不是逐层传下去的形参：二十来条子命令的入口都是
 // `runXxx([]string) error`，加一个形参会改到四十多处的调用与用例，而取值
 // 只在 run() 里定一次、之后全程只读。用例要跑另一档时改它，改完复原
 // （见 format_test.go 的 withFormat）。
-var outputFormat = formatTable
+var OutputFormat = FormatTable
 
-// jsonOutput 报告这一次是不是机器可读的那一档。
-func jsonOutput() bool { return outputFormat == formatJSON }
+// JSONOutput 报告这一次是不是机器可读的那一档。
+func JSONOutput() bool { return OutputFormat == FormatJSON }
 
 // isFormatFlag 判断一个参数名是不是全局选项 --format 或它的简写 -o。
 //
@@ -80,7 +81,7 @@ func isFormatFlag(name string) bool {
 	return false
 }
 
-// takeFormatFlag 从参数里摘出全局选项 --format，返回它的取值与剩下的参数。
+// TakeFormatFlag 从参数里摘出全局选项 --format，返回它的取值与剩下的参数。
 //
 // # 为什么在最外层摘，而不是给每条子命令各接一个同名选项
 //
@@ -100,8 +101,8 @@ func isFormatFlag(name string) bool {
 //
 // 认 `--format json` 与 `--format=json` 两种写法，与 flag 包一致。
 // 出现多次时取最后一个：同样与 flag 包「后写的赢」一致。
-func takeFormatFlag(args []string) (formatKind, []string, error) {
-	format := formatTable
+func TakeFormatFlag(args []string) (FormatKind, []string, error) {
+	format := FormatTable
 	rest := make([]string, 0, len(args))
 
 	for i := 0; i < len(args); i++ {
@@ -113,14 +114,14 @@ func takeFormatFlag(args []string) (formatKind, []string, error) {
 
 		if !hasValue {
 			if i+1 >= len(args) {
-				return formatTable, nil, usageErr(fmt.Errorf("%s 后面要跟 %s", name, formatChoices()))
+				return FormatTable, nil, UsageErr(fmt.Errorf("%s 后面要跟 %s", name, FormatChoices()))
 			}
 			i++
 			value = args[i]
 		}
 		parsed, err := parseFormat(value)
 		if err != nil {
-			return formatTable, nil, usageErr(err)
+			return FormatTable, nil, UsageErr(err)
 		}
 		format = parsed
 	}
@@ -128,15 +129,15 @@ func takeFormatFlag(args []string) (formatKind, []string, error) {
 	return format, rest, nil
 }
 
-// formatChoices 是给错误信息用的取值清单。
+// FormatChoices 是给错误信息用的取值清单。
 //
 // 取值清单的唯一来源是 formatSpecs，这里只负责把它渲染成给人看的形态
 // （分隔规则与 --endpoint 那一串共用，见 joinChoiceNames）。在字符串里写死
 // 一份副本的话，加第三档时改表不会改到它，而表现是「明明支持却说没有」。
-func formatChoices() string { return "取值 " + joinChoiceNames(formatNames()) }
+func FormatChoices() string { return "取值 " + JoinChoiceNames(FormatNames()) }
 
-// formatNames 是 `--format` 认的全部取值名，按 formatSpecs 的顺序。
-func formatNames() []string {
+// FormatNames 是 `--format` 认的全部取值名，按 formatSpecs 的顺序。
+func FormatNames() []string {
 	names := make([]string, 0, len(formatSpecs))
 	for _, spec := range formatSpecs {
 		names = append(names, spec.name)
@@ -149,13 +150,13 @@ func formatNames() []string {
 // 取值不合法时**报错**，不静默回落成表格：一个 `--format=json` 打错成
 // `--format=jsn` 的脚本，回落的表现是 stdout 上出现一段表格文本，
 // 而报错的是下游的 jq——看起来像 jq 的问题（见 docs/cli-output.md）。
-func parseFormat(raw string) (formatKind, error) {
+func parseFormat(raw string) (FormatKind, error) {
 	for _, spec := range formatSpecs {
 		if spec.name == raw {
 			return spec.kind, nil
 		}
 	}
-	return formatTable, fmt.Errorf("--format 的取值 %q 不认识：%s", raw, formatChoices())
+	return FormatTable, fmt.Errorf("--format 的取值 %q 不认识：%s", raw, FormatChoices())
 }
 
 // ── 文档的顶层形状 ──────────────────────────────────────────────────────
@@ -171,12 +172,12 @@ func parseFormat(raw string) (formatKind, error) {
 // 而机器读的输出更不能让这两件事落进同一个字符串。读到 skipped 的一方要看
 // summary 里哪几项没跑成，以及退出码。
 const (
-	jsonOK      = "ok"
-	jsonFailed  = "failed"
-	jsonSkipped = "skipped"
+	JSONOK      = "ok"
+	JSONFailed  = "failed"
+	JSONSkipped = "skipped"
 )
 
-// jsonDoc 起一份机器可读输出。
+// JSONDoc 起一份机器可读输出。
 //
 // 顶层形状对所有子命令一致：
 //
@@ -188,11 +189,11 @@ const (
 //	}
 //
 // exit_code 由 emitJSON 填，调用点不必自己管。
-func jsonDoc(status string) map[string]any {
+func JSONDoc(status string) map[string]any {
 	return map[string]any{"status": status}
 }
 
-// emitJSON 把一份机器可读输出写到 w，并把 cause 原样返回。
+// EmitJSON 把一份机器可读输出写到 w，并把 cause 原样返回。
 //
 // 它把 cause 的退出码算出来填进 exit_code，写完 JSON 与一个换行。
 // **别的什么都不打**：提示、警告、进度一律走 stderr，因为 stdout 是给管道
@@ -201,8 +202,8 @@ func jsonDoc(status string) map[string]any {
 // 返回 cause 是刻意的：调用点一行 `return emitJSON(os.Stdout, doc, err)`
 // 就同时表达了「打这份报告」与「用这个错误定退出码」，而退出码必须与交互
 // 模式一致（doctor 有失败项时仍退出 1）——两处各写一遍迟早会分叉。
-func emitJSON(w io.Writer, doc map[string]any, cause error) error {
-	doc["exit_code"] = exitCode(cause)
+func EmitJSON(w io.Writer, doc map[string]any, cause error) error {
+	doc["exit_code"] = ExitCode(cause)
 
 	enc := json.NewEncoder(w)
 	// 缩进两格：这份输出会被人 `| jq .` 也要能直接看，而压成一行在终端里
@@ -218,12 +219,12 @@ func emitJSON(w io.Writer, doc map[string]any, cause error) error {
 		// 那是这份代码的 bug，不是使用者的输入错，所以标成「内部错误」。
 		// stdout 此时仍是干净的：Encoding 失败不会写出去半个字节以外的东西
 		// ——它先编完再写，所以这里不会留下半份 JSON 让 jq 更迷惑。
-		return internalErr(fmt.Errorf("序列化 JSON 输出失败: %w", err))
+		return InternalErr(fmt.Errorf("序列化 JSON 输出失败: %w", err))
 	}
 	return cause
 }
 
-// jsonUnsupported 在 json 模式下拒掉还没接机器可读输出的子命令。
+// JSONUnsupported 在 json 模式下拒掉还没接机器可读输出的子命令。
 //
 // 静默回落成表格是最坏的结果：`larkaxctl apikey create ... --format json | jq`
 // 会拿到一段给人看的文本，报错的是 jq，看起来像 jq 的问题；更坏的是写类命令
@@ -231,23 +232,23 @@ func emitJSON(w io.Writer, doc map[string]any, cause error) error {
 //
 // 所以这里报**参数错**（退出码 2），并且必须在命令做任何事之前调用——
 // 放在写库之后就成了「先做了再报不支持」。
-func jsonUnsupported(command string) error {
-	if !jsonOutput() {
+func JSONUnsupported(command string) error {
+	if !JSONOutput() {
 		return nil
 	}
-	return usageErr(fmt.Errorf(
+	return UsageErr(fmt.Errorf(
 		"%s 还不支持 --format json：目前接上的是读类子命令（见 docs/cli-output.md 的「机器可读输出」）",
 		command))
 }
 
-// jsonAmount 把金额打成十进制定点字符串。
+// JSONAmount 把金额打成十进制定点字符串。
 //
 // **不打成 JSON 数字**：金额在库里是定点数（见 internal/money），过一遍
 // float64 会丢精度，而丢掉的恰好是账单要精确到的那几位；也不打成
 // `{"units": ...}` ——Amount 的字段不导出，直接交给 encoding/json 出来的是
 // 一个空对象，看起来像「这个字段没值」。字符串是它在 JSON 里唯一无损的表达，
 // 要拿它算数的一方自己按小数解析。
-func jsonAmount(a money.Amount) string { return a.String() }
+func JSONAmount(a money.Amount) string { return a.String() }
 
 // 下面几个把「表格里的占位符」换成 JSON 里的 null。
 //
@@ -256,43 +257,43 @@ func jsonAmount(a money.Amount) string { return a.String() }
 // null（键在、值是空）是两件事，而脚本要能按它分派。占位符进 JSON 更坏——
 // `"expires_at": "不过期"` 会让按时间解析它的一方拿到一个解析不了的值。
 
-// nullableString 把空串换成 null。
-func nullableString(s string) any {
+// NullableString 把空串换成 null。
+func NullableString(s string) any {
 	if s == "" {
 		return nil
 	}
 	return s
 }
 
-// nullableInt 把 0 换成 null。
+// NullableInt 把 0 换成 null。
 //
 // 只用在「0 不是一个合法取值」的栏上（HTTP 状态码、用户 ID）。计数类的 0
 // 是真值，那些地方直接给数字。
-func nullableInt(n int) any {
+func NullableInt(n int) any {
 	if n == 0 {
 		return nil
 	}
 	return n
 }
 
-// nullableError 把一个错误折成它的原文，nil 就是 null。
+// NullableError 把一个错误折成它的原文，nil 就是 null。
 //
 // 只打错误那句话，不打它的类型或包装链：`%v` 出来的正是人看到的那一句，
 // 而这个字段的读者是要把原因转述出去的人（或日志），不是按类型分派的代码
 // ——真要分派应当看 `error_code` 那类具名信号。
-func nullableError(err error) any {
+func NullableError(err error) any {
 	if err == nil {
 		return nil
 	}
 	return err.Error()
 }
 
-// jsonList 把 nil 切片换成空切片。
+// JSONList 把 nil 切片换成空切片。
 //
 // nil 切片编出来是 `null`，而空切片是 `[]`：前者读起来像「这一栏没有」，
 // 后者才是「这一栏有，一条都没有」。空清单必须走后者——「一条都没有」与
 // 「这一步没跑」是本仓反复要分清的两件事（见 LESSONS.md 第 16 条）。
-func jsonList[T any](s []T) []T {
+func JSONList[T any](s []T) []T {
 	if s == nil {
 		return []T{}
 	}
@@ -307,73 +308,73 @@ func jsonList[T any](s []T) []T {
 // 某条命令自己的文件里，是因为它们被好几条命令共用（渠道、模型、别名、价格
 // 都用到时刻与日期那两档）。
 
-// jsonID 把一个外键打成 null 或数字。
+// JSONID 把一个外键打成 null 或数字。
 //
 // 0 表示「不挂任何实体」——平台自营的渠道、平台级别名、平台价——而 0 不是
 // 一个合法的 ID（它们从 1 开始），所以 0 在这里是「没有」而不是「编号 0」。
 // 与 nullableInt 是同一条判据，只是外键在库里的类型是 bigint，Go 侧是 int64。
-func jsonID(id int64) any {
+func JSONID(id int64) any {
 	if id == 0 {
 		return nil
 	}
 	return id
 }
 
-// jsonTime 把一个时刻打成 RFC3339。
+// JSONTime 把一个时刻打成 RFC3339。
 //
 // 库里那几栏都是 timestamptz，统一按 UTC 打：同一个瞬间在任何机器、任何
 // TZ 下都编出同一个字符串。精度给到完整（RFC3339Nano），不做任何截断——
 // 表格那一档怎么排版是它的事，机器读的一方不该被排版规则顺手丢掉信息。
-func jsonTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+func JSONTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
-// jsonTimeOrNull 打一个可空时刻，零值就是 null。
+// JSONTimeOrNull 打一个可空时刻，零值就是 null。
 //
 // 零值在这里是「这一栏没有值」而不是「公元 1 年」（见 channels.ChannelInfo
 // 的 DeletedAt、pricing.RuleInfo 的 EffectiveFrom 一类约定）。
-func jsonTimeOrNull(t time.Time) any {
+func JSONTimeOrNull(t time.Time) any {
 	if t.IsZero() {
 		return nil
 	}
-	return jsonTime(t)
+	return JSONTime(t)
 }
 
-// jsonTimePtr 打一个用指针表达的可空时刻，nil 就是 null。
-func jsonTimePtr(t *time.Time) any {
+// JSONTimePtr 打一个用指针表达的可空时刻，nil 就是 null。
+func JSONTimePtr(t *time.Time) any {
 	if t == nil {
 		return nil
 	}
-	return jsonTime(*t)
+	return JSONTime(*t)
 }
 
-// jsonDate 打一个可空日期。
+// JSONDate 打一个可空日期。
 //
 // 只打日子不打时刻，与表格那一档的 dateLabel 同一条理由：表上
 // knowledge_cutoff / release_date 两列是 date（无时区），按某个时区渲染成
 // 时刻会让同一个值在不同机器上打出来不一样。
-func jsonDate(d *time.Time) any {
+func JSONDate(d *time.Time) any {
 	if d == nil {
 		return nil
 	}
 	return d.Format("2006-01-02")
 }
 
-// nullTimeToPtr 把 database/sql 的可空时刻翻成指针，没有就是 nil。
+// NullTimeToPtr 把 database/sql 的可空时刻翻成指针，没有就是 nil。
 //
 // 库里可空的时刻列读进来大多是 sql.NullTime，而这一层其余几个助手按
 // *time.Time 表达「没有值」（见 jsonTimePtr），所以在这一处转一次。
-func nullTimeToPtr(t sql.NullTime) *time.Time {
+func NullTimeToPtr(t sql.NullTime) *time.Time {
 	if !t.Valid {
 		return nil
 	}
 	return &t.Time
 }
 
-// jsonObject 打一个原始 JSON 对象。
+// JSONObject 打一个原始 JSON 对象。
 //
 // nil 是「这一栏没有值」，给 null；空对象 `{}` 是一个**真值**（库里的默认
 // 就是它，表示「没配任何键」），照原样打出来——把 `{}` 折成 null 会让
 // 「配了一个空对象」与「这一栏根本没写过」变成同一件事。
-func jsonObject(m map[string]any) any {
+func JSONObject(m map[string]any) any {
 	if m == nil {
 		return nil
 	}

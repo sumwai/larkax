@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 	"github.com/sumwai/larkax/internal/channels"
 	"github.com/sumwai/larkax/internal/upstream"
 )
@@ -24,13 +25,13 @@ import (
 // 上游不提供模型列表接口是常态：适配器返回 ErrUnsupported 时这里照样成功
 // 返回（退出码 0），库里只把状态记成 unsupported，已有清单一行不动。
 func runChannelSyncModels(args []string) error {
-	if err := jsonUnsupported("channel sync-models"); err != nil {
+	if err := cli.JSONUnsupported("channel sync-models"); err != nil {
 		return err
 	}
 
 	id, err := parseChannelModelSyncID("sync-models", args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -47,7 +48,7 @@ func runChannelSyncModels(args []string) error {
 		if err != nil {
 			return err
 		}
-		printModelSyncResult(humanStderr(), result)
+		printModelSyncResult(cli.HumanStderr(), result)
 		return nil
 	})
 }
@@ -56,7 +57,7 @@ func runChannelSyncModels(args []string) error {
 func runChannelUpstreamModels(args []string) error {
 	id, err := parseChannelModelSyncID("upstream-models", args)
 	if err != nil {
-		return usageErr(err)
+		return cli.UsageErr(err)
 	}
 
 	return withDB(channelTimeout, func(ctx context.Context, db *sql.DB) error {
@@ -64,10 +65,10 @@ func runChannelUpstreamModels(args []string) error {
 		if err != nil {
 			return err
 		}
-		if jsonOutput() {
-			return emitJSON(os.Stdout, channelModelsDoc(models), nil)
+		if cli.JSONOutput() {
+			return cli.EmitJSON(os.Stdout, channelModelsDoc(models), nil)
 		}
-		printChannelUpstreamModels(humanStdout(), models)
+		printChannelUpstreamModels(cli.HumanStdout(), models)
 		return nil
 	})
 }
@@ -76,8 +77,8 @@ func runChannelUpstreamModels(args []string) error {
 //
 // 校验放在连库之前：id 写错是命令错（退出码 2），不该先连一次库再报。
 func parseChannelModelSyncID(action string, args []string) (int64, error) {
-	fs := newFlagSet("channel "+action, flag.ContinueOnError)
-	fs.Usage = func() { printUsage(os.Stderr, channelShortUsage) }
+	fs := cli.NewFlagSet("channel "+action, flag.ContinueOnError)
+	fs.Usage = func() { cli.PrintUsage(os.Stderr, channelShortUsage) }
 	id := fs.Int64("id", 0, "渠道 ID")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
@@ -118,14 +119,14 @@ func printModelSyncResult(w io.Writer, result channels.ModelSyncResult) {
 // 模型名**，这里是上游自己的模型名。两份都在屏幕上时，标题与说明要把这一点
 // 说清；混着读会以为清单已经参与选路了。
 func printChannelUpstreamModels(w io.Writer, models channels.ChannelModels) {
-	p := newPalette(w)
+	p := cli.NewPalette(w)
 	_, _ = fmt.Fprintf(w, "渠道 %d（%s）的上游模型清单\n", models.ChannelID, models.ChannelName)
-	_, _ = fmt.Fprintf(w, "%s：%s\n", p.bold("同步状态"), modelSyncStatusLabel(models.Status))
+	_, _ = fmt.Fprintf(w, "%s：%s\n", p.Bold("同步状态"), modelSyncStatusLabel(models.Status))
 	if !models.AttemptedAt.IsZero() {
-		_, _ = fmt.Fprintf(w, "%s：%s\n", p.bold("最近一次尝试"), formatTimeValue(models.AttemptedAt))
+		_, _ = fmt.Fprintf(w, "%s：%s\n", p.Bold("最近一次尝试"), formatTimeValue(models.AttemptedAt))
 	}
 	if !models.SyncedAt.IsZero() {
-		_, _ = fmt.Fprintf(w, "%s：%s\n", p.bold("最近一次成功"), formatTimeValue(models.SyncedAt))
+		_, _ = fmt.Fprintf(w, "%s：%s\n", p.Bold("最近一次成功"), formatTimeValue(models.SyncedAt))
 	}
 	_, _ = fmt.Fprintln(w, "这一份是上游的模型名，不参与选路：channel get 里那一栏 models 才是选路用的规范名。")
 
@@ -136,7 +137,7 @@ func printChannelUpstreamModels(w io.Writer, models channels.ChannelModels) {
 		case channels.ModelSyncUnsupported:
 			_, _ = fmt.Fprintln(w, "上游不提供模型列表接口，所以库里没有这份清单。")
 		case channels.ModelSyncNever:
-			_, _ = fmt.Fprintln(w, emptyListNote("上游模型", "channel sync-models"))
+			_, _ = fmt.Fprintln(w, cli.EmptyListNote("上游模型", "channel sync-models"))
 		default:
 			_, _ = fmt.Fprintln(w, "上一次同步拉到的清单是空的。")
 		}
@@ -144,12 +145,12 @@ func printChannelUpstreamModels(w io.Writer, models channels.ChannelModels) {
 	}
 
 	_, _ = fmt.Fprintln(w)
-	tw := newTableWriter(w)
+	tw := cli.NewTableWriter(w)
 	_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
-		p.bold("上游模型名"), p.bold("首次见到"), p.bold("最近见到"))
+		p.Bold("上游模型名"), p.Bold("首次见到"), p.Bold("最近见到"))
 	for _, model := range models.Models {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n",
-			p.bold(model.UpstreamModel),
+			p.Bold(model.UpstreamModel),
 			formatStampShort(model.FirstSeenAt),
 			formatStampShort(model.LastSeenAt))
 	}
@@ -170,25 +171,25 @@ func modelSyncStatusLabel(status string) string {
 
 // channelModelsDoc 组装 `channel upstream-models --format json` 的机器可读输出。
 func channelModelsDoc(models channels.ChannelModels) map[string]any {
-	doc := jsonDoc(jsonOK)
+	doc := cli.JSONDoc(cli.JSONOK)
 	doc["channel"] = map[string]any{
 		"id":   models.ChannelID,
 		"name": models.ChannelName,
 	}
 	doc["sync"] = map[string]any{
 		"status":       models.Status,
-		"attempted_at": jsonTimeOrNull(models.AttemptedAt),
-		"synced_at":    jsonTimeOrNull(models.SyncedAt),
+		"attempted_at": cli.JSONTimeOrNull(models.AttemptedAt),
+		"synced_at":    cli.JSONTimeOrNull(models.SyncedAt),
 	}
 	doc["summary"] = map[string]any{"total": len(models.Models)}
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(models.Models))
 	for _, model := range models.Models {
 		entries = append(entries, map[string]any{
 			"upstream_model": model.UpstreamModel,
-			"first_seen_at":  jsonTime(model.FirstSeenAt),
-			"last_seen_at":   jsonTime(model.LastSeenAt),
+			"first_seen_at":  cli.JSONTime(model.FirstSeenAt),
+			"last_seen_at":   cli.JSONTime(model.LastSeenAt),
 		})
 	}
 	doc["models"] = entries

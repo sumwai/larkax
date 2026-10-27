@@ -4,6 +4,8 @@ import (
 	"flag"
 	"strings"
 	"testing"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // TestDecimalShift 钉住「每百万 token → 每 token」那一步的十进制移位。
@@ -71,7 +73,7 @@ func TestDecimalShiftRejects(t *testing.T) {
 // slotArgs 把「按项给单价」的那组旗标交给一个新 flag 集，返回拼好的表达式。
 func slotExpr(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	fs := newFlagSet("price create", flag.ContinueOnError)
+	fs := cli.NewFlagSet("price create", flag.ContinueOnError)
 	slots := newPriceSlotFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("解析参数失败：%v", err)

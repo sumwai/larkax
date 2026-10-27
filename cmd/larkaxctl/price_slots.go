@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
 // priceSlot 是一个 token 计价项在命令行上的样子：表达式里的键、正式旗标名、
@@ -53,15 +55,15 @@ type priceSlotFlags struct {
 // fs.String 会得到两个各自为政的格子，`--prompt 1.5` 写进的那一格没人读，
 // 表现是「旧写法像没写一样」——这正是别名机制存在的理由。
 //
-// 旧长名经 aliasVar 注册，不进补全（见 flagset.go 的「别名专用注册入口」）。
-func newPriceSlotFlags(fs *flagSet) priceSlotFlags {
+// 旧长名经 aliasVar 注册，不进补全（见 cli 包的 flagset.go 的「别名专用注册入口」）。
+func newPriceSlotFlags(fs *cli.FlagSet) priceSlotFlags {
 	values := make(map[string]*string, len(priceSlots))
 	for _, slot := range priceSlots {
 		if slot.legacy == "" {
 			values[slot.key] = fs.String(slot.flag, "", "")
 			continue
 		}
-		values[slot.key] = legacyStringFlag(fs, slot.flag, slot.legacy, "")
+		values[slot.key] = cli.LegacyStringFlag(fs, slot.flag, slot.legacy, "")
 	}
 	return priceSlotFlags{
 		values: values,
@@ -83,7 +85,7 @@ func (s priceSlot) givenNames() []string {
 
 // slotGiven 报告这一项这次有没有给值。
 func (f priceSlotFlags) slotGiven(given map[string]bool, slot priceSlot) bool {
-	return flagGiven(given, slot.givenNames()...)
+	return cli.FlagGiven(given, slot.givenNames()...)
 }
 
 // anyGiven 报告这组旗标里有没有给值。
