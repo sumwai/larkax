@@ -31,6 +31,9 @@ func (a *Adapter) nativeEligible(req *channel.Request) bool {
 //     走上游默认值——与枢纽分支同样不补默认值。
 //   - stream：这次调用走哪条路径由适配器决定，不取原文里的取值。
 //   - reasoning.effort：渠道配置的方言映射（见 channel.ReasoningEffortDialect）。
+//   - temperature / top_p：上层已经决定了的采样参数（渠道别名覆盖、插件
+//     补丁），非 nil 时无条件覆盖原文里的同名键。这与 reasoning.effort 那类
+//     「按原文携带才翻译」的字段不同：这里是上层已经作出的决定，不是方言换算。
 //
 // 原文里的 max_tokens 要删掉：Responses 认的是 max_output_tokens，留着它会让
 // 上游收到一个它不认的字段，而真正的上界可能还停在原处。
@@ -49,6 +52,20 @@ func (a *Adapter) encodeNative(ch channel.Channel, req *channel.Request, stream 
 
 	m["model"] = req.Model
 	m["stream"] = stream
+
+	// temperature / top_p：渠道别名覆盖与插件补丁都写这两个字段（见
+	// internal/overrides 与 internal/plugin）。直通以原文为报文来源，不覆写
+	// 就等于把它们丢掉——商家配的采样参数会静默失效，而两边都不报错。
+	// nil 表示这次没有人要覆盖它，此时不动原文里的同名键：不写也不删，
+	// 调用方自己写在原文里的值仍然有效。这与上面 max_tokens 那一格不同：
+	// 那是「同一个上界有两个名字」，删错会让值凭空消失；这里同名同义，
+	// 没有要替调用方做的决定。
+	if req.Temperature != nil {
+		m["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		m["top_p"] = *req.TopP
+	}
 
 	// 原文若用了 chat 那边的错名字 max_tokens，删掉它：Responses 认的是
 	// max_output_tokens，留着它只会让上游收到一个它不认识的字段，而真正的上界

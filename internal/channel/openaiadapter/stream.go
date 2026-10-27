@@ -141,6 +141,12 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 	//
 	// 只有非空块才发：连续空行之间没有内容，发出去调用方会收到空帧。
 	finishBlock := func() bool {
+		// 读这一块可能刚跨过取消的时刻：那时这一块既不发帧也不解析，与逐行
+		// 读时「取消之后不再处理下一行」是同一个判据。已产生的费用由调用方
+		// 处理；而 events 无缓冲，收件人走了之后这一发会把收尾卡死。
+		if ctx.Err() != nil {
+			return false
+		}
 		lines := block
 		block = nil
 		if len(lines) > 0 && native {
@@ -174,7 +180,7 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 
 	// 最后一块可能没有空行收尾（上游直接关掉连接、或 [DONE] 之后就没有
 	// 空行）。照样先发帧再解析：不在这里发，那一块会连同它的结束语义一起
-	// 凭空丢掉。
+	// 凭空丢掉。取消是唯一的例外，判据在 finishBlock 里。
 	if !finishBlock() {
 		return
 	}

@@ -199,9 +199,9 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 				// 终态事件：结束标记照发，但不伪造用量——用量按增量估算，
 				// 而那是调用方的事。
 				//
-				// 这一块的 native 帧在进入本函数之前已经发出（见上面的 for），
-				// 所以这里直接收尾不会丢帧。它照发是有意的：客户端那侧的终止符
-				// 必须原生字节直达，渲染层不再重新编码它。
+				// 这一块的 native 帧在进入本函数之前已经发出：finishBlock 先发帧、
+				// 再调这个函数，所以这里直接收尾不会丢帧。它照发是有意的：
+				// 客户端那侧的终止符必须原生字节直达，渲染层不再重新编码它。
 				events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
 				return false
 			}
@@ -417,6 +417,12 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 	//
 	// 只有非空块才发：连续空行之间没有内容，发出去调用方会收到空帧。
 	finishBlock := func(lines []string) bool {
+		// 读这一块可能刚跨过取消的时刻：那时这一块既不发帧也不解析，与逐行
+		// 读时「取消之后不再处理下一行」是同一个判据。已产生的费用由调用方
+		// 处理；而 events 无缓冲，收件人走了之后这一发会把收尾卡死。
+		if ctx.Err() != nil {
+			return false
+		}
 		if len(lines) > 0 && native {
 			events <- channel.StreamEvent{
 				Kind:         "native",

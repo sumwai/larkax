@@ -1,6 +1,7 @@
 package openaiadapter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -28,7 +29,10 @@ func (a *Adapter) nativeEligible(req *channel.Request) bool {
 //   - max_tokens：预留要一个输出上界；
 //   - stream：这次调用走的是 Chat 还是 ChatStream，以参数为准；
 //   - 流式时的 stream_options.include_usage：让上游在最后一片回 usage；
-//   - reasoning_effort：渠道的方言映射。
+//   - reasoning_effort：渠道的方言映射；
+//   - temperature / top_p：上层已经决定了的采样参数（渠道别名覆盖、插件
+//     补丁），非 nil 时无条件覆盖原文里的同名键。这与 reasoning_effort 那类
+//     「按原文携带才翻译」的字段不同：这里是上层已经作出的决定，不是方言换算。
 //
 // 其余字段一律照原文发出，包括本包与枢纽编码都不认识的字段。
 func (a *Adapter) encodeNative(ch channel.Channel, req *channel.Request, stream bool) ([]byte, error) {
@@ -36,8 +40,26 @@ func (a *Adapter) encodeNative(ch channel.Channel, req *channel.Request, stream 
 	if err := json.Unmarshal(req.NativeBody, &m); err != nil {
 		return nil, fmt.Errorf("解析原始请求体失败: %w", err)
 	}
+	if m == nil {
+		// 字面量 null 能解进 map 而不报错，但它不是一条请求报文。
+		return nil, fmt.Errorf("解析原始请求体失败: 不是 JSON 对象")
+	}
 
 	m["model"] = req.Model
+
+	// temperature / top_p：渠道别名覆盖与插件补丁都写这两个字段（见
+	// internal/overrides 与 internal/plugin）。直通以原文为报文来源，不覆写
+	// 就等于把它们丢掉——商家配的采样参数会静默失效，而两边都不报错。
+	// nil 表示这次没有人要覆盖它，此时不动原文里的同名键：不写也不删，
+	// 调用方自己写在原文里的值仍然有效。这与上面 max_completion_tokens 那一格
+	// 不同：那是「同一个上界有两个名字」，删错会让值凭空消失；这里同名同义，
+	// 没有要替调用方做的决定。
+	if req.Temperature != nil {
+		m["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		m["top_p"] = *req.TopP
+	}
 
 	// 输出上界统一叫 max_tokens：OpenAI 对 max_tokens 与
 	// max_completion_tokens 同时出现会报错，而枢纽路径从来只发前者。
@@ -94,9 +116,20 @@ func applyNativeReasoningEffort(setting map[string]any, m map[string]any) {
 }
 
 // nativeRaw 把上游响应体解成排查用的 map，不做任何裁剪。
+//
+// 用解码器而不是 json.Unmarshal：这个函数的名字与另两个适配器里同名的那一处
+// （internal/channel/anthropicadapter 与 responsesadapter）说的是同一件事——
+// 输入是响应体。那边传进来的是 io.ReadAll 读出的整段字节；Unmarshal 要求
+// 整段恰好是一个值，尾随内容会让它报错，而那条错误带 Retryable，路由于是
+// 换下一个候选重发，同一笔钱付两次。解码器读出一个值就停，与响应入口那次
+// 解析同宽严。
+//
+// 本包的调用方目前传的是入口已经解出来的那一个值（见 adapter.go 的 Chat，
+// parsed 是 json.RawMessage），尾随字节到不了这里。这条约束是留给整段字节
+// 那种输入的，也让三处同名的函数保持同一形状。
 func nativeRaw(body []byte) (map[string]any, error) {
 	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("解析原始响应失败: %w", err)
 	}
 	return raw, nil

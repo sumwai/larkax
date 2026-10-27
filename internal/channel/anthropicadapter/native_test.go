@@ -227,6 +227,72 @@ func TestNativeFillsMissingMaxTokens(t *testing.T) {
 	}
 }
 
+// temperature / top_p 是「框架覆写项」：渠道别名覆盖（internal/overrides）
+// 与插件补丁（internal/plugin）把值写进 channel.Request，而不是写进原文。
+// 直通以原文为报文来源，不覆写就等于把它们丢掉——商家配的采样参数静默失效，
+// 而两边都不报错。
+//
+// 三个方向一起钉：原文没有这两个键时写进去；原文有别的值时以 req 为准；
+// req 为 nil 时不写也不删，调用方自己写的值照原样发出。
+func TestNativeOverridesSamplingParams(t *testing.T) {
+	encode := func(t *testing.T, req *channel.Request) map[string]any {
+		t.Helper()
+		body, err := newAdapter().encodeRequest(context.Background(), req)
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		return decodeJSONMap(t, body)
+	}
+	req := func(body string, temperature, topP *float64) *channel.Request {
+		return &channel.Request{
+			Model:       "m",
+			MaxTokens:   16,
+			Protocol:    channel.ProtocolAnthropic,
+			NativeBody:  []byte(body),
+			Temperature: temperature,
+			TopP:        topP,
+		}
+	}
+
+	t.Run("writes_when_absent", func(t *testing.T) {
+		temp, topP := 0.3, 0.9
+		sent := encode(t, req(`{"model":"m","max_tokens":16,"messages":[]}`, &temp, &topP))
+		if sent["temperature"] != 0.3 {
+			t.Errorf("temperature = %v，期望写进 req 的 0.3", sent["temperature"])
+		}
+		if sent["top_p"] != 0.9 {
+			t.Errorf("top_p = %v，期望写进 req 的 0.9", sent["top_p"])
+		}
+	})
+
+	t.Run("overrides_original", func(t *testing.T) {
+		temp, topP := 0.3, 0.9
+		sent := encode(t, req(
+			`{"model":"m","max_tokens":16,"messages":[],"temperature":0.7,"top_p":0.8}`,
+			&temp, &topP))
+		// 原文的 0.7 / 0.8 必须被 req 覆盖：上层已经做了这个决定。
+		if sent["temperature"] != 0.3 {
+			t.Errorf("temperature = %v，期望 req 的 0.3 覆盖原文的 0.7", sent["temperature"])
+		}
+		if sent["top_p"] != 0.9 {
+			t.Errorf("top_p = %v，期望 req 的 0.9 覆盖原文的 0.8", sent["top_p"])
+		}
+	})
+
+	t.Run("nil_keeps_original", func(t *testing.T) {
+		// nil 表示这次没有人要覆盖它：不写也不删，原文里的值仍然有效。
+		sent := encode(t, req(
+			`{"model":"m","max_tokens":16,"messages":[],"temperature":0.7,"top_p":0.8}`,
+			nil, nil))
+		if sent["temperature"] != 0.7 {
+			t.Errorf("temperature = %v，期望原文的 0.7 原样保留", sent["temperature"])
+		}
+		if sent["top_p"] != 0.8 {
+			t.Errorf("top_p = %v，期望原文的 0.8 原样保留", sent["top_p"])
+		}
+	})
+}
+
 // 原文里带着不属于 Anthropic 的字段时原样保留、不翻译。
 //
 // 最容易误伤的一处是推理：Anthropic 用自己的 thinking 对象表达，没有
@@ -370,6 +436,89 @@ func TestNativeRawKeepsUnrecognizedResponseFields(t *testing.T) {
 	}
 }
 
+// trailingResponseBody 是一条带 dto 不认识字段的响应，供下面两条宽严用例
+// 共用：直通那一条要看 Raw 里的 usage.service_tier，没有它就无法确认解析
+// 成功之后下游字段也是对的。
+const trailingResponseBody = `{
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5-20250929",
+  "content": [{"type": "text", "text": "北京晴。"}],
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 2095, "output_tokens": 89, "service_tier": "standard"}
+}`
+
+// TestNativeChatTolerantOfTrailingBytes 钉住直通与枢纽对「响应体后面还有东西」
+// 的宽严一致。
+//
+// 两条分支读的是同一条上游响应，结果不该由哪条分支决定。直通那条先把整段
+// 读出来，但解析必须用与枢纽同一个解码器：换成 json.Unmarshal 时尾随内容
+// 会报错，而那条错误带 Retryable——路由会换下一个候选再发一次，同一笔钱付
+// 两次，而且一份可用的 2xx 被丢掉。
+func TestNativeChatTolerantOfTrailingBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"尾随空白", trailingResponseBody + "\n\n"},
+		{"尾随内容", trailingResponseBody + "\ntrailing"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			req := &channel.Request{
+				Model:      "m",
+				MaxTokens:  10,
+				Protocol:   channel.ProtocolAnthropic,
+				NativeBody: []byte(`{"model":"m","max_tokens":10,"messages":[]}`),
+			}
+			resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), req)
+			if err != nil {
+				t.Fatalf("直通应当照常解析成功，实际报错: %v", err)
+			}
+			// 正文、用量与 Raw 都要对：解析成功但下游字段空着，同样是坏的。
+			if len(resp.Message.Content) == 0 || resp.Message.Content[0].Text != "北京晴。" {
+				t.Errorf("正文 = %+v，期望「北京晴。」", resp.Message.Content)
+			}
+			if resp.Usage.PromptTokens != 2095 || resp.Usage.CompletionTokens != 89 {
+				t.Errorf("用量 = %+v", resp.Usage)
+			}
+			usage, _ := resp.Raw["usage"].(map[string]any)
+			if v := usage["service_tier"]; v != "standard" {
+				t.Errorf("Raw[usage][service_tier] = %v，期望 standard（直通的 Raw 来自原文）", v)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("StatusCode = %d", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestHubChatTolerantOfTrailingBytes 是上面那条的对照组：同一份带尾随内容的
+// 响应体，走枢纽也要成功。它证明这条用例真的在测「两条分支一致」，而不是
+// 只把直通这一侧的宽严固定下来。
+func TestHubChatTolerantOfTrailingBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, trailingResponseBody+"\ntrailing")
+	}))
+	defer srv.Close()
+
+	resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL),
+		&channel.Request{Model: "m", MaxTokens: 10, Protocol: channel.ProtocolAnthropic})
+	if err != nil {
+		t.Fatalf("枢纽应当照常解析成功，实际报错: %v", err)
+	}
+	if len(resp.Message.Content) == 0 || resp.Message.Content[0].Text != "北京晴。" {
+		t.Errorf("正文 = %+v，期望「北京晴。」", resp.Message.Content)
+	}
+}
+
 // 真实形状的 Anthropic SSE：thinking_delta、ping、content_block_stop 都在，
 // 工具参数分片也是真实的两段形状。
 const nativeSSE = `event: message_start
@@ -421,32 +570,25 @@ event: message_stop
 data: {"type":"message_stop"}
 `
 
-// sseBlocks 把一份 SSE 切成块，返回每块的原始字节：空行分隔之间的全部行
-// 用 \n 拼起来，不含结尾空行。连续空行形成的空块不计。
+// compactBlankRuns 把连续空行压成一个，用来和「所有帧用 \n\n 接回去」对账。
 //
-// 这是 native 帧的期望值口径：帧是**整块**的原文（含 event: 行、注释行、
-// 同块内的多行 data），不是某一条 data 行的载荷。
-func sseBlocks(sse string) []string {
+// 它不做块切分：实现在空行处切块并跳过空块，这里只做「空行折叠」一件事。
+// 用切块器算期望值等于把实现抄一遍——边界判错了它跟着错，用例照样绿；
+// 折叠空行不会，因为它根本不判断哪里是边界。末尾除不除由调用方 trim。
+func compactBlankRuns(sse string) string {
 	var (
-		out   []string
-		block []string
+		out       []string
+		lastBlank bool
 	)
-	flush := func() {
-		if len(block) == 0 {
-			return
-		}
-		out = append(out, strings.Join(block, "\n"))
-		block = nil
-	}
 	for _, line := range strings.Split(sse, "\n") {
-		if strings.TrimSpace(line) == "" {
-			flush()
+		blank := line == ""
+		if blank && lastBlank {
 			continue
 		}
-		block = append(block, line)
+		out = append(out, line)
+		lastBlank = blank
 	}
-	flush()
-	return out
+	return strings.Join(out, "\n")
 }
 
 func collectStream(t *testing.T, req *channel.Request, sse string) []channel.StreamEvent {
@@ -513,20 +655,28 @@ func TestNativeStreamEmitsRawFrames(t *testing.T) {
 		}
 	}
 
-	want := sseBlocks(nativeSSE)
-	if len(frames) != len(want) {
-		t.Fatalf("native 帧 %d 条，期望 %d 条（每个非空 SSE 块一条）", len(frames), len(want))
+	// 块数写死成字面量，不从夹具再切一遍：按空行分隔数出来是 16 块。
+	// 用「按空行切分」的辅助函数算期望值等于把实现抄一遍——边界判错了它跟着错，
+	// 用例照样绿。
+	if len(frames) != 16 {
+		t.Fatalf("native 帧 %d 条，期望 16 条（夹具按空行分隔共 16 个非空块）", len(frames))
 	}
-	for i := range want {
-		if frames[i] != want[i] {
-			t.Errorf("第 %d 帧不等于原文那一块：\n得到 %s\n期望 %s", i, frames[i], want[i])
-		}
+	// 帧里一个字节都不许丢、不许改：把它们用块分隔符接回去，必须逐字节等于
+	// 上游那一段（末尾那个换行是分隔符，不属于最后一块）。
+	if got := strings.Join(frames, "\n\n"); got != strings.TrimSuffix(nativeSSE, "\n") {
+		t.Errorf("所有帧接回去不等于上游原文：\n得到 %q\n期望 %q", got, strings.TrimSuffix(nativeSSE, "\n"))
 	}
-
-	// 帧里带着块内的 event: 行：这是块模型与前一个逐行模型最显眼的差别。
-	// 只断言「载荷相等」的话，两种模型在只有 data 行的流上长得一模一样。
-	if !strings.HasPrefix(frames[0], "event: message_start\ndata: ") {
+	// 首尾两块的字面量：帧以 `event:` 行开头（按行模型时首帧只有 data 载荷），
+	// 末块是 message_stop 那块。
+	if want := "event: message_start\ndata: "; !strings.HasPrefix(frames[0], want) {
 		t.Errorf("首帧应以块内的 event: 行开头：%q", frames[0])
+	}
+	if want := `event: message_stop` + "\n" + `data: {"type":"message_stop"}`; frames[15] != want {
+		t.Errorf("末帧 = %q，期望 %q", frames[15], want)
+	}
+	// 第 3 块是 ping：两行都在同一帧里（按行发帧时它们会被拆成两条）。
+	if want := `event: ping` + "\n" + `data: {"type":"ping"}`; frames[2] != want {
+		t.Errorf("ping 块 = %q，期望 %q", frames[2], want)
 	}
 
 	// 归一化事件一条不少：正文、工具参数、用量、结束。
@@ -643,17 +793,15 @@ data: {"type":"message_stop"}
 		frames = append(frames, string(ev.Frame))
 	}
 
-	want := sseBlocks(sse)
-	if len(want) != 7 {
-		t.Fatalf("这份流应有 7 个非空块，夹具切出 %d 个：%q", len(want), want)
+	// 7 是数出来的：夹具里 7 组非空行，中间的连续空行不产生块。写死成字面量
+	// 而不是用按空行切分的辅助函数算——那等于把实现抄一遍，边界判错了跟着错。
+	if len(frames) != 7 {
+		t.Fatalf("native 帧 %d 条，期望 7 条（= 非空块数）：\n%q", len(frames), frames)
 	}
-	if len(frames) != len(want) {
-		t.Fatalf("native 帧 %d 条，期望 %d 条（= 非空块数）：\n%q", len(frames), len(want), frames)
-	}
-	for i := range want {
-		if frames[i] != want[i] {
-			t.Errorf("第 %d 帧不等于原文那一块：\n得到 %q\n期望 %q", i, frames[i], want[i])
-		}
+	// 帧接回去必须逐字节等于上游那一段：连续空行被折叠成一条块分隔符，
+	// 其余一个字节都不许动。
+	if got, want := strings.Join(frames, "\n\n"), strings.Trim(compactBlankRuns(sse), "\n"); got != want {
+		t.Errorf("所有帧接回去不等于上游原文（空行已折叠）：\n得到 %q\n期望 %q", got, want)
 	}
 
 	// 点名三处容易退化的边界，读失败时能直接看出是哪一条：

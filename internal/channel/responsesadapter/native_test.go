@@ -86,10 +86,10 @@ func withoutKeys(t *testing.T, src map[string]any, keys ...string) map[string]an
 // responseDropSentinels 是问句报文的哨兵：枢纽那条路没有承载它们的位置，
 // 直通必须原样留住。
 //
-// max_output_tokens 不在这张表里，虽然它也在任务书点名的四个哨兵之中：枢纽
-// 分支同样会写这个字段名（它本来就是这个协议的上界字段），所以「在不在」
-// 分辨不了两条分支。它的判别力体现在**取值来源**上，用 req.MaxTokens == 0
-// 时的情形单独钉（见 TestEncodeNativeOutputBoundName）。
+// max_output_tokens 不在这张表里：枢纽分支同样会写这个字段名（它本来就是这个
+// 协议的上界字段），所以「在不在」分辨不了两条分支。它的判别力体现在**取值
+// 来源**上，用 req.MaxTokens == 0 时的情形单独钉（见
+// TestEncodeNativeOutputBoundName）。
 var responseDropSentinels = []string{"reasoning", "include", "store"}
 
 // TestEncodeNativeKeepsOriginalFields 是直通分支的主用例。
@@ -376,6 +376,62 @@ func TestEncodeNativeOutputBoundName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEncodeNativeOverridesSamplingParams 钉住 temperature / top_p 是「框架
+// 覆写项」：渠道别名覆盖（internal/overrides）与插件补丁（internal/plugin）
+// 把值写进 channel.Request，而不是写进原文。直通以原文为报文来源，不覆写就
+// 等于把它们丢掉——商家配的采样参数静默失效，而两边都不报错。
+//
+// 三个方向一起钉：原文没有这两个键时写进去；原文有别的值时以 req 为准；
+// req 为 nil 时不写也不删，调用方自己写的值照原样发出。
+func TestEncodeNativeOverridesSamplingParams(t *testing.T) {
+	const base = `{"model":"alias-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`
+
+	encode := func(t *testing.T, body string, temperature, topP *float64) map[string]any {
+		t.Helper()
+		req := nativeRequest([]byte(body))
+		req.Temperature, req.TopP = temperature, topP
+		encoded, err := newAdapter().encodeRequest(context.Background(), testChannel("https://api.example.com"), req, false)
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		return decodeBody(t, encoded)
+	}
+
+	t.Run("writes_when_absent", func(t *testing.T) {
+		temp, topP := 0.3, 0.9
+		got := encode(t, base+`}`, &temp, &topP)
+		if got["temperature"] != 0.3 {
+			t.Errorf("temperature = %v，期望写进 req 的 0.3", got["temperature"])
+		}
+		if got["top_p"] != 0.9 {
+			t.Errorf("top_p = %v，期望写进 req 的 0.9", got["top_p"])
+		}
+	})
+
+	t.Run("overrides_original", func(t *testing.T) {
+		temp, topP := 0.3, 0.9
+		got := encode(t, base+`,"temperature":0.7,"top_p":0.8}`, &temp, &topP)
+		// 原文的 0.7 / 0.8 必须被 req 覆盖：上层已经做了这个决定。
+		if got["temperature"] != 0.3 {
+			t.Errorf("temperature = %v，期望 req 的 0.3 覆盖原文的 0.7", got["temperature"])
+		}
+		if got["top_p"] != 0.9 {
+			t.Errorf("top_p = %v，期望 req 的 0.9 覆盖原文的 0.8", got["top_p"])
+		}
+	})
+
+	t.Run("nil_keeps_original", func(t *testing.T) {
+		// nil 表示这次没有人要覆盖它：不写也不删，原文里的值仍然有效。
+		got := encode(t, base+`,"temperature":0.7,"top_p":0.8}`, nil, nil)
+		if got["temperature"] != 0.7 {
+			t.Errorf("temperature = %v，期望原文的 0.7 原样保留", got["temperature"])
+		}
+		if got["top_p"] != 0.8 {
+			t.Errorf("top_p = %v，期望原文的 0.8 原样保留", got["top_p"])
+		}
+	})
 }
 
 // TestEncodeNativeStreamOptionsPassthrough 钉住「stream_options 不新增、

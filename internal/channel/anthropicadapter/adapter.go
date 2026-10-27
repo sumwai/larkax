@@ -155,11 +155,13 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 	// stop_sequence 等）在枢纽那条路已经丢了，读 Raw 的一方要靠直通看到它们。
 	//
 	// 解析失败不回退到枢纽那一份：回退会让「直通的 Raw 少字段」变成静默的
-	// 行为差异，而调用方无从分辨这次到底是哪条路。能走到这里说明响应体顶层
-	// 不是 JSON 对象，那一份本身就不是可用的 Anthropic 响应。
+	// 行为差异，而调用方无从分辨这次到底是哪条路。用与解析 parsed 相同的
+	// 解码器读同一份字节：两者对尾随空白与尾随内容的宽严必须一致，换成
+	// json.Unmarshal 会让「响应体后面多一个字节」从接受变成可重试的错误，
+	// 而可重试意味着换一个候选渠道重发——同一笔钱付两次。
 	if native {
 		var raw map[string]any
-		if rawErr := json.Unmarshal(respBody, &raw); rawErr != nil {
+		if rawErr := json.NewDecoder(bytes.NewReader(respBody)).Decode(&raw); rawErr != nil {
 			return nil, &channel.ErrUpstream{
 				StatusCode:  resp.StatusCode,
 				GotResponse: true,

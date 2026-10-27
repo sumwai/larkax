@@ -34,6 +34,9 @@ func (a *Adapter) nativeEligible(req *channel.Request) bool {
 //     上游名（路由层翻完名之后才交给适配器）。
 //   - max_tokens：请求的上界，预留额度要它；Anthropic 也把它当必填。
 //   - stream：这一次调用走非流式还是流式由入口决定，不能由原文说了算。
+//   - temperature / top_p：上层已经决定了的采样参数（渠道别名覆盖、插件
+//     补丁），非 nil 时无条件覆盖原文里的同名键。这与 reasoning 那类「按
+//     原文携带才翻译」的字段不同：这里是上层已经作出的决定，不是方言换算。
 //
 // 推理相关的字段不在这里覆写：Anthropic 用它自己的 thinking 对象表达，没有
 // reasoning_effort 这个概念（枢纽那条路编码时也不写它）。原文里带了别的协议
@@ -51,6 +54,20 @@ func (a *Adapter) encodeNative(req *channel.Request) ([]byte, error) {
 	}
 
 	m["model"] = req.Model
+
+	// temperature / top_p：渠道别名覆盖与插件补丁都写这两个字段（见
+	// internal/overrides 与 internal/plugin）。直通以原文为报文来源，不覆写
+	// 就等于把它们丢掉——商家配的采样参数会静默失效，而两边都不报错。
+	// nil 表示这次没有人要覆盖它，此时不动原文里的同名键：不写也不删，
+	// 调用方自己写在原文里的值仍然有效。这与「上界」那一格不同——上界有
+	// 两个名字，删错一个会让值凭空消失；这里同名同义，没有要替调用方做的
+	// 决定。
+	if req.Temperature != nil {
+		m["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		m["top_p"] = *req.TopP
+	}
 
 	// 上界用 int64 而不是 int：issue 里与测试都按整数比，平台宽度不该
 	// 泄漏进报文。

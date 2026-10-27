@@ -47,6 +47,11 @@ import (
 // 照旧一条不少，取值与顺序不变——下游的中途估算与快照正文都靠它们，而 native
 // 帧只是叠加（见 channel.StreamEvent 的 Kind）。
 //
+// 唯一的例外是 `event:` 名的归零：它原先在整条流上累积，一块给了名字之后
+// 下一块没有 `event:` 行时会沿用旧名。按 SSE 语义字段是按块累积的，沿用旧名
+// 会把一个无名块当成上一块的类型来分派。块模型下名字逐块重置，所以同一份流
+// 的归一化事件与逐行模型相比可能多出（或改变）几条——这是修正，不是新增行为。
+//
 // 它是参数而不是 Adapter 上的字段：适配器不保存请求状态，必须并发安全。
 func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning, native bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
@@ -115,7 +120,7 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		}
 		// 读这一块可能刚跨过取消的时刻：那时这一块既不发帧也不解析，与逐行
 		// 读时「取消之后不再处理下一行」是同一个判据。已产生的费用由调用方
-		// 处理。
+		// 处理；而 events 无缓冲，收件人走了之后这一发会把收尾卡死。
 		if ctx.Err() != nil {
 			return
 		}

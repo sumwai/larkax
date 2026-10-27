@@ -136,6 +136,72 @@ func TestEncodeNativeOverwrites(t *testing.T) {
 	}
 }
 
+// temperature / top_p 是「框架覆写项」：渠道别名覆盖（internal/overrides）
+// 与插件补丁（internal/plugin）把值写进 channel.Request，而不是写进原文。
+// 直通以原文为报文来源，不覆写就等于把它们丢掉——商家配的采样参数静默失效，
+// 而两边都不报错。
+//
+// 三个方向一起钉：原文没有这两个键时写进去；原文有别的值时以 req 为准；
+// req 为 nil 时不写也不删，调用方自己写的值照原样发出。
+func TestEncodeNativeOverridesSamplingParams(t *testing.T) {
+	encode := func(t *testing.T, req *channel.Request) map[string]any {
+		t.Helper()
+		body, err := newAdapter().encodeRequest(testChannel("https://api.example.com"), req, false)
+		if err != nil {
+			t.Fatalf("出错: %v", err)
+		}
+		return decodeBody(t, body)
+	}
+	req := func(body string, temperature, topP *float64) *channel.Request {
+		return &channel.Request{
+			Protocol:    channel.ProtocolOpenAI,
+			Model:       "m",
+			MaxTokens:   16,
+			NativeBody:  []byte(body),
+			Temperature: temperature,
+			TopP:        topP,
+		}
+	}
+
+	t.Run("writes_when_absent", func(t *testing.T) {
+		temp, topP := 0.3, 0.9
+		got := encode(t, req(`{"model":"m","messages":[]}`, &temp, &topP))
+		if got["temperature"] != 0.3 {
+			t.Errorf("temperature = %v，期望写进 req 的 0.3", got["temperature"])
+		}
+		if got["top_p"] != 0.9 {
+			t.Errorf("top_p = %v，期望写进 req 的 0.9", got["top_p"])
+		}
+	})
+
+	t.Run("overrides_original", func(t *testing.T) {
+		temp, topP := 0.3, 0.9
+		got := encode(t, req(
+			`{"model":"m","messages":[],"temperature":0.7,"top_p":0.8}`,
+			&temp, &topP))
+		// 原文的 0.7 / 0.8 必须被 req 覆盖：上层已经做了这个决定。
+		if got["temperature"] != 0.3 {
+			t.Errorf("temperature = %v，期望 req 的 0.3 覆盖原文的 0.7", got["temperature"])
+		}
+		if got["top_p"] != 0.9 {
+			t.Errorf("top_p = %v，期望 req 的 0.9 覆盖原文的 0.8", got["top_p"])
+		}
+	})
+
+	t.Run("nil_keeps_original", func(t *testing.T) {
+		// nil 表示这次没有人要覆盖它：不写也不删，原文里的值仍然有效。
+		got := encode(t, req(
+			`{"model":"m","messages":[],"temperature":0.7,"top_p":0.8}`,
+			nil, nil))
+		if got["temperature"] != 0.7 {
+			t.Errorf("temperature = %v，期望原文的 0.7 原样保留", got["temperature"])
+		}
+		if got["top_p"] != 0.8 {
+			t.Errorf("top_p = %v，期望原文的 0.8 原样保留", got["top_p"])
+		}
+	})
+}
+
 // 没有新的上界可写时不能删原文那个名字：删了等于上界凭空消失，上游按自己的
 // 默认值来，而预留是按一个上界算出来的。留着一个名字不是双字段。
 func TestEncodeNativeKeepsMaxCompletionTokensWithoutNewBound(t *testing.T) {
@@ -437,6 +503,93 @@ func TestNativeChatRaw(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestNativeChatTolerantOfTrailingBytes 钉住直通与枢纽对「响应体后面还有
+// 东西」的宽严一致。
+//
+// 两条分支读的是同一条上游响应，结果不该由哪条分支决定。直通的 Raw 走的是
+// 另一次解析（nativeRaw），它必须和入口那个解码器一样读出一个值就停：换成
+// json.Unmarshal 时尾随内容会报错，而那条错误带 Retryable——路由会换下一个
+// 候选再发一次，同一笔钱付两次，而且一份可用的 2xx 被丢掉。
+func TestNativeChatTolerantOfTrailingBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"尾随空白", nativeChatResponse + "\n\n"},
+		{"尾随内容", nativeChatResponse + "\ntrailing"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), nativeRequest())
+			if err != nil {
+				t.Fatalf("直通应当照常解析成功，实际报错: %v", err)
+			}
+			// 正文、用量与 Raw 都要对：解析成功但下游字段空着，同样是坏的。
+			if len(resp.Message.Content) == 0 || resp.Message.Content[0].Text != "上海 18 度" {
+				t.Errorf("正文 = %+v，期望「上海 18 度」", resp.Message.Content)
+			}
+			if resp.Usage.PromptTokens != 10 || resp.Usage.CompletionTokens != 5 {
+				t.Errorf("用量 = %+v", resp.Usage)
+			}
+			// system_fingerprint 只有原文才有：dto 不认识它，Raw 里有它就说明
+			// 这份 Raw 确实来自上游原文，而不是从窄结构编回来的副本。
+			if v := resp.Raw["system_fingerprint"]; v != "fp_abc123" {
+				t.Errorf("Raw[system_fingerprint] = %v，期望 fp_abc123（直通的 Raw 来自原文）", v)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("StatusCode = %d", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestHubChatTolerantOfTrailingBytes 是上面那条的对照组：同一份带尾随内容的
+// 响应体，走枢纽（NativeBody 为 nil）也要成功。它证明这条用例真的在测
+// 「两条分支一致」，而不是只把直通这一侧的宽严固定下来。
+func TestHubChatTolerantOfTrailingBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, nativeChatResponse+"\ntrailing")
+	}))
+	defer srv.Close()
+
+	req := nativeRequest()
+	req.NativeBody = nil
+	resp, err := newAdapter().Chat(context.Background(), testChannel(srv.URL), req)
+	if err != nil {
+		t.Fatalf("枢纽应当照常解析成功，实际报错: %v", err)
+	}
+	if len(resp.Message.Content) == 0 || resp.Message.Content[0].Text != "上海 18 度" {
+		t.Errorf("正文 = %+v，期望「上海 18 度」", resp.Message.Content)
+	}
+}
+
+// TestNativeRawTolerantOfTrailingBytes 直接钉住 nativeRaw 的宽严：传整段
+// 响应体进去（含尾随内容），它必须和入口那次解析一样读出一个值就停。
+//
+// 上面那两条走 Chat 的用例证明不了这件事：Chat 交给 nativeRaw 的是入口已经
+// 解好的那一个值，尾随字节在那里已经被切掉了，换成 json.Unmarshal 也照样绿。
+// 这条用例喂的是 io.ReadAll 形状的字节，另两个适配器里的同名函数收的就是它。
+func TestNativeRawTolerantOfTrailingBytes(t *testing.T) {
+	raw, err := nativeRaw([]byte(nativeChatResponse + "\ntrailing"))
+	if err != nil {
+		t.Fatalf("尾随内容不该让解析失败，实际报错: %v", err)
+	}
+	if v := raw["system_fingerprint"]; v != "fp_abc123" {
+		t.Errorf("Raw[system_fingerprint] = %v，期望 fp_abc123", v)
+	}
+	if v := raw["id"]; v != "chatcmpl-1" {
+		t.Errorf("Raw[id] = %v，期望 chatcmpl-1", v)
 	}
 }
 
