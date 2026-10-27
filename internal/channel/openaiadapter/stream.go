@@ -64,6 +64,12 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		}
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			// 只有 `data:` 而没有内容：空 data 行是帧分隔的一种写法，
+			// 没有载荷可转发。发出去的话调用方会收到一个空数据帧，有些
+			// SDK 把它判为协议错误。
+			continue
+		}
 		if payload == "[DONE]" {
 			// 正常结束。计费层需要知道「流结束了」，而不是靠超时去猜；
 			// 结束原因在这里一并给出。
@@ -78,6 +84,10 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		if native {
 			// 先发 native 帧再发归一化事件，顺序固定：调用方的渲染层按
 			// 顺序拼接，先看到原文那一帧才可能与归一化事件对得上。
+			//
+			// 粒度是**每条 data: 行一帧**，不是每条 SSE 消息一帧。SSE 规范
+			// 允许一帧消息由多行 data: 拼成（行间以 \n 相连），这里不合并：
+			// 逐行发出去，调用方按行对应上游；要按消息合并是渲染层的事。
 			events <- channel.StreamEvent{
 				Kind:         "native",
 				NativeFormat: channel.ProtocolOpenAI,

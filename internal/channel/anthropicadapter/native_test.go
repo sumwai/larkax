@@ -423,6 +423,9 @@ data: {"type":"message_stop"}
 
 // sseDataPayloads 按流式解析的同一口径（trim 掉 "data:" 前缀与两端空白）
 // 取出一份 SSE 里所有的 data 载荷，用于与 native 帧逐字比对。
+//
+// 空载荷（`data:` 后面什么都没有的行）不算：它没有内容可转发，适配器也不发帧
+// （见 pump 里的判据）。把它算进来的话，这份「期望」会比真实行为多一条。
 func sseDataPayloads(sse string) []string {
 	var out []string
 	for _, line := range strings.Split(sse, "\n") {
@@ -430,7 +433,11 @@ func sseDataPayloads(sse string) []string {
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		out = append(out, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+		out = append(out, payload)
 	}
 	return out
 }
@@ -576,6 +583,75 @@ func TestNativeStreamEmitsRawFrames(t *testing.T) {
 	}
 	if blockStopFrames != 3 {
 		t.Errorf("content_block_stop 的 native 帧 %d 条，期望 3 条", blockStopFrames)
+	}
+}
+
+// 空 data 行、`:` 开头的注释行（keep-alive）、以及 `event:` 行都不产 native 帧。
+//
+// 口径是「每条 data 行一帧」：有载荷的行一帧不多一帧不少，没有载荷的行
+// （空 data、注释、event:）一条都不产。空帧到调用方会被渲染成 `data: ` 加一个
+// 空行——一个空数据帧，客户端可能判为协议错误，至少会多收一帧。
+func TestNativeStreamSkipsEmptyAndNonDataLines(t *testing.T) {
+	const sse = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":null,"usage":{"input_tokens":12,"output_tokens":1}}}
+
+: ping
+
+event: ping
+data: {"type":"ping"}
+
+data:
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}
+
+:
+
+event: message_stop
+data: {"type":"message_stop"}
+`
+
+	req := &channel.Request{
+		Model:      "m",
+		MaxTokens:  64,
+		Stream:     true,
+		Protocol:   channel.ProtocolAnthropic,
+		NativeBody: []byte(nativeRequestBody),
+	}
+	events := collectStream(t, req, sse)
+
+	var frames []string
+	for _, ev := range events {
+		if ev.Kind != "native" {
+			continue
+		}
+		if len(ev.Frame) == 0 {
+			t.Errorf("产出了空载荷的 native 帧")
+		}
+		frames = append(frames, string(ev.Frame))
+	}
+
+	want := sseDataPayloads(sse)
+	if len(want) != 4 {
+		t.Fatalf("这份流里有载荷的 data 行应有 4 条，夹具是 %d 条", len(want))
+	}
+	if len(frames) != len(want) {
+		t.Fatalf("native 帧 %d 条，期望 %d 条（= 有载荷的 data 行数）：%q",
+			len(frames), len(want), frames)
+	}
+	for i := range want {
+		if frames[i] != want[i] {
+			t.Errorf("第 %d 帧载荷不等于原文 data 行：\n得到 %s\n期望 %s", i, frames[i], want[i])
+		}
+	}
+
+	// event: 行本身不产帧：帧的条数已经证明这一点（有 4 条 event: 行而帧只有
+	// 4 条有载荷的 data 行），这里再按内容点名一次，免得以后有人把 event: 行
+	// 也发成帧时，条数恰好对上而看不出来。
+	for _, f := range frames {
+		if strings.HasPrefix(f, "event:") || strings.HasPrefix(f, "message_start\n") {
+			t.Errorf("event: 行被当成载荷发了: %q", f)
+		}
 	}
 }
 

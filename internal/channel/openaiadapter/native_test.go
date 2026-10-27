@@ -572,6 +572,71 @@ func TestHubStreamHasNoNativeFrames(t *testing.T) {
 	}
 }
 
+// 只有真有载荷的 data: 行才产 native 帧：心跳注释、空 `data:` 行都不产。
+//
+// 空 `data:` 这一格是「多一行是客户端收到空帧」的边界：TrimPrefix 之后载荷
+// 是空串，照发就写成一个空数据帧，有些 SDK 判为协议错误。
+func TestNativeStreamSkipsFramelessLines(t *testing.T) {
+	payloads := []string{
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"a"}}]}`,
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"b"}}]}`,
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		lines := []string{
+			": keep-alive",
+			"data: " + payloads[0],
+			"",
+			"data:",
+			"data:    ",
+			`data: ` + payloads[1],
+			": ping",
+			"data: " + payloads[2],
+			"data: [DONE]",
+		}
+		for _, line := range lines {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), nativeRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	var frames []channel.StreamEvent
+	var text strings.Builder
+	for _, ev := range collectEvents(t, events) {
+		switch ev.Kind {
+		case "native":
+			frames = append(frames, ev)
+		case "delta":
+			text.WriteString(ev.Text)
+		}
+	}
+	if len(frames) != len(payloads) {
+		t.Fatalf("native 帧数 = %d，期望 %d（注释行、空 data 行、[DONE] 都不发）",
+			len(frames), len(payloads))
+	}
+	for i, ev := range frames {
+		if string(ev.Frame) != payloads[i] {
+			t.Errorf("第 %d 帧载荷 =\n  %s\n期望\n  %s", i, ev.Frame, payloads[i])
+		}
+		if len(ev.Frame) == 0 {
+			t.Errorf("第 %d 帧是空帧", i)
+		}
+	}
+	if text.String() != "ab" {
+		t.Errorf("拼出的文本 = %q，期望 ab", text.String())
+	}
+}
+
 // 直通时请求头那一层的裁决不变：插件加的 x-larkax-* 头照样到上游，
 // 鉴权头照样由渠道凭证说了算。
 func TestNativeChatKeepsHeaderHandling(t *testing.T) {

@@ -774,6 +774,82 @@ func TestChatNativeHeadersAndUsageDeclaration(t *testing.T) {
 	}
 }
 
+// TestChatStreamNativeSkipsNonPayloadLines 钉住「哪些行不产原生帧」。
+//
+// 一条流里同时放四种行：keep-alive 注释、空 data 行、event: 行、正常 data 行。
+// 判据是「原生帧数 == 正常 data 行数」——多一帧就是客户端多收一个空帧，少一帧
+// 就是丢了一段内容，两者都要红。
+//
+// 空 data 行单独列出来：`data:` 后面什么都没有时 TrimPrefix 得到空串，不挡它
+// 就会发出一条 `Frame: []byte("")`，渲染层把它写成 `data: ` 的空帧。
+//
+// 计帧口径是**每条 `data:` 行一帧**：这个包跳过 `event:` 行（事件名在载荷的
+// type 里），所以 event 行本身不产帧，只有它下面那条 data: 产。
+func TestChatStreamNativeSkipsNonPayloadLines(t *testing.T) {
+	normal := []string{
+		`{"type":"response.output_text.delta","sequence_number":0,"output_index":0,"content_index":0,"delta":"你"}`,
+		`{"type":"response.output_text.delta","sequence_number":1,"output_index":0,"content_index":0,"delta":"好"}`,
+		`{"type":"response.completed","sequence_number":2,"response":{"id":"resp_placeholder",` +
+			`"model":"upstream-model","status":"completed","output":[],` +
+			`"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`,
+	}
+
+	srv := sseServer(t,
+		": keep-alive",
+		"",                                  // 纯空行，帧分隔
+		"data:",                             // 空 data 行：没有载荷可转发
+		"event: response.output_text.delta", // event 行：不产帧
+		"data: "+normal[0],
+		"data:", // 中间再放一条空的，确认它不会截断后面的帧
+		"event: response.output_text.delta",
+		"data: "+normal[1],
+		": ping",
+		"data:", // 终态之前的空帧同样不发
+		"event: response.completed",
+		"data: "+normal[2],
+	)
+
+	req := nativeRequest([]byte(nativeResponsesBody))
+	req.Stream = true
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collected := collect(t, events)
+
+	frames := nativeFrames(t, collected)
+	if len(frames) != len(normal) {
+		t.Fatalf("原生帧 %d 条，正常 data 行 %d 条", len(frames), len(normal))
+	}
+	for i, want := range normal {
+		if string(frames[i]) != want {
+			t.Errorf("第 %d 条原生帧 =\n  %s\n期望\n  %s", i+1, frames[i], want)
+		}
+		if len(frames[i]) == 0 {
+			t.Errorf("第 %d 条原生帧是空的", i+1)
+		}
+	}
+
+	// 归一化事件照旧：两条 delta 与一次 done，证明空行与注释行只是不产原生帧，
+	// 没有顺带打断正文。
+	var text strings.Builder
+	dones := 0
+	for _, ev := range collected {
+		switch ev.Kind {
+		case "delta":
+			text.WriteString(ev.Text)
+		case "done":
+			dones++
+		}
+	}
+	if text.String() != "你好" {
+		t.Errorf("正文 = %q，期望「你好」", text.String())
+	}
+	if dones != 1 {
+		t.Errorf("done 事件 %d 条", dones)
+	}
+}
+
 // TestChatNativeTolerantOfTrailingBytes 钉住直通与枢纽对「响应体后面还有东西」
 // 的宽严一致。
 //

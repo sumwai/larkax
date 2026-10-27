@@ -127,6 +127,12 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		}
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			// 空 data 行没有载荷可转发。不跳过的话它会变成一条 Frame 为空的
+			// native 帧，渲染层把它写成 `data: ` 加一个空行——一个空数据帧，
+			// 客户端可能判为协议错误，至少会多收一帧。
+			continue
+		}
 		if payload == "[DONE]" {
 			emitUsage()
 			events <- channel.StreamEvent{Kind: "done", FinishReason: stopReason}
@@ -139,7 +145,12 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 			//
 			// 不产归一化事件的行（ping、content_block_stop、以及这个包里
 			// 没有对应分支的其他事件）照样发 native 帧：调用方要看的是与
-			// 上游一致的流。
+			// 上游一致的流。但 `event:` 行本身不发——它不是载荷，事件名在
+			// 下面那条 data 行的 type 字段里。
+			//
+			// 口径是「每条 data 行一帧」，不是「每条 SSE 消息一帧」：SSE 规范
+			// 允许一条消息跨多行 data（用 \n 拼起来），这里逐行独立发帧。
+			// 不要按规范去合并——合并会让帧的边界与上游发的边界对不上。
 			//
 			// [DONE] 不发（在上面已经返回）：它不是 JSON 载荷，而是上面那条
 			// 兼容路径的东西，Anthropic 自己的流里没有它。
