@@ -351,8 +351,8 @@ jobs:
           echo "web 单元测试跑了 $passed 个用例，全部通过。"
 
       # `--max-warnings 0`：警告留着不管，下一次「只加一条警告」就不会有人拦。
-      # 这条命令此前在干净的 main 上就有 4 条 react-refresh 警告（ops/common.tsx
-      # 同时导出组件与函数），那些已经通过拆文件清零；不留文件级豁免。
+      # 这条命令此前在干净的 main 上就有 4 条 react-refresh 警告（`ops/common.tsx`
+      # 同时导出组件与函数，现已删），那些已经通过拆文件清零；不留文件级豁免。
       - name: ESLint
         run: npx eslint src --max-warnings 0
 
