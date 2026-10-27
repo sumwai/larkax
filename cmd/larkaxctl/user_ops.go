@@ -258,6 +258,10 @@ func runUserPlan(args []string) error {
 }
 
 func runUserPlanGrant(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userPlanShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -270,6 +274,10 @@ func runUserPlanGrant(args []string) error {
 }
 
 func runUserPlanList(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userPlanShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -278,6 +286,10 @@ func runUserPlanList(args []string) error {
 }
 
 func runUserPlanVoid(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userPlanShortUsage) {
+		return nil
+	}
 	id, rest, err := takeOperand(args, "<订阅 ID>")
 	if err != nil {
 		return err
@@ -312,6 +324,10 @@ func runUserPlanOrder(args []string) error {
 }
 
 func runUserPlanOrderShow(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userPlanShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -320,6 +336,10 @@ func runUserPlanOrderShow(args []string) error {
 }
 
 func runUserPlanOrderSet(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userPlanShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -361,6 +381,10 @@ func runUserWallet(args []string) error {
 }
 
 func runUserWalletShow(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userWalletShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -369,6 +393,10 @@ func runUserWalletShow(args []string) error {
 }
 
 func runUserWalletCredit(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userWalletShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -377,6 +405,10 @@ func runUserWalletCredit(args []string) error {
 }
 
 func runUserWalletAdjust(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userWalletShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -385,6 +417,10 @@ func runUserWalletAdjust(args []string) error {
 }
 
 func runUserWalletRefund(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userWalletShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -424,6 +460,10 @@ func runUserKey(args []string) error {
 }
 
 func runUserKeyList(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userKeyShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -432,6 +472,10 @@ func runUserKeyList(args []string) error {
 }
 
 func runUserKeyCreate(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userKeyShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -467,6 +511,10 @@ func runUserKeyPlans(args []string) error {
 }
 
 func runUserKeyPlansShow(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userKeyShortUsage) {
+		return nil
+	}
 	id, rest, err := takeOperand(args, "<API Key ID>")
 	if err != nil {
 		return err
@@ -475,6 +523,10 @@ func runUserKeyPlansShow(args []string) error {
 }
 
 func runUserKeyPlansSet(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userKeyShortUsage) {
+		return nil
+	}
 	id, rest, err := takeOperand(args, "<API Key ID>")
 	if err != nil {
 		return err
@@ -512,6 +564,10 @@ func runUserUsage(args []string) error {
 }
 
 func runUserUsageEvents(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userUsageShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err
@@ -520,6 +576,10 @@ func runUserUsageEvents(args []string) error {
 }
 
 func runUserUsageRequests(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, userUsageShortUsage) {
+		return nil
+	}
 	user, rest, err := takeOperand(args, "<用户>")
 	if err != nil {
 		return err

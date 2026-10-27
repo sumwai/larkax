@@ -106,6 +106,11 @@ func runAdminToken(args []string) error {
 	case "-h", "--help":
 		printUsage(os.Stdout, adminShortUsage)
 		return nil
+	case "help":
+		// admin token 由 admin 拆出来，读者要的仍是 admin 那一份里关于令牌的
+		// 那几行：这一组不另写文案，与「帮助文案只有一处来源」一致。
+		printUsage(os.Stdout, adminUsage)
+		return nil
 	default:
 		printUsage(os.Stderr, adminShortUsage)
 		return usageErr(fmt.Errorf("未知的 admin token 子命令 %q", action))

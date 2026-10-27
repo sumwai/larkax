@@ -115,11 +115,19 @@ type helpText struct {
 //
 //   - **打哪一版**看这一次要的是哪一版：`larkaxctl help <命令>` 与
 //     `<命令> help` 给长版，`-h` / `--help` 与参数写错时给短版。
-//   - **打在哪条流**看这份帮助是不是使用者要来的。要来的（`-h`、`help <命令>`）
-//     走 stdout——它是这一次运行的结果，要能进管道（`larkaxctl help channel |
-//     less`）。跟着错误打的那一份走 stderr：那时 stdout 上可能正要落一份 JSON
-//     （`--format json`），把用法页混进去下游的 jq 就解析不了；而且它本来就是
-//     那条错误的附注。这与 docs/cli-output.md 定下的分界是同一条。
+//
+//   - **打在哪条流**：`help <命令>` 与 `<命令> help`（要来的长版）走 stdout——
+//     它是这一次运行的结果，要能进管道（`larkaxctl help channel | less`）。
+//     `-h` / `--help` 与参数写错时分两种情况：**叶子**把用法打在 stderr 上
+//     （`wallet credit -h`、`channel list -h` 历来如此，199 条路径里 162 条），
+//     **有下级的组**多数打在 stdout 上（41 条里 32 条），因为那一份是「接下来
+//     还有哪些子命令」的导览，会被人往下翻。跟着错误打的那一份一律走 stderr：
+//     那时 stdout 上可能正要落一份 JSON（`--format json`），把用法页混进去下游
+//     的 jq 就解析不了；而且它本来就是那条错误的附注。
+//
+//     **两种流并存是既有事实，不是本函数引入的**：这里只负责「打哪一版」，
+//     打哪条流由调用点按上面的实际做法传 os.Stdout / os.Stderr。要统一得先
+//     逐个命令定方向，那是另一件事。
 //
 // w 收 os.Stdout / os.Stderr 本身，不是 humanStdout()：`-q` 压的是「给人看」那一
 // 档的输出，而帮助是使用者主动要的，不该被它压掉。
@@ -827,6 +835,26 @@ func runMigrate(args []string) error {
 	}
 	if allowMissingSet && action != "up" {
 		return usageErr(fmt.Errorf("--allow-missing 只用于 migrate up：%s 不接受它", action))
+	}
+
+	// 上面两条过了之后、取值校验与任何副作用之前，收掉「只要帮助」：下面每一档
+	// 都会连库或写文件，`migrate up -h` 落在连库那一档会被报成「连不上库」
+	// （退出码 1），而 `migrate create -h` 会**真的建出一个迁移文件**——名字就叫
+	// -h，而那个目录是 //go:embed sql/*.sql，下一次构建会把它嵌进二进制。
+	//
+	// flag 包在第一个非选项参数（子命令）处停下，所以 `migrate up -h` 的 -h 留在
+	// rest 里、到不了 fs.Parse。收在这里而不是 fs 上，正是因为这一点。
+	//
+	// **放在子命令与开关校验之后**：`migrate bogus -h` 是拼错了命令，
+	// `migrate create --allow-missing -h` 是用错了开关，两者都该报退出码 2。
+	// 收到那两条之前会把「拼错的命令」变成一次静默成功，脚本分不出这两种情形。
+	// 与 `migrate down-to abc -h` 仍报取值错是同一条：先认命令，再谈帮助。
+	//
+	// 只认「子命令后面只有一个 -h/--help」：`migrate create help` 里的 help 是
+	// 迁移文件名，仍然是位置参数。
+	if helpOnly(rest) {
+		fs.Usage()
+		return nil
 	}
 
 	var target *int64

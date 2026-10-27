@@ -621,6 +621,15 @@ func runUserDelete(args []string) error {
 		return runUserDeleteRevert(rest)
 	case "purge":
 		return runUserDeletePurge(rest)
+	case "-h", "--help":
+		// 这一组没有自己的两版文本：三个动作的写法都写在 user 那一份里
+		// （`user delete request|revert|purge --user …` 那一行）。给 user 的两版，
+		// 不另写文案——与 admin token / plan key 同一条处置。
+		printUsage(os.Stdout, userShortUsage)
+		return nil
+	case "help":
+		printUsage(os.Stdout, userUsage)
+		return nil
 	default:
 		return usageErr(fmt.Errorf("未知的 user delete 子命令 %q", action))
 	}

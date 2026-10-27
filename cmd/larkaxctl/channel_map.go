@@ -149,6 +149,11 @@ func runChannelMap(args []string) error {
 
 // runChannelMapUnmap 是反义动词的入口。
 func runChannelUnmap(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, channelMapShortUsage) {
+		return nil
+	}
+
 	if err := jsonUnsupported("channel unmap"); err != nil {
 		return err
 	}
@@ -168,6 +173,11 @@ func runChannelUnmap(args []string) error {
 // 它是两个入口共用的实现：动词写法（第一个位置参数是渠道）与兼容别名
 // `channel map add`。
 func runChannelMapAdd(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, channelMapShortUsage) {
+		return nil
+	}
+
 	if err := jsonUnsupported("channel map"); err != nil {
 		return err
 	}
@@ -406,6 +416,11 @@ func parseChannelMapList(args []string) (string, string, error) {
 
 // runChannelMapRemove 是 `channel map remove` 这条兼容别名的入口。
 func runChannelMapRemove(args []string) error {
+	// -h 要在摘位置参数之前收掉（见 helpflag.go）。
+	if answerHelpFlag(args, channelMapShortUsage) {
+		return nil
+	}
+
 	if err := jsonUnsupported("channel map remove"); err != nil {
 		return err
 	}
