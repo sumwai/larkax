@@ -75,3 +75,4 @@
 | [57](lessons/57-contract-current-state-needs-code-pointer.md) | 契约或注释里「某函数现在会做 X」这句话指不到一行代码，就是在说假话，照着它写出来的实现会静默不工作 | 写契约段、写描述现状的注释、读别人写的「已确认」时 | 活 |
 | [58](lessons/58-expectation-isomorphic-to-implementation.md) | 三种「绿得没有信息」的用例：期望值与实现同构、差异落点选错、前提恒真——都 PASS，都像严格的用例 | 写断言与前提检查、写解析器 / 分块器 / 指纹类的用例、评审这类用例时 | 活 |
 | [59](lessons/59-parallel-work-shares-package-namespace.md) | 并行派出的活各自绿、合流时整包编译不过：包级名字是共享资源，而它不体现在文件名上 | 把同一包的不同文件拆给多个执行者并行做时 | 活 |
+| [60](lessons/60-criterion-must-name-the-goal-not-the-means.md) | 判据写的是手段（「不要做 X」）而不是目的（「不要出现 Y」），照它实现会忠实地去掉 X、留下 Y；「不设例外」还封死了回来商量的路 | 定跨领域契约判据、写「必须 / 不得」这类硬约束、实现方每处都能引到判据原文却做错时 | 活 |
