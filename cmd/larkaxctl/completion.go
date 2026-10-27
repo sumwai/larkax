@@ -252,7 +252,7 @@ var globalValueFlags = []string{"--env-file"}
 //
 // 键的形状与 completionEnumValues 相同（`<命令路径>|--<选项名>`），生成器据此在
 // 取值位上把补全交回给 shell（bash 靠末尾的 `-o default`，zsh 自己调 `_files`）。
-// 哪些选项吃取值只从注册时记下的 takesValue 派生（见 flagset.go 的 record），
+// 哪些选项吃取值只从注册时记下的 takesValue 派生（见 cli 包的 flagset.go 的 record），
 // 不另抄清单：手写第二份表的下一站就是两份分岔（LESSONS.md 第 29 条）。
 //
 // 已接枚举的位置不在这里：它们的取值由 completionEnumValues 补，生成物里不能

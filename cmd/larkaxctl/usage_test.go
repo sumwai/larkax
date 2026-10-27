@@ -239,7 +239,7 @@ func TestLegacyCommandsStayOutOfRootUsage(t *testing.T) {
 // TestRootUsageFitsOneScreen 断言根帮助页去掉末尾空行后不超过 45 行，且每行
 // 显示宽度不超过 100 列。
 //
-// 宽度用 displayWidth（见 table.go）量，不用 len：中文、全角标点与 ANSI 转义
+// 宽度用 displayWidth（见 cli 包的 table.go）量，不用 len：中文、全角标点与 ANSI 转义
 // 序列按字节数算都会偏，而偏的方向（把一行看得比实际窄）正好放过真正超宽的
 // 那一行。
 func TestRootUsageFitsOneScreen(t *testing.T) {

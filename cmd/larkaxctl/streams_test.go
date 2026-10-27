@@ -67,7 +67,7 @@ type successPathCase struct {
 	// run 跑一次这条命令的成功路径。
 	run func() error
 	// reportOnly 为真表示这条命令的「成功路径」本身就是给出一份不通过的体检
-	// 结论：那时它返回 reportedErr（报告已经打出来了，见 exit.go）。
+	// 结论：那时它返回 reportedErr（报告已经打出来了，见 cli 包的 exit.go）。
 	reportOnly bool
 	// allowed 是**白名单**：这条路径上允许出现的「像提示的话」，其余路径为空。
 	//

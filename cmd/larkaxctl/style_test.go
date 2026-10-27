@@ -493,7 +493,7 @@ func TestHelpLineJudgement(t *testing.T) {
 
 // TestHelpTextHasNoStyleWhenColourIsOff 钉住四种「一个 `\x1b` 都没有」的情形。
 //
-// 四种里有三种在 palette 那一层判（非终端、NO_COLOR 非空、TERM=dumb，见 style.go
+// 四种里有三种在 palette 那一层判（非终端、NO_COLOR 非空、TERM=dumb，见 cli 包的 style.go
 // 的 newPalette），一种在 printUsage 那一层判（`--format json`：给管道下游的是
 // 纯文本）。三条 palette 的判据终端判断被注入成「是终端」，所以它们只要失效就
 // 当场现形——而在真实终端里失效时，人只会觉得「怎么又有颜色了」，不会去报 bug。

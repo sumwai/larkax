@@ -184,7 +184,7 @@ func TestModelAliasAddThenList(t *testing.T) {
 //
 // 这一条走渲染函数而不是命令：别名表是全局的，别的用例建过的行会让真表非空，
 // 而这里要钉的是「一条都没有时打哪句话」。命令那一侧的空表行为由同一份
-// 渲染函数回答，没有第二处会拼这句话（见 style.go 的 emptyListNote）。
+// 渲染函数回答，没有第二处会拼这句话（见 cli 包的 style.go 的 emptyListNote）。
 func TestModelAliasListEmptyWording(t *testing.T) {
 	var buf strings.Builder
 	printModelAliasList(&buf, nil)

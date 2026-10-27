@@ -37,7 +37,7 @@ import (
 
 // statusRenderPaths 是诊断体检类命令的单行状态渲染器的调用点。
 //
-// 这一组共用 printStatusLines（见 style.go）：状态符、按最宽标题对齐、默认一屏
+// 这一组共用 PrintStatusLines（见 internal/cli/style.go）：状态符、按最宽标题对齐、默认一屏
 // 只留结论、细节挪进 -v。多一个调用点说明有新命令做了体检（它得先想清楚自己是
 // 不是该类）；少一个说明有命令不再走这条路，两种都要人来看一眼。
 var statusRenderPaths = []string{
@@ -102,7 +102,7 @@ var tableRenderPaths = []string{
 
 // emptyListPaths 是清单空状态文案的调用点。
 //
-// 这一句（emptyListNote）把「这一栏是空的」与「下一步敲哪条命令」说在一起。
+// 这一句（EmptyListNote）把「这一栏是空的」与「下一步敲哪条命令」说在一起。
 // 没有「添加」这个动作的清单**不该**登记进来——给不出可执行的下一步时硬造一个
 // 命令名，比留一句「现在是空的」更坏（ledger balance --all 就是这一类）。
 var emptyListPaths = []string{

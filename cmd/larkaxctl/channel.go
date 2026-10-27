@@ -1612,7 +1612,7 @@ func printChannelList(w io.Writer, infos []channels.ChannelInfo, withDeleted boo
 
 // channelListDoc 组装 channel list 的机器可读输出。
 //
-// 与 printChannelList 是同一份数据的另一条渲染路径（见 format.go 开头）：
+// 与 printChannelList 是同一份数据的另一条渲染路径（见 cli 包的 format.go 开头）：
 // 那一档打表、用 `-` 与「平台」铺空栏，这一档给原始值与 null。
 //
 // withDeleted 是这次有没有 --all：默认清单按软删过滤（每一行的 deleted_at
@@ -1634,7 +1634,7 @@ func channelListDoc(infos []channels.ChannelInfo, withDeleted bool) map[string]a
 	}
 	doc["summary"] = summary
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(infos))
 	for _, info := range infos {
 		entries = append(entries, channelEntry(info))
@@ -2091,7 +2091,7 @@ func channelHealthDoc(rows []channels.ChannelHealth, now, since time.Time, withD
 	}
 	doc["summary"] = summary
 
-	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 format.go 的 jsonList）。
+	// 从空切片起：一条都没有时打 `[]`，不是 `null`（见 cli 包的 format.go 的 jsonList）。
 	entries := make([]map[string]any, 0, len(rows))
 	for _, h := range rows {
 		entries = append(entries, healthEntry(h, now))

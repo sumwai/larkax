@@ -639,7 +639,7 @@ func TestDoctorKeepsDBUnreachExitCode(t *testing.T) {
 
 // ── 机器可读输出 ────────────────────────────────────────────────────────
 //
-// 这一节钉的是 `doctor --format json` 那一条路（见 format.go 与
+// 这一节钉的是 `doctor --format json` 那一条路（见 cli 包的 format.go 与
 // docs/cli-output.md）。它与表格那一档读的是同一个 doctorReport，所以这里
 // 每一条都在问「同一份报告，两个读者拿到的是同一件事吗」。
 
@@ -769,7 +769,7 @@ func TestDoctorJSONStatusAndExitCodeAgree(t *testing.T) {
 
 // 「没跑成」与「通过」在 JSON 里也不许同形。
 //
-// 表格那一档靠状态符 `!` 与 `✓` 分开（见 style.go），JSON 这一档靠 status
+// 表格那一档靠状态符 `!` 与 `✓` 分开（见 cli 包的 style.go），JSON 这一档靠 status
 // 那一栏。两处说的是同一件事：一次什么都没查的运行不是一次全部通过的运行
 // （见 LESSONS.md 第 16 条）。
 func TestDoctorJSONSkippedIsNotPassed(t *testing.T) {

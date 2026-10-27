@@ -1478,7 +1478,7 @@ func TestChannelHealthDocIsMachineReadable(t *testing.T) {
 	assertJSONField(t, second, "cache_miss_tokens", float64(0))
 	assertJSONField(t, second, "deleted_at", "2026-10-15T01:02:03Z")
 	// 一个账号都没挂：池的状态是 empty（不是 drained），可用个数 0，清单是空数组
-	// 而不是 null——与 channels 那一栏同一条（见 format.go 的 jsonList）。
+	// 而不是 null——与 channels 那一栏同一条（见 cli 包的 format.go 的 jsonList）。
 	assertJSONField(t, second, "pool", "empty")
 	assertJSONField(t, second, "accounts_usable", float64(0))
 	if n := len(jsonEntries(t, second, "accounts")); n != 0 {

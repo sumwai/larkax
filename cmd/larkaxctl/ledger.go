@@ -209,7 +209,7 @@ func printLedgerBalance(w io.Writer, acct ledger.Account, asset ledger.Asset, ba
 //
 // 科目与余额走固定列宽的表格（与其余清单同一条约定，见 docs/cli-output.md）：
 // 科目名长短不一，用 `%-28s` 那样按**字节**补空格的写法在名字里出现非 ASCII
-// 字符时会错位，而 tableWriter 补的是显示宽度（见 table.go）。
+// 字符时会错位，而 tableWriter 补的是显示宽度（见 cli 包的 table.go）。
 func printLedgerBalances(w io.Writer, asset ledger.Asset, report *store.AccountBalancesReport) {
 	byAccount := report.ByAccount[asset]
 	if len(byAccount) == 0 {

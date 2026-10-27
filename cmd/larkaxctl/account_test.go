@@ -780,7 +780,7 @@ func secondName(t *testing.T, db *sql.DB, channelID int64) string {
 
 // TestAccountUpdateMissing 钉住「换 key 时名字打错」的退出码也是 4。
 //
-// ErrAccountNotFound 在 conflictErrors 里（见 exit.go），所以 update / remove
+// ErrAccountNotFound 在 conflictErrors 里（见 cli 包的 exit.go），所以 update / remove
 // 两条路都落在「要查的那一行不存在」那一档。update 先有这个行为、后来才被
 // 记成用例：没有它时，把那条分类去掉照样全绿，而用户拿到的会是 1。
 func TestAccountUpdateMissing(t *testing.T) {

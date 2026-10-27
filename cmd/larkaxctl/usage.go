@@ -1005,7 +1005,7 @@ func (f usageFilters) summary() map[string]any {
 // usageEventsDoc 组装 usage events 的机器可读输出。
 //
 // 金额走 jsonAmount（十进制定点字符串）：直接塞过一个 float64 会丢精度，而丢掉的
-// 恰好是账单要精确到的那几位（见 format.go）。
+// 恰好是账单要精确到的那几位（见 cli 包的 format.go）。
 func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[string]any {
 	summary := filters.summary()
 	summary["total"] = len(rows)
@@ -1044,7 +1044,7 @@ func usageEventsDoc(rows []usageEventRow, more bool, filters usageFilters) map[s
 // usageRequestsDoc 组装 usage requests 的机器可读输出。
 //
 // 结算金额与规则这两档没值时是 null，不打 `-`：占位符进 JSON 比留空更坏，按数字
-// 解析它的一方会拿到一个解析不了的值（见 format.go 上面那几段）。字段的命名与库里
+// 解析它的一方会拿到一个解析不了的值（见 cli 包的 format.go 上面那几段）。字段的命名与库里
 // 那几列对得上（reserved_amount、plan_reserved_amount、final_amount、pricing_rule_id）。
 func usageRequestsDoc(rows []usageRequestRow, more bool, filters usageFilters) map[string]any {
 	summary := filters.summary()

@@ -374,7 +374,7 @@ func balanceAllLines(out string) ([]string, map[string]string) {
 	var names []string
 	byName := make(map[string]string)
 	for _, line := range strings.Split(out, "\n") {
-		// 表格那一档的一行是「科目 + 两列以上空格 + 余额」（见 table.go），
+		// 表格那一档的一行是「科目 + 两列以上空格 + 余额」（见 cli 包的 table.go），
 		// 所以按空白切正好两栏；抬头（「资产=CNY 科目数=4…」）与读不出来的
 		// 那一句都不是两栏，自然被跳过。
 		fields := strings.Fields(line)

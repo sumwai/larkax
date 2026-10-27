@@ -1676,7 +1676,7 @@ func TestWalletListJSONMarksUnreadableCells(t *testing.T) {
 				t.Errorf("好行的余额 = %v，想要 0.00000000", w.Balance)
 			}
 			// 好行的 unreadable 是空数组而不是 null 或省略：键在、值是空，
-			// 「这一栏有，一个都没有」（见 format.go 的 jsonList）。
+			// 「这一栏有，一个都没有」（见 cli 包的 format.go 的 jsonList）。
 			if w.Unreadable == nil || len(w.Unreadable) != 0 {
 				t.Errorf("好行的 unreadable = %v，想要空数组", w.Unreadable)
 			}

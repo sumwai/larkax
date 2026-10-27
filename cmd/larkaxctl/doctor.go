@@ -328,7 +328,7 @@ const (
 
 // doctorOptions 是 doctor 的参数。
 //
-// --verbose 不在里面：它是**全局**控制选项（见 globals.go），由最外层的 run()
+// --verbose 不在里面：它是**全局**控制选项（见 cli 包的 globals.go），由最外层的 run()
 // 摘出来，写在子命令前面也一样认。这里再注册一次会得到第二个格子，而那只在
 // 「从 run() 进来」这条路上被摘掉、从别处调过来时才有用——两个格子迟早对不上。
 //
@@ -676,7 +676,7 @@ func (c doctorCheck) detailLines() []string {
 	return append(lines, "结论："+c.status().label())
 }
 
-// lines 把这张表渲染成若干行，已经按显示宽度对齐（见 table.go）。
+// lines 把这张表渲染成若干行，已经按显示宽度对齐（见 cli 包的 table.go）。
 //
 // 返回切片而不是直接写出去：调用方要把它们缩进着挂到某一项下面，而缩进加在
 // 每一行上，对齐仍然由 tableWriter 自己算。
@@ -2281,7 +2281,7 @@ func (l doctorLive) attribution() string {
 
 // ── 机器可读输出 ────────────────────────────────────────────────────────
 //
-// 这一节把同一份报告渲染成 `--format json` 那一档（见 format.go 与
+// 这一节把同一份报告渲染成 `--format json` 那一档（见 cli 包的 format.go 与
 // docs/cli-output.md）。它与上面 printDoctorReport 那一条路**并列**，共用的
 // 是同一个 doctorReport，所以两条路不可能出现「表格说过了、JSON 说没过」。
 //

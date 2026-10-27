@@ -1385,7 +1385,7 @@ func printWalletList(w io.Writer, rows []walletRow) {
 // walletListDoc 组装 wallet list 的机器可读输出。
 //
 // 与 printWalletList 是同一份数据的另一条渲染路径：那一档把金额按定点小数打给
-// 人看，这一档打**字符串**——金额过一遍 float64 会丢精度（见 format.go 的
+// 人看，这一档打**字符串**——金额过一遍 float64 会丢精度（见 cli 包的 format.go 的
 // jsonAmount）。
 //
 // 一格里读不出来的金额打 **null**，不打表格那个标记：占位符进 JSON 会让按金额

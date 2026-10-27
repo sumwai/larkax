@@ -699,7 +699,7 @@ func TestUserGetJSONShape(t *testing.T) {
 // TestUserListEmptyJSONIsAnArray 钉住空清单在机器可读那一档是 `[]` 而不是 null。
 //
 // nil 切片编出来是 null，读起来像「这一栏没有」；空切片才是「这一栏有，一条
-// 都没有」（见 format.go 的 jsonList）。库里清空不了（同一个包别的用例正在建
+// 都没有」（见 cli 包的 format.go 的 jsonList）。库里清空不了（同一个包别的用例正在建
 // 用户），所以直接喂 nil 给组装文档的那个纯函数——它正是决定这个形状的地方。
 func TestUserListEmptyJSONIsAnArray(t *testing.T) {
 	doc := userListDoc(nil)
