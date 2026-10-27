@@ -30,9 +30,9 @@ import (
 // completionIncludesReasoning 是渠道声明的用量口径（见
 // channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
 //
-// native 表示这次走了同协议直通：每个 data: 载荷在归一化事件之前先发一条
-// 带原始字节的 native 事件。归一化事件照旧一条不少——下游的中途估算与快照
-// 正文都靠它们。
+// native 表示这次走了同协议直通：每攒完一个 SSE 块，先把这一块的原始字节
+// 发成一条 native 事件，再逐行解析出归一化事件。归一化事件照旧一条不少——
+// 下游的中途估算与快照正文都靠它们。
 func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning, native bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个分片可能很大（长文本的一次性增量、或 base64 图片）。
@@ -46,102 +46,137 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		// → [DONE]。一旦在 finish_reason 处 return，后面那个带 usage 的分片
 		// 就永远读不到，结果是「流式请求全部没有用量」——而用量是算钱的依据。
 		finishReason string
+		// block 是正在攒的一个 SSE 块：空行之间的全部原始行。
+		block []string
 	)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			// 客户端断开或上层取消：已经产生的费用照记，由调用方处理。
-			return
-		}
 
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			// 空行是帧分隔；以冒号开头是 SSE 注释（心跳）。
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			// event: / id: / retry: 这些字段对本项目无用，跳过。
-			continue
-		}
+	// parseBlock 把块内每一行解析成归一化事件。返回 false 表示这一块里出现了
+	// 要求结束整条流的内容（[DONE] 或上游塞进来的 error 对象），pump 应当
+	// 直接返回。
+	//
+	// 调用它的地方必须先把这一块发成 native 帧：调用方按接收顺序拼接，
+	// native 帧要排在由它解析出的归一化事件之前。
+	parseBlock := func(lines []string) bool {
+		for _, raw := range lines {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, ":") {
+				// 空行是帧分隔；以冒号开头是 SSE 注释（心跳）。
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				// event: / id: / retry: 这些字段对本项目无用，跳过。
+				continue
+			}
 
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" {
-			// 只有 `data:` 而没有内容：空 data 行是帧分隔的一种写法，
-			// 没有载荷可转发。发出去的话调用方会收到一个空数据帧，有些
-			// SDK 把它判为协议错误。
-			continue
-		}
-		if payload == "[DONE]" {
-			// 正常结束。计费层需要知道「流结束了」，而不是靠超时去猜；
-			// 结束原因在这里一并给出。
-			//
-			// [DONE] 不发 native 帧：它不是 JSON 载荷，而渲染层自己会写
-			// 终止帧（见 internal/api/stream.go 的 openAIStream.finish）。
-			// 把这一行也当成 native 帧发出去，调用方会看到两个终止符。
-			events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
-			return
-		}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				// 正常结束。计费层需要知道「流结束了」，而不是靠超时去猜；
+				// 结束原因在这里一并给出。
+				//
+				// 这一块已经作为 native 帧发过了（见 finishBlock），所以
+				// 调用方拿到的是上游原样的 `[DONE]`，这里只补归一化事件。
+				events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
+				return false
+			}
 
-		if native {
-			// 先发 native 帧再发归一化事件，顺序固定：调用方的渲染层按
-			// 顺序拼接，先看到原文那一帧才可能与归一化事件对得上。
-			//
-			// 粒度是**每条 data: 行一帧**，不是每条 SSE 消息一帧。SSE 规范
-			// 允许一帧消息由多行 data: 拼成（行间以 \n 相连），这里不合并：
-			// 逐行发出去，调用方按行对应上游；要按消息合并是渲染层的事。
+			var chunk openAIStreamChunk
+			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+				// 单帧解析失败不代表整个流坏了；跳过它比中断整条流更合理，
+				// 因为已经吐给客户端的内容无法收回。空载荷的 `data:` 行也
+				// 落到这里——它没有可解析的内容。
+				continue
+			}
+
+			if chunk.Error != nil {
+				events <- channel.StreamEvent{
+					Kind: "error",
+					Err: &channel.ErrUpstream{
+						StatusCode:  status,
+						GotResponse: true,
+						Body:        chunk.Error.Message,
+						// 流已经开始了，报错之后没有「重试」的余地——
+						// 重试意味着客户端会看到两段拼接的回答。
+						Retryable: false,
+					},
+				}
+				return false
+			}
+
+			if chunk.Usage != nil {
+				usage := relay.UsageFromRelaykit(chunk.Usage.toRelaykit(), completionIncludesReasoning)
+				events <- channel.StreamEvent{Kind: "usage", Usage: &usage}
+			}
+
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content != "" {
+					events <- channel.StreamEvent{Kind: "delta", Text: choice.Delta.Content}
+				}
+				for _, tc := range choice.Delta.ToolCalls {
+					events <- channel.StreamEvent{
+						Kind: "tool_use",
+						ToolCall: &channel.ToolCallDelta{
+							Index:     tc.Index,
+							ID:        tc.ID,
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
+						},
+					}
+				}
+				if choice.FinishReason != "" {
+					// 只记下来，不在这里结束：usage 分片还在后面。
+					finishReason = choice.FinishReason
+				}
+			}
+		}
+		return true
+	}
+
+	// finishBlock 处理攒好的一块：先发它的 native 帧，再逐行解析。
+	// 返回 false 表示 pump 应当直接返回。
+	//
+	// 发的是**块的原始字节**，不是解析出来的内容：块内可能有多行 data:
+	// （SSE 允许一条消息由多行拼成）、也可能有注释行与 event: 行，逐行发
+	// 会把这些结构拆散，调用方就拼不回上游原本的那一块。块内各行用 \n
+	// 连接，末尾不带 \n——末尾那个空行是块分隔，不属于块本身。
+	//
+	// 只有非空块才发：连续空行之间没有内容，发出去调用方会收到空帧。
+	finishBlock := func() bool {
+		lines := block
+		block = nil
+		if len(lines) > 0 && native {
 			events <- channel.StreamEvent{
 				Kind:         "native",
 				NativeFormat: channel.ProtocolOpenAI,
-				Frame:        []byte(payload),
+				Frame:        []byte(strings.Join(lines, "\n")),
 			}
 		}
+		return parseBlock(lines)
+	}
 
-		var chunk openAIStreamChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			// 单帧解析失败不代表整个流坏了；跳过它比中断整条流更合理，
-			// 因为已经吐给客户端的内容无法收回。
-			continue
-		}
-
-		if chunk.Error != nil {
-			events <- channel.StreamEvent{
-				Kind: "error",
-				Err: &channel.ErrUpstream{
-					StatusCode:  status,
-					GotResponse: true,
-					Body:        chunk.Error.Message,
-					// 流已经开始了，报错之后没有「重试」的余地——
-					// 重试意味着客户端会看到两段拼接的回答。
-					Retryable: false,
-				},
-			}
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			// 客户端断开或上层取消：已经产生的费用照记，由调用方处理。
+			// 这里不把攒着的块发出去：收件人已经走了，而 events 无缓冲，
+			// 对方不再读时这一发会把收尾卡死。
 			return
 		}
 
-		if chunk.Usage != nil {
-			usage := relay.UsageFromRelaykit(chunk.Usage.toRelaykit(), completionIncludesReasoning)
-			events <- channel.StreamEvent{Kind: "usage", Usage: &usage}
+		raw := scanner.Text()
+		if strings.TrimSpace(raw) == "" {
+			// 空行是块分隔，一块攒完了。先发它的 native 帧再解析。
+			if !finishBlock() {
+				return
+			}
+			continue
 		}
+		block = append(block, raw)
+	}
 
-		for _, choice := range chunk.Choices {
-			if choice.Delta.Content != "" {
-				events <- channel.StreamEvent{Kind: "delta", Text: choice.Delta.Content}
-			}
-			for _, tc := range choice.Delta.ToolCalls {
-				events <- channel.StreamEvent{
-					Kind: "tool_use",
-					ToolCall: &channel.ToolCallDelta{
-						Index:     tc.Index,
-						ID:        tc.ID,
-						Name:      tc.Function.Name,
-						Arguments: tc.Function.Arguments,
-					},
-				}
-			}
-			if choice.FinishReason != "" {
-				// 只记下来，不在这里结束：usage 分片还在后面。
-				finishReason = choice.FinishReason
-			}
-		}
+	// 最后一块可能没有空行收尾（上游直接关掉连接、或 [DONE] 之后就没有
+	// 空行）。照样先发帧再解析：不在这里发，那一块会连同它的结束语义一起
+	// 凭空丢掉。
+	if !finishBlock() {
+		return
 	}
 
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {

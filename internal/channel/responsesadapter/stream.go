@@ -71,10 +71,12 @@ type responsesStreamEvent struct {
 // completionIncludesReasoning 是渠道声明的用量口径（见
 // channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
 //
-// native 表示这次调用是同协议直通：每个 `data:` 载荷在翻译之前另外发一条
-// Kind == "native" 的帧，让调用方拿到与上游逐字一致的流。原生帧是**叠加**的，
-// 归一化事件一条不少照旧发——下游的中途冻结估算与快照正文都只认那几个 Kind
-// （见 channel.StreamEvent 的 native 一段）。
+// native 表示这次调用是同协议直通：上游每一个完整的 SSE 块在解析之前另外发
+// 一条 Kind == "native" 的帧，让调用方拿到与上游逐字一致的流。块是空行分隔
+// 之间的全部行原样（含 `event:` 行、注释行、多行 `data:`），不含结尾空行。
+//
+// 原生帧是**叠加**的，归一化事件一条不少照旧发——下游的中途冻结估算与快照
+// 正文都只认那几个 Kind（见 channel.StreamEvent 的 native 一段）。
 func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning, native bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个事件可能很大：长文本的一次性增量、或一整段工具参数。
@@ -164,239 +166,281 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		events <- channel.StreamEvent{Kind: "delta", Text: text}
 	}
 
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			// 客户端断开或上层取消：已经产生的费用照记，由调用方处理。
-			return
-		}
-
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			// 空行是帧分隔；以冒号开头是 SSE 注释（心跳）。
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
-			// 事件名在载荷的 type 字段里，而且比 event: 行可信——它每个
-			// 事件都有，event: 行有的兼容层不发。这里跳过即可。
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			// id: / retry: 这些字段对本项目无用。
-			continue
-		}
-
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
-			// 终态事件之后有的兼容层还补一个 [DONE]，正常路径下
-			// response.completed 已经让我们返回了。走到这里说明**没有**
-			// 终态事件：结束标记照发，但不伪造用量——用量按增量估算，
-			// 而那是调用方的事。
-			//
-			// 它不是 JSON 载荷，所以直通时也不发原生帧：调用方那侧的渲染层
-			// 自己会写终止帧（见 internal/api 的 responsesStream.finish），
-			// 把这一行原样转出去会让它收到第二个终止符。
-			events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
-			return
-		}
-
-		if payload == "" {
-			// 空 data 行没有载荷可转发。上游偶尔发 `data:` 后面什么都没有——
-			// 有的兼容层拿它当心跳。放它过去会发出一条空原生帧，渲染层把它
-			// 写成 `data: ` 的空帧：客户端可能判为协议错误，至少也会多收一帧。
-			// 缺一行是丢内容，多一行是收到空帧，两者都要避免。
-			continue
-		}
-
-		// 原生帧先发，归一化事件随后。顺序是固定的：调用方按帧序号对齐
-		// 上游时，看到的第一条必须是上游本来那一条。
-		//
-		// 放在解析之前：解析失败的载荷同样原样转发。上游发了一个我们不认识
-		// 的事件形状，那正是直通要救的情形——按归一化路径它会被静默跳过。
-		//
-		// 计帧口径是**每条 `data:` 行一帧**，不是每条 SSE 消息一帧。两条理由：
-		//
-		//   - 这个包跳过 `event:` 行（事件名在载荷的 type 里），所以
-		//     `event: response.output_text.delta` 这一行本身不产帧，只有它下面
-		//     那条 `data:` 产；
-		//   - SSE 允许一帧里有多行 `data:`，按规范它们用换行拼成一条消息。
-		//     这里逐行独立发帧，那几行各产一条原生帧。按行计是对的：调用方
-		//     拿到的帧与它在上游那一侧看到的数据行一一对应。
-		if native {
-			events <- channel.StreamEvent{
-				Kind:         "native",
-				NativeFormat: channel.ProtocolOpenAIResponses,
-				Frame:        []byte(payload),
+	// parseBlock 逐行解析一块已经发过原生帧的内容，产出归一化事件。
+	// 返回 false 表示 pump 应当直接返回：块里出现了结束语义（`[DONE]`、
+	// 终态事件、错误事件）。走到那几处时块的 native 帧**已经发出去了**——
+	// 发帧在调这个函数之前，所以这些 return 不会丢帧。
+	//
+	// 块内逐行做的事与改动前完全相同：空行与注释行跳过、`event:` 行跳过
+	// （事件名在载荷的 type 里）、`data:` 行按载荷分派。空 `data:` 行不单独判：
+	// 它是块的一部分，已经随整块发出去了，这里没有载荷可解析，下面的
+	// Unmarshal 会跳过它。
+	parseBlock := func(lines []string) bool {
+		for _, blockLine := range lines {
+			line := strings.TrimSpace(blockLine)
+			if line == "" || strings.HasPrefix(line, ":") {
+				// 空行是帧分隔；以冒号开头是 SSE 注释（心跳）。
+				continue
 			}
-		}
-
-		var ev responsesStreamEvent
-		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
-			// 单帧解析失败不代表整个流坏了；跳过它比中断整条流更合理，
-			// 因为已经吐给客户端的内容无法收回。
-			continue
-		}
-
-		switch ev.Type {
-		case "response.output_text.delta":
-			if ev.Delta != "" {
-				textDeltaSeen = true
-				events <- channel.StreamEvent{Kind: "delta", Text: ev.Delta}
+			if strings.HasPrefix(line, "event:") {
+				// 事件名在载荷的 type 字段里，而且比 event: 行可信——它每个
+				// 事件都有，event: 行有的兼容层不发。这里跳过即可。
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				// id: / retry: 这些字段对本项目无用。
+				continue
 			}
 
-		case "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
-			"response.reasoning_text.delta", "response.reasoning_text.done",
-			// 上游在用的另外两个名字。它们不在 OpenAI 的 Responses 事件表里
-			// （表里是上面四个），但实测会发——落到无匹配分支时行为上「碰巧
-			// 对」，而碰巧对不是分支在管：哪天有人把无匹配分支改成「未知事件
-			// 即报错」，这条流立刻就断。
-			"response.reasoning.delta", "response.reasoning.done":
-			// 思考内容不进正文事件：它是模型的中间产物，与用户可见的回答
-			// 是两件事（与 chat 的 reasoning_content、Anthropic 的
-			// thinking_delta 同一处置）。需要它的一方读终态事件里的
-			// response.output——那里有完整的摘要。
-			//
-			// 这一支与无匹配分支都不转发内容，**行为上分不出来**，所以这里
-			// 也记一条 debug：认得的事件与未归类的事件在日志里必须能分开
-			//（见 noteOnce）。
-			noteOnce(ev.Type, "跳过思考类流式事件（不进正文）")
-
-		case "response.output_text.annotation.added":
-			// 引用标注。非流式那条路把它放进 output[].content[].annotations
-			// 交给调用方，这里同样要转出去——两条路口径不一致本身就是缺陷
-			//（见 internal/relay 的 fromResponsesResponse 与
-			// internal/api 的 responsesStream）。
-			//
-			// 解析失败不中断流：一条标注坏掉不该让已经吐出的正文作废，
-			// 而丢弃它是静默的——所以记一条 warn，与无匹配分支同一个形状。
-			if annotation, ok := ev.annotation(); ok {
-				events <- channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{annotation}}
-			} else if len(ev.Annotation) > 0 {
-				warnOnce(ev.Type, "引用标注解析失败，内容已忽略")
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				// 终态事件之后有的兼容层还补一个 [DONE]，正常路径下
+				// response.completed 已经让我们返回了。走到这里说明**没有**
+				// 终态事件：结束标记照发，但不伪造用量——用量按增量估算，
+				// 而那是调用方的事。
+				//
+				// 这一块的 native 帧在进入本函数之前已经发出（见上面的 for），
+				// 所以这里直接收尾不会丢帧。它照发是有意的：客户端那侧的终止符
+				// 必须原生字节直达，渲染层不再重新编码它。
+				events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
+				return false
 			}
 
-		case "response.output_item.added":
-			// 工具调用的名字与 id 在这里给出，参数要到后面的增量里才来
-			//（与 Anthropic 的 content_block_start 同一形状）。
-			if ev.Item != nil && isToolCallItem(ev.Item.Type) {
-				slot := tools.slotFor(ev.itemKey())
-				events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
-					Index: slot.index,
-					ID:    ev.Item.callID(),
-					Name:  ev.Item.Name,
-				}}
+			var ev responsesStreamEvent
+			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+				// 单帧解析失败不代表整个流坏了；跳过它比中断整条流更合理，
+				// 因为已经吐给客户端的内容无法收回。
+				continue
 			}
 
-		case "response.function_call_arguments.delta":
-			if ev.Delta != "" {
-				slot := tools.slotFor(ev.itemKey())
-				tools.markArgsSent(slot)
-				events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
-					Index:     slot.index,
-					Arguments: ev.Delta,
-				}}
-			}
+			switch ev.Type {
+			case "response.output_text.delta":
+				if ev.Delta != "" {
+					textDeltaSeen = true
+					events <- channel.StreamEvent{Kind: "delta", Text: ev.Delta}
+				}
 
-		case "response.function_call_arguments.done":
-			// 有的上游只发这一个（参数一次性给全，没有增量）。已经发过增量
-			// 就不再发一遍，否则调用方拼出来的参数会重复。
-			if ev.Arguments != nil && *ev.Arguments != "" {
-				slot := tools.slotFor(ev.itemKey())
-				if !slot.argsSent {
+			case "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+				"response.reasoning_text.delta", "response.reasoning_text.done",
+				// 上游在用的另外两个名字。它们不在 OpenAI 的 Responses 事件表里
+				// （表里是上面四个），但实测会发——落到无匹配分支时行为上「碰巧
+				// 对」，而碰巧对不是分支在管：哪天有人把无匹配分支改成「未知事件
+				// 即报错」，这条流立刻就断。
+				"response.reasoning.delta", "response.reasoning.done":
+				// 思考内容不进正文事件：它是模型的中间产物，与用户可见的回答
+				// 是两件事（与 chat 的 reasoning_content、Anthropic 的
+				// thinking_delta 同一处置）。需要它的一方读终态事件里的
+				// response.output——那里有完整的摘要。
+				//
+				// 这一支与无匹配分支都不转发内容，**行为上分不出来**，所以这里
+				// 也记一条 debug：认得的事件与未归类的事件在日志里必须能分开
+				//（见 noteOnce）。
+				noteOnce(ev.Type, "跳过思考类流式事件（不进正文）")
+
+			case "response.output_text.annotation.added":
+				// 引用标注。非流式那条路把它放进 output[].content[].annotations
+				// 交给调用方，这里同样要转出去——两条路口径不一致本身就是缺陷
+				//（见 internal/relay 的 fromResponsesResponse 与
+				// internal/api 的 responsesStream）。
+				//
+				// 解析失败不中断流：一条标注坏掉不该让已经吐出的正文作废，
+				// 而丢弃它是静默的——所以记一条 warn，与无匹配分支同一个形状。
+				if annotation, ok := ev.annotation(); ok {
+					events <- channel.StreamEvent{Kind: "annotation", Annotations: []map[string]any{annotation}}
+				} else if len(ev.Annotation) > 0 {
+					warnOnce(ev.Type, "引用标注解析失败，内容已忽略")
+				}
+
+			case "response.output_item.added":
+				// 工具调用的名字与 id 在这里给出，参数要到后面的增量里才来
+				//（与 Anthropic 的 content_block_start 同一形状）。
+				if ev.Item != nil && isToolCallItem(ev.Item.Type) {
+					slot := tools.slotFor(ev.itemKey())
+					events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+						Index: slot.index,
+						ID:    ev.Item.callID(),
+						Name:  ev.Item.Name,
+					}}
+				}
+
+			case "response.function_call_arguments.delta":
+				if ev.Delta != "" {
+					slot := tools.slotFor(ev.itemKey())
 					tools.markArgsSent(slot)
 					events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
 						Index:     slot.index,
-						Arguments: *ev.Arguments,
+						Arguments: ev.Delta,
 					}}
 				}
-			}
 
-		case "response.custom_tool_call_input.delta":
-			// custom 工具的参数是自由文本，形状与 function 的 JSON 片段不同，
-			// 但对调用方是同一件事：参数的一段。
-			if ev.Input != nil && *ev.Input != "" {
-				slot := tools.slotFor(ev.itemKey())
-				tools.markArgsSent(slot)
-				events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
-					Index:     slot.index,
-					Arguments: *ev.Input,
-				}}
-			}
+			case "response.function_call_arguments.done":
+				// 有的上游只发这一个（参数一次性给全，没有增量）。已经发过增量
+				// 就不再发一遍，否则调用方拼出来的参数会重复。
+				if ev.Arguments != nil && *ev.Arguments != "" {
+					slot := tools.slotFor(ev.itemKey())
+					if !slot.argsSent {
+						tools.markArgsSent(slot)
+						events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+							Index:     slot.index,
+							Arguments: *ev.Arguments,
+						}}
+					}
+				}
 
-		case "response.custom_tool_call_input.done":
-			if ev.Input != nil && *ev.Input != "" {
-				slot := tools.slotFor(ev.itemKey())
-				if !slot.argsSent {
+			case "response.custom_tool_call_input.delta":
+				// custom 工具的参数是自由文本，形状与 function 的 JSON 片段不同，
+				// 但对调用方是同一件事：参数的一段。
+				if ev.Input != nil && *ev.Input != "" {
+					slot := tools.slotFor(ev.itemKey())
 					tools.markArgsSent(slot)
 					events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
 						Index:     slot.index,
 						Arguments: *ev.Input,
 					}}
 				}
-			}
 
-		case "response.output_item.done":
-			// 兜底一：有的上游一个参数增量都不发，把完整参数放在这一项里。
-			if ev.Item != nil && isToolCallItem(ev.Item.Type) {
-				slot := tools.slotFor(ev.itemKey())
-				if args := ev.Item.arguments(); args != "" && !slot.argsSent {
-					tools.markArgsSent(slot)
-					events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
-						Index:     slot.index,
-						Arguments: args,
-					}}
+			case "response.custom_tool_call_input.done":
+				if ev.Input != nil && *ev.Input != "" {
+					slot := tools.slotFor(ev.itemKey())
+					if !slot.argsSent {
+						tools.markArgsSent(slot)
+						events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+							Index:     slot.index,
+							Arguments: *ev.Input,
+						}}
+					}
+				}
+
+			case "response.output_item.done":
+				// 兜底一：有的上游一个参数增量都不发，把完整参数放在这一项里。
+				if ev.Item != nil && isToolCallItem(ev.Item.Type) {
+					slot := tools.slotFor(ev.itemKey())
+					if args := ev.Item.arguments(); args != "" && !slot.argsSent {
+						tools.markArgsSent(slot)
+						events <- channel.StreamEvent{Kind: "tool_use", ToolCall: &channel.ToolCallDelta{
+							Index:     slot.index,
+							Arguments: args,
+						}}
+					}
+				}
+				// 兜底二：正文同理。有的上游只发 output_item.added / .done，
+				// 一个 response.output_text.delta 都不发——那时客户端拿到空回答，
+				// 而用量按实测结算，用户为空回答付钱。工具参数有这道兜底而正文
+				// 没有，是同一份代码里两处不一致。
+				//
+				// 没有 output_index 就不发：下标是「这一项发过没有」的键，缺了它
+				// 就没法保证终态那一次不重复发。终态按 output[] 的位置遍历，
+				// 那一支会接住它。
+				if ev.OutputIndex != nil {
+					sendText(*ev.OutputIndex, ev.Item)
+				}
+
+			case "response.completed", "response.incomplete", "response.done":
+				// 终态。用量**只在**这里给，所以它决定这次结算的依据。
+				if ev.Response != nil {
+					// 兜底：正文只在 response.output 里给（一个增量都没有）时补发。
+					// 放在 usage 之前，让调用方先拿到正文再看到用量。
+					for i := range ev.Response.Output {
+						sendText(i, &ev.Response.Output[i])
+					}
+					if ev.Response.Usage != nil {
+						u := relay.UsageFromRelaykit(ev.Response.Usage.toRelaykit(), completionIncludesReasoning)
+						events <- channel.StreamEvent{Kind: "usage", Usage: &u}
+					}
+					finishReason = ev.Response.finishReason(tools.count() > 0)
+				}
+				events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
+				// 这一块的 native 帧在进入本函数之前已经发出，所以这里收尾
+				// 不会丢帧。
+				return false
+
+			case "response.failed", "response.error", "error":
+				events <- channel.StreamEvent{
+					Kind: "error",
+					Err: &channel.ErrUpstream{
+						StatusCode:  status,
+						GotResponse: true,
+						Body:        ev.errorText(),
+						// 流已经开始，报错之后没有重试的余地——重试意味着客户端
+						// 会看到两段拼接的回答。已经吐出的部分照记费用。
+						Retryable: false,
+					},
+				}
+				return false
+
+			default:
+				// 本适配器没有分类的事件：可能是新协议里新增的事件，也可能含
+				// 正文。记下来，但既不转发也不中断流（理由见 noteOnce）。
+				if _, known := ignorableResponsesEvents[ev.Type]; known {
+					noteOnce(ev.Type, "跳过已知且不必转发的流式事件")
+				} else {
+					warnOnce(ev.Type, "流里出现未归类的事件，内容已忽略")
 				}
 			}
-			// 兜底二：正文同理。有的上游只发 output_item.added / .done，
-			// 一个 response.output_text.delta 都不发——那时客户端拿到空回答，
-			// 而用量按实测结算，用户为空回答付钱。工具参数有这道兜底而正文
-			// 没有，是同一份代码里两处不一致。
-			//
-			// 没有 output_index 就不发：下标是「这一项发过没有」的键，缺了它
-			// 就没法保证终态那一次不重复发。终态按 output[] 的位置遍历，
-			// 那一支会接住它。
-			if ev.OutputIndex != nil {
-				sendText(*ev.OutputIndex, ev.Item)
-			}
+		}
+		return true
+	}
 
-		case "response.completed", "response.incomplete", "response.done":
-			// 终态。用量**只在**这里给，所以它决定这次结算的依据。
-			if ev.Response != nil {
-				// 兜底：正文只在 response.output 里给（一个增量都没有）时补发。
-				// 放在 usage 之前，让调用方先拿到正文再看到用量。
-				for i := range ev.Response.Output {
-					sendText(i, &ev.Response.Output[i])
+	// readBlock 攒出一个完整 SSE 块：从当前位置读到空行为止，返回块内的原始行。
+	//
+	// 空行是块分隔，不属于块（结尾空行不返回）；块内每行的原始字节原样保留
+	// （不 trim，行间的 `\n` 由调用方拼回）。连续空行形成的空块跳过，返回
+	// nil 表示流已读完。
+	//
+	// 为什么按块而不是按行：调用方要的是与上游逐字节一致的那一段。按行发帧时，
+	// `event:` 行与多行 `data:` 会被拆散，调用方拼不回来。
+	readBlock := func() []string {
+		var block []string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.TrimSpace(line) == "" {
+				if len(block) > 0 {
+					return block
 				}
-				if ev.Response.Usage != nil {
-					u := relay.UsageFromRelaykit(ev.Response.Usage.toRelaykit(), completionIncludesReasoning)
-					events <- channel.StreamEvent{Kind: "usage", Usage: &u}
-				}
-				finishReason = ev.Response.finishReason(tools.count() > 0)
+				continue
 			}
-			events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
-			return
+			block = append(block, line)
+		}
+		if len(block) > 0 {
+			return block
+		}
+		return nil
+	}
 
-		case "response.failed", "response.error", "error":
+	// finishBlock 处理攒好的一块：先发它的 native 帧，再逐行解析。
+	// 返回 false 表示 pump 应当直接返回。
+	//
+	// 发的是**块的原始字节**，不是解析出来的内容：块内可能有多行 data:
+	// （SSE 允许一条消息由多行拼成）、也可能有注释行与 event: 行，逐行发
+	// 会把这些结构拆散，调用方就拼不回上游原本的那一块。块内各行用 \n
+	// 连接，末尾不带 \n——末尾那个空行是块分隔，不属于块本身。
+	//
+	// 只有非空块才发：连续空行之间没有内容，发出去调用方会收到空帧。
+	finishBlock := func(lines []string) bool {
+		if len(lines) > 0 && native {
 			events <- channel.StreamEvent{
-				Kind: "error",
-				Err: &channel.ErrUpstream{
-					StatusCode:  status,
-					GotResponse: true,
-					Body:        ev.errorText(),
-					// 流已经开始，报错之后没有重试的余地——重试意味着客户端
-					// 会看到两段拼接的回答。已经吐出的部分照记费用。
-					Retryable: false,
-				},
+				Kind:         "native",
+				NativeFormat: channel.ProtocolOpenAIResponses,
+				Frame:        []byte(strings.Join(lines, "\n")),
 			}
-			return
+		}
+		return parseBlock(lines)
+	}
 
-		default:
-			// 本适配器没有分类的事件：可能是新协议里新增的事件，也可能含
-			// 正文。记下来，但既不转发也不中断流（理由见 noteOnce）。
-			if _, known := ignorableResponsesEvents[ev.Type]; known {
-				noteOnce(ev.Type, "跳过已知且不必转发的流式事件")
-			} else {
-				warnOnce(ev.Type, "流里出现未归类的事件，内容已忽略")
-			}
+	for {
+		if ctx.Err() != nil {
+			// 客户端断开或上层取消：已经产生的费用照记，由调用方处理。
+			// 这里不把攒着的块发出去：收件人已经走了，而 events 无缓冲，
+			// 对方不再读时这一发会把收尾卡死。
+			return
+		}
+
+		block := readBlock()
+		if block == nil {
+			break
+		}
+		if !finishBlock(block) {
+			return
 		}
 	}
 

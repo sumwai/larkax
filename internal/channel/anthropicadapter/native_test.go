@@ -421,24 +421,31 @@ event: message_stop
 data: {"type":"message_stop"}
 `
 
-// sseDataPayloads 按流式解析的同一口径（trim 掉 "data:" 前缀与两端空白）
-// 取出一份 SSE 里所有的 data 载荷，用于与 native 帧逐字比对。
+// sseBlocks 把一份 SSE 切成块，返回每块的原始字节：空行分隔之间的全部行
+// 用 \n 拼起来，不含结尾空行。连续空行形成的空块不计。
 //
-// 空载荷（`data:` 后面什么都没有的行）不算：它没有内容可转发，适配器也不发帧
-// （见 pump 里的判据）。把它算进来的话，这份「期望」会比真实行为多一条。
-func sseDataPayloads(sse string) []string {
-	var out []string
-	for _, line := range strings.Split(sse, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
+// 这是 native 帧的期望值口径：帧是**整块**的原文（含 event: 行、注释行、
+// 同块内的多行 data），不是某一条 data 行的载荷。
+func sseBlocks(sse string) []string {
+	var (
+		out   []string
+		block []string
+	)
+	flush := func() {
+		if len(block) == 0 {
+			return
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" {
-			continue
-		}
-		out = append(out, payload)
+		out = append(out, strings.Join(block, "\n"))
+		block = nil
 	}
+	for _, line := range strings.Split(sse, "\n") {
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		block = append(block, line)
+	}
+	flush()
 	return out
 }
 
@@ -460,7 +467,7 @@ func collectStream(t *testing.T, req *channel.Request, sse string) []channel.Str
 	return out
 }
 
-// 直通流：每一帧 data 载荷都发一条 native 事件，载荷逐字等于原文那一行；
+// 直通流：每个 SSE 块发一条 native 事件，帧逐字等于该块的原文（含 event: 行）；
 // 归一化事件一个不少、顺序不变；thinking_delta 仍不进 delta，但 native 帧照发。
 func TestNativeStreamEmitsRawFrames(t *testing.T) {
 	req := &channel.Request{
@@ -506,14 +513,20 @@ func TestNativeStreamEmitsRawFrames(t *testing.T) {
 		}
 	}
 
-	want := sseDataPayloads(nativeSSE)
+	want := sseBlocks(nativeSSE)
 	if len(frames) != len(want) {
-		t.Fatalf("native 帧 %d 条，期望 %d 条（每个 data 行一条）", len(frames), len(want))
+		t.Fatalf("native 帧 %d 条，期望 %d 条（每个非空 SSE 块一条）", len(frames), len(want))
 	}
 	for i := range want {
 		if frames[i] != want[i] {
-			t.Errorf("第 %d 帧载荷不等于原文 data 行：\n得到 %s\n期望 %s", i, frames[i], want[i])
+			t.Errorf("第 %d 帧不等于原文那一块：\n得到 %s\n期望 %s", i, frames[i], want[i])
 		}
+	}
+
+	// 帧里带着块内的 event: 行：这是块模型与前一个逐行模型最显眼的差别。
+	// 只断言「载荷相等」的话，两种模型在只有 data 行的流上长得一模一样。
+	if !strings.HasPrefix(frames[0], "event: message_start\ndata: ") {
+		t.Errorf("首帧应以块内的 event: 行开头：%q", frames[0])
 	}
 
 	// 归一化事件一条不少：正文、工具参数、用量、结束。
@@ -568,12 +581,12 @@ func TestNativeStreamEmitsRawFrames(t *testing.T) {
 	// ping 与 content_block_stop 不产归一化事件，但照样有 native 帧。
 	var pingFrames int
 	for _, f := range frames {
-		if f == `{"type":"ping"}` {
+		if strings.Contains(f, `{"type":"ping"}`) {
 			pingFrames++
 		}
 	}
 	if pingFrames != 1 {
-		t.Errorf("ping 的 native 帧 %d 条，期望 1 条", pingFrames)
+		t.Errorf("ping 块的 native 帧 %d 条，期望 1 条", pingFrames)
 	}
 	var blockStopFrames int
 	for _, f := range frames {
@@ -586,12 +599,10 @@ func TestNativeStreamEmitsRawFrames(t *testing.T) {
 	}
 }
 
-// 空 data 行、`:` 开头的注释行（keep-alive）、以及 `event:` 行都不产 native 帧。
-//
-// 口径是「每条 data 行一帧」：有载荷的行一帧不多一帧不少，没有载荷的行
-// （空 data、注释、event:）一条都不产。空帧到调用方会被渲染成 `data: ` 加一个
-// 空行——一个空数据帧，客户端可能判为协议错误，至少会多收一帧。
-func TestNativeStreamSkipsEmptyAndNonDataLines(t *testing.T) {
+// 块边界 = 空行分隔的位置。native 帧逐字节等于对应那一段原文：块内的
+// `event:` 行、注释行、空 `data:` 行、以及同块内的多行 `data:` 都原样带着走，
+// 结尾空行不带；连续空行形成的空块不发帧。
+func TestNativeStreamBlocksMatchUpstream(t *testing.T) {
 	const sse = `event: message_start
 data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":null,"usage":{"input_tokens":12,"output_tokens":1}}}
 
@@ -600,12 +611,16 @@ data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"
 event: ping
 data: {"type":"ping"}
 
-data:
+
+: keep-alive
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}
+: 同一块里的注释行也属于这一块
 
-:
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}
+data:
 
 event: message_stop
 data: {"type":"message_stop"}
@@ -625,33 +640,270 @@ data: {"type":"message_stop"}
 		if ev.Kind != "native" {
 			continue
 		}
-		if len(ev.Frame) == 0 {
-			t.Errorf("产出了空载荷的 native 帧")
-		}
 		frames = append(frames, string(ev.Frame))
 	}
 
-	want := sseDataPayloads(sse)
-	if len(want) != 4 {
-		t.Fatalf("这份流里有载荷的 data 行应有 4 条，夹具是 %d 条", len(want))
+	want := sseBlocks(sse)
+	if len(want) != 7 {
+		t.Fatalf("这份流应有 7 个非空块，夹具切出 %d 个：%q", len(want), want)
 	}
 	if len(frames) != len(want) {
-		t.Fatalf("native 帧 %d 条，期望 %d 条（= 有载荷的 data 行数）：%q",
-			len(frames), len(want), frames)
+		t.Fatalf("native 帧 %d 条，期望 %d 条（= 非空块数）：\n%q", len(frames), len(want), frames)
 	}
 	for i := range want {
 		if frames[i] != want[i] {
-			t.Errorf("第 %d 帧载荷不等于原文 data 行：\n得到 %s\n期望 %s", i, frames[i], want[i])
+			t.Errorf("第 %d 帧不等于原文那一块：\n得到 %q\n期望 %q", i, frames[i], want[i])
 		}
 	}
 
-	// event: 行本身不产帧：帧的条数已经证明这一点（有 4 条 event: 行而帧只有
-	// 4 条有载荷的 data 行），这里再按内容点名一次，免得以后有人把 event: 行
-	// 也发成帧时，条数恰好对上而看不出来。
-	for _, f := range frames {
-		if strings.HasPrefix(f, "event:") || strings.HasPrefix(f, "message_start\n") {
-			t.Errorf("event: 行被当成载荷发了: %q", f)
+	// 点名三处容易退化的边界，读失败时能直接看出是哪一条：
+	// 1. 只含注释行的块照样发帧，且块内容就是那行注释；
+	if frames[1] != ": ping" {
+		t.Errorf("注释块 = %q，期望 %q", frames[1], ": ping")
+	}
+	// 2. event: 行与 data: 行在同一条帧里（按行发帧时它们会被拆开）；
+	if frames[2] != `event: ping`+"\n"+`data: {"type":"ping"}` {
+		t.Errorf("event+data 块 = %q", frames[2])
+	}
+	// 3. 空 data 行与别的行同块时随块原样带走，不单独成帧也不被丢弃。
+	if !strings.Contains(frames[5], "\ndata:") || !strings.HasSuffix(frames[5], "\ndata:") {
+		t.Errorf("含空 data 行的块 = %q，期望它以那条空 data 行结尾", frames[5])
+	}
+}
+
+// [DONE] 块照发 native 帧，归一化的 done 事件也照发一条：前者是调用方要的
+// 原始终止符，后者是结算与快照要的结束标记。
+func TestNativeStreamEmitsFrameForDoneBlock(t *testing.T) {
+	const sse = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}
+
+data: [DONE]
+`
+
+	req := &channel.Request{
+		Model:      "m",
+		MaxTokens:  64,
+		Stream:     true,
+		Protocol:   channel.ProtocolAnthropic,
+		NativeBody: []byte(nativeRequestBody),
+	}
+	events := collectStream(t, req, sse)
+
+	var frames []string
+	var doneCount int
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, ev.Kind)
+		switch ev.Kind {
+		case "native":
+			frames = append(frames, string(ev.Frame))
+		case "done":
+			doneCount++
 		}
+	}
+
+	if len(frames) != 2 {
+		t.Fatalf("native 帧 %d 条，期望 2 条（message_start 块与 [DONE] 块）：%q", len(frames), frames)
+	}
+	if frames[1] != "data: [DONE]" {
+		t.Errorf("[DONE] 块的帧 = %q，期望 %q", frames[1], "data: [DONE]")
+	}
+	if doneCount != 1 {
+		t.Errorf("done 事件 %d 条，期望 1 条", doneCount)
+	}
+	// 顺序：最后一条 native 帧（[DONE] 那一块）在 done 之前。
+	lastNative := indexOf(kinds, "native")
+	for i, k := range kinds {
+		if k == "native" {
+			lastNative = i
+		}
+	}
+	if d := indexOf(kinds, "done"); lastNative < 0 || d < 0 || lastNative > d {
+		t.Errorf("[DONE] 的帧应先于 done 事件: %v", kinds)
+	}
+}
+
+// return 之前必须把攒到的块发出去：message_stop 与 error 两个分支都是
+// 「产出收尾事件之后立刻 return」，那一块的帧不能凭空丢。
+func TestNativeStreamFlushesBlockBeforeReturn(t *testing.T) {
+	t.Run("message_stop", func(t *testing.T) {
+		const sse = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`
+		req := &channel.Request{
+			Model:      "m",
+			MaxTokens:  64,
+			Stream:     true,
+			Protocol:   channel.ProtocolAnthropic,
+			NativeBody: []byte(nativeRequestBody),
+		}
+		var frames []string
+		var kinds []string
+		for _, ev := range collectStream(t, req, sse) {
+			kinds = append(kinds, ev.Kind)
+			if ev.Kind == "native" {
+				frames = append(frames, string(ev.Frame))
+			}
+		}
+		if len(frames) != 2 {
+			t.Fatalf("native 帧 %d 条，期望 2 条（message_stop 那一块不能因 return 丢掉）：%q", len(frames), frames)
+		}
+		if !strings.Contains(frames[len(frames)-1], `"message_stop"`) {
+			t.Errorf("最后一帧不是 message_stop 那一块：%q", frames[len(frames)-1])
+		}
+		// 帧先于它产出的 usage 与 done。
+		lastNative := -1
+		for i, k := range kinds {
+			if k == "native" {
+				lastNative = i
+			}
+		}
+		if u := indexOf(kinds, "usage"); u < 0 || lastNative > u {
+			t.Errorf("message_stop 的帧应先于 usage/done: %v", kinds)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		const sse = `event: error
+data: {"type":"error","error":{"type":"overloaded_error","message":"过载了"}}
+`
+		req := &channel.Request{
+			Model:      "m",
+			MaxTokens:  64,
+			Stream:     true,
+			Protocol:   channel.ProtocolAnthropic,
+			NativeBody: []byte(nativeRequestBody),
+		}
+		var frames []string
+		var kinds []string
+		for _, ev := range collectStream(t, req, sse) {
+			kinds = append(kinds, ev.Kind)
+			if ev.Kind == "native" {
+				frames = append(frames, string(ev.Frame))
+			}
+		}
+		if len(frames) != 1 {
+			t.Fatalf("native 帧 %d 条，期望 1 条（error 那一块不能因 return 丢掉）：%q", len(frames), frames)
+		}
+		if !strings.HasPrefix(frames[0], "event: error\n") {
+			t.Errorf("error 块 = %q", frames[0])
+		}
+		if indexOf(kinds, "error") < 0 {
+			t.Errorf("error 事件丢了: %v", kinds)
+		}
+	})
+}
+
+// 每条 native 帧都在由它解析出的归一化事件之前。
+//
+// 用一条块的产出各不相同的小流把**整条序列**钉住：有的块产一条事件
+// （message_start 产 usage_input）、有的块产两条（message_stop 产 usage 与
+// done）、有的块一条都不产（ping）。只断言「帧在事件之前」的话，「先把所有帧
+// 发完再逐块解析」这个错误顺序也能过——那种序列里帧同样在事件之前。
+func TestNativeStreamFramePrecedesItsEvents(t *testing.T) {
+	const sse = `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":11}}}
+
+event: ping
+data: {"type":"ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`
+	req := &channel.Request{
+		Model:      "m",
+		MaxTokens:  64,
+		Stream:     true,
+		Protocol:   channel.ProtocolAnthropic,
+		NativeBody: []byte(nativeRequestBody),
+	}
+
+	var kinds []string
+	for _, ev := range collectStream(t, req, sse) {
+		kinds = append(kinds, ev.Kind)
+	}
+
+	// start 是 pumpResponse 在流最前面发的，不属于任何块。
+	want := []string{
+		"start",
+		"native", "usage_input", // message_start 块
+		"native",          // ping 块：不产事件
+		"native", "delta", // 第一条正文分片
+		"native", "delta", // 第二条正文分片
+		"native",                  // message_delta 块：只累计，不产事件
+		"native", "usage", "done", // message_stop 块：先帧，再 usage 与 done
+	}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Errorf("事件序列不对：\n得到 %v\n期望 %v", kinds, want)
+	}
+}
+
+// event: 字段按事件（块）累积，不跨块沿用。
+//
+// 两条块的载荷都没有 type 字段——那才会走到 kind = eventName 那条兜底。
+// 第一块的 event: 行给出 content_block_delta，产出一条 delta；第二块没有
+// event: 行，块级事件名已重置为空串，兜底也拿不到名字，于是落到「不认识」
+// 那一支被忽略。把事件名改回跨块沿用时，第二块会重新产出 delta，这条用例红。
+//
+// 两种分支（直通 / 枢纽）都要跑：这条判据属于解析，与发不发 native 帧无关。
+func TestNativeEventNameDoesNotLeakAcrossBlocks(t *testing.T) {
+	const sse = `event: content_block_delta
+data: {"index":0,"delta":{"type":"text_delta","text":"你"}}
+
+data: {"index":0,"delta":{"type":"text_delta","text":"好"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`
+
+	for _, native := range []bool{true, false} {
+		name := "hub"
+		if native {
+			name = "native"
+		}
+		t.Run(name, func(t *testing.T) {
+			req := &channel.Request{Model: "m", MaxTokens: 8, Stream: true, Protocol: channel.ProtocolAnthropic}
+			if native {
+				req.NativeBody = []byte(nativeRequestBody)
+			}
+
+			var texts []string
+			var kinds []string
+			for _, ev := range collectStream(t, req, sse) {
+				kinds = append(kinds, ev.Kind)
+				if ev.Kind == "delta" {
+					texts = append(texts, ev.Text)
+				}
+			}
+
+			// 第一块的事件名来自它自己的 event: 行。
+			if len(texts) != 1 || texts[0] != "你" {
+				t.Fatalf("delta 文本 = %q，期望恰好一条「你」（第二块的事件名不该沿用第一块）", texts)
+			}
+			// 第二块不产 delta：这一条同时挡住「事件名跨块沿用」那条回归。
+			if strings.Contains(strings.Join(texts, ""), "好") {
+				t.Errorf("第二块产出了 delta：事件名跨块沿用了（%v）", texts)
+			}
+			// 归一化事件除这条 delta 外仍是 start 与 done；块的帧在直通时才出现。
+			if indexOf(kinds, "done") < 0 {
+				t.Errorf("done 丢了: %v", kinds)
+			}
+			if !native && indexOf(kinds, "native") >= 0 {
+				t.Errorf("枢纽分支不该有 native 帧: %v", kinds)
+			}
+		})
 	}
 }
 

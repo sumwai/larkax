@@ -477,8 +477,8 @@ func collectEvents(t *testing.T, events <-chan channel.StreamEvent) []channel.St
 	return out
 }
 
-// 流式直通：每个 data: 载荷发一条 native 帧，[DONE] 不发；归一化事件一条
-// 不少，且 native 帧排在对应归一化事件之前。
+// 流式直通：每个非空 SSE 块发一条 native 帧（[DONE] 块也发），归一化事件
+// 一条不少，且 native 帧排在由它解析出的归一化事件之前。
 func TestNativeStreamEmitsFrames(t *testing.T) {
 	srv := streamServer(t)
 	defer srv.Close()
@@ -495,28 +495,44 @@ func TestNativeStreamEmitsFrames(t *testing.T) {
 			frames = append(frames, ev)
 		}
 	}
-	// [DONE] 不是 JSON 载荷，渲染层自己写终止帧；发了会变成两个终止符。
-	if len(frames) != len(nativeStreamFrames) {
-		t.Fatalf("native 帧数 = %d，期望 %d（[DONE] 不发）", len(frames), len(nativeStreamFrames))
+	// 块数 = 5 个数据块 + 1 个 [DONE] 块。
+	if len(frames) != len(nativeStreamFrames)+1 {
+		t.Fatalf("native 帧数 = %d，期望 %d（数据块 %d 个 + [DONE] 块）",
+			len(frames), len(nativeStreamFrames)+1, len(nativeStreamFrames))
 	}
-	for i, ev := range frames {
-		if ev.NativeFormat != channel.ProtocolOpenAI {
+	for i, frame := range nativeStreamFrames {
+		// 帧是块的原始字节，含 `data: ` 前缀：调用方原样写出即可。
+		want := "data: " + frame
+		if ev := frames[i]; ev.NativeFormat != channel.ProtocolOpenAI {
 			t.Errorf("第 %d 帧 NativeFormat = %q", i, ev.NativeFormat)
 		}
-		if string(ev.Frame) != nativeStreamFrames[i] {
-			t.Errorf("第 %d 帧载荷与原文不符:\n  收到 %s\n  原文 %s", i, ev.Frame, nativeStreamFrames[i])
+		if string(frames[i].Frame) != want {
+			t.Errorf("第 %d 帧与原文块不符:\n  收到 %q\n  原文 %q", i, frames[i].Frame, want)
 		}
-		if ev.Frame == nil || strings.Contains(string(ev.Frame), "data:") {
-			t.Errorf("第 %d 帧不该带 data: 前缀", i)
+	}
+	// [DONE] 块的终止符必须原生直达：调用方拿到的就是上游那一行。
+	if last := string(frames[len(frames)-1].Frame); last != "data: [DONE]" {
+		t.Errorf("最后一帧 = %q，期望 [DONE] 块", last)
+	}
+	for i, ev := range frames {
+		if strings.HasSuffix(string(ev.Frame), "\n") {
+			t.Errorf("第 %d 帧结尾带了换行，块的末尾空行不属于块本身", i)
 		}
 	}
 
-	// 顺序固定：native 帧之后紧跟它的归一化事件（没有归一化事件的分片除外）。
+	// 顺序固定：每一块的 native 帧排在它解析出的归一化事件之前。
 	kinds := make([]string, len(got))
 	for i, ev := range got {
 		kinds[i] = ev.Kind
 	}
-	wantOrder := []string{"native", "native", "delta", "native", "tool_use", "native", "native", "usage", "done"}
+	wantOrder := []string{
+		"native",
+		"native", "delta",
+		"native", "tool_use",
+		"native",
+		"native", "usage",
+		"native", "done",
+	}
 	var order []string
 	for _, k := range kinds {
 		if k != "start" {
@@ -554,6 +570,185 @@ func TestNativeStreamEmitsFrames(t *testing.T) {
 	}
 }
 
+// 块边界：空行之间的一整块原样成帧，块内的注释行、event: 行与多行 data:
+// 都跟着走；空行本身不属于块。
+func TestNativeStreamBlockBoundaries(t *testing.T) {
+	const world = `{"choices":[{"index":0,"delta":{"content":"x"}}]}`
+	blocks := []string{
+		`: keep-alive`,
+		"event: message\n" +
+			`data: {"a":1}` + "\n" +
+			`data: {"b":2}`,
+		`data:`,
+		"data: " + world,
+		`data: [DONE]`,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for i, block := range blocks {
+			_, _ = io.WriteString(w, block+"\n\n")
+			// 块之间多出来的空行只形成空块，不该多发一帧。放在中间而不是
+			// 流末尾：末尾的空行在 [DONE] 那一块之后就 return 了，扫不到。
+			if i < len(blocks)-1 {
+				_, _ = io.WriteString(w, "\n\n\n")
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), nativeRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	var frames [][]byte
+	var text strings.Builder
+	var done bool
+	for _, ev := range collectEvents(t, events) {
+		switch ev.Kind {
+		case "native":
+			frames = append(frames, ev.Frame)
+		case "delta":
+			text.WriteString(ev.Text)
+		case "done":
+			done = true
+		}
+	}
+	if len(frames) != len(blocks) {
+		t.Fatalf("native 帧数 = %d，期望 %d（非空块数）", len(frames), len(blocks))
+	}
+	for i, want := range blocks {
+		if string(frames[i]) != want {
+			t.Errorf("第 %d 帧:\n  收到 %q\n  期望 %q", i, frames[i], want)
+		}
+	}
+	// 上面那一轮逐字节相等已经钉住了两件事：块内的 `event:` 行与注释行跟着
+	// 块一起走，多行 data: 在帧里以 \n 相连（不是各自成帧、也不是拼成一行）。
+	if strings.Count(string(frames[1]), "\n") != 2 {
+		t.Errorf("第 1 帧的块内行数不对: %q", frames[1])
+	}
+	// 空 `data:` 行是块的一部分，随块原样发出，不单独跳过。
+	if string(frames[2]) != "data:" {
+		t.Errorf("空 data 行那一块 = %q", frames[2])
+	}
+	if text.String() != "x" {
+		t.Errorf("拼出的文本 = %q", text.String())
+	}
+	if !done {
+		t.Error("[DONE] 块应照旧发归一化 done 事件")
+	}
+}
+
+// [DONE] 块发 native 帧，归一化 done 事件照发：终止符要原生直达，而计费层
+// 仍然需要那一条 done。
+func TestNativeStreamDoneBlockEmitsFrame(t *testing.T) {
+	srv := streamServer(t)
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), nativeRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	var doneFrames int
+	var doneEvents int
+	for _, ev := range collectEvents(t, events) {
+		switch ev.Kind {
+		case "native":
+			if string(ev.Frame) == "data: [DONE]" {
+				doneFrames++
+			}
+		case "done":
+			doneEvents++
+		}
+	}
+	if doneFrames != 1 {
+		t.Errorf("[DONE] 块的 native 帧数 = %d，期望 1", doneFrames)
+	}
+	if doneEvents != 1 {
+		t.Errorf("归一化 done 事件数 = %d，期望 1", doneEvents)
+	}
+}
+
+// 每一块的 native 帧排在它解析出的归一化事件之前：调用方按接收顺序拼接，
+// 先看到原文那一块才可能与归一化事件对得上。
+func TestNativeStreamBlockPrecedesEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"choices":[{"index":0,"delta":{"content":"a"}}]}`,
+			`data: {"choices":[{"index":0,"delta":{"content":"b"}}]}`,
+			`data: [DONE]`,
+		} {
+			_, _ = io.WriteString(w, line+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), nativeRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+	var order []string
+	for _, ev := range collectEvents(t, events) {
+		if ev.Kind != "start" {
+			order = append(order, ev.Kind)
+		}
+	}
+	want := []string{"native", "delta", "native", "delta", "native", "done"}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("事件顺序 = %v，期望 %v", order, want)
+	}
+}
+
+// 最后一块没有空行收尾（上游写完 [DONE] 就关连接）时也要发出去：不发的话
+// 那一块连同它的结束语义一起凭空丢掉。
+func TestNativeStreamFlushesFinalBlock(t *testing.T) {
+	last := `data: {"choices":[{"index":0,"delta":{"content":"z"},"finish_reason":"stop"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// 整个流没有结尾空行。
+		_, _ = io.WriteString(w, last+"\n"+"data: [DONE]")
+	}))
+	defer srv.Close()
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), nativeRequest())
+	if err != nil {
+		t.Fatalf("出错: %v", err)
+	}
+
+	var frames [][]byte
+	var text, finish string
+	for _, ev := range collectEvents(t, events) {
+		switch ev.Kind {
+		case "native":
+			frames = append(frames, ev.Frame)
+		case "delta":
+			text += ev.Text
+		case "done":
+			finish = ev.FinishReason
+		}
+	}
+	if len(frames) != 1 {
+		t.Fatalf("native 帧数 = %d，期望 1（最后一块没有空行收尾也要发）", len(frames))
+	}
+	want := last + "\n" + "data: [DONE]"
+	if string(frames[0]) != want {
+		t.Errorf("最后一帧:\n  收到 %q\n  期望 %q", frames[0], want)
+	}
+	if text != "z" || finish != "stop" {
+		t.Errorf("归一化事件 = %q / %q，期望 z / stop", text, finish)
+	}
+}
+
 // 枢纽流式：同一串上游分片，一条 native 帧都不发。
 func TestHubStreamHasNoNativeFrames(t *testing.T) {
 	srv := streamServer(t)
@@ -572,32 +767,26 @@ func TestHubStreamHasNoNativeFrames(t *testing.T) {
 	}
 }
 
-// 只有真有载荷的 data: 行才产 native 帧：心跳注释、空 `data:` 行都不产。
-//
-// 空 `data:` 这一格是「多一行是客户端收到空帧」的边界：TrimPrefix 之后载荷
-// 是空串，照发就写成一个空数据帧，有些 SDK 判为协议错误。
-func TestNativeStreamSkipsFramelessLines(t *testing.T) {
+// 块内的噪音行（心跳注释、只有前缀的空 data 行）随块原样发出，但不产归一化
+// 事件：调用方要看到与上游一致的流，而解析只要认得 data: 行就够了。
+func TestNativeStreamCarriesNoiseInBlocks(t *testing.T) {
 	payloads := []string{
 		`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"a"}}]}`,
 		`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"b"}}]}`,
 		`{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 	}
+	blocks := []string{
+		": keep-alive\n" + "data: " + payloads[0],
+		"data:",
+		": ping\n" + "data: " + payloads[1],
+		"data: " + payloads[2],
+		"data: [DONE]",
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		lines := []string{
-			": keep-alive",
-			"data: " + payloads[0],
-			"",
-			"data:",
-			"data:    ",
-			`data: ` + payloads[1],
-			": ping",
-			"data: " + payloads[2],
-			"data: [DONE]",
-		}
-		for _, line := range lines {
-			_, _ = io.WriteString(w, line+"\n\n")
+		for _, block := range blocks {
+			_, _ = io.WriteString(w, block+"\n\n")
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -620,20 +809,16 @@ func TestNativeStreamSkipsFramelessLines(t *testing.T) {
 			text.WriteString(ev.Text)
 		}
 	}
-	if len(frames) != len(payloads) {
-		t.Fatalf("native 帧数 = %d，期望 %d（注释行、空 data 行、[DONE] 都不发）",
-			len(frames), len(payloads))
+	if len(frames) != len(blocks) {
+		t.Fatalf("native 帧数 = %d，期望 %d（非空块数）", len(frames), len(blocks))
 	}
-	for i, ev := range frames {
-		if string(ev.Frame) != payloads[i] {
-			t.Errorf("第 %d 帧载荷 =\n  %s\n期望\n  %s", i, ev.Frame, payloads[i])
-		}
-		if len(ev.Frame) == 0 {
-			t.Errorf("第 %d 帧是空帧", i)
+	for i, want := range blocks {
+		if string(frames[i].Frame) != want {
+			t.Errorf("第 %d 帧 =\n  %q\n期望\n  %q", i, frames[i].Frame, want)
 		}
 	}
 	if text.String() != "ab" {
-		t.Errorf("拼出的文本 = %q，期望 ab", text.String())
+		t.Errorf("拼出的文本 = %q，期望 ab（噪音行不该打断解析）", text.String())
 	}
 }
 

@@ -488,16 +488,6 @@ func TestChatNativeRawKeepsUnknownFields(t *testing.T) {
 	})
 }
 
-// dataPayloadOf 取出一行 SSE 帧里的 `data:` 载荷（去掉前缀与首尾空白）。
-func dataPayloadOf(t *testing.T, line string) string {
-	t.Helper()
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "data:") {
-		t.Fatalf("这一行不是 data: 行：%q", line)
-	}
-	return strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-}
-
 // nativeFrames 从事件流里挑出原生帧，并逐条核对协议标记。
 func nativeFrames(t *testing.T, events []channel.StreamEvent) [][]byte {
 	t.Helper()
@@ -515,10 +505,11 @@ func nativeFrames(t *testing.T, events []channel.StreamEvent) [][]byte {
 }
 
 // TestChatStreamNativeFramesMatchUpstream 把真实上游序列整条喂进直通分支：
-// 每一帧原生载荷必须与上游那一行 `data:` 逐字一致，而归一化事件一条不少。
+// 原生帧数等于块数，每帧逐字节等于对应那一块。
 //
-// 夹具里既有 `event:` 行也有 `data:` 行：这个包跳过前者（事件名在载荷的 type
-// 里），所以原生帧只能由后者的载荷产生，数量是帧数而不是行数的两倍。
+// 夹具的每一项本来就是「event: 行 + data: 行」组成的一块，所以期望值就是夹具
+// 本身。块模型下帧里必须带着 `event:` 行——它属于上游那一块，调用方要的是
+// 逐字节一致的那一段，不是剥掉结构之后的载荷。
 func TestChatStreamNativeFramesMatchUpstream(t *testing.T) {
 	srv := sseServer(t, realUpstreamStreamFrames...)
 	req := nativeRequest([]byte(nativeResponsesBody))
@@ -530,20 +521,11 @@ func TestChatStreamNativeFramesMatchUpstream(t *testing.T) {
 	}
 	collected := collect(t, events)
 
-	var wantPayloads []string
-	for _, frame := range realUpstreamStreamFrames {
-		for _, line := range strings.Split(frame, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "data:") {
-				wantPayloads = append(wantPayloads, dataPayloadOf(t, line))
-			}
-		}
-	}
-
 	frames := nativeFrames(t, collected)
-	if len(frames) != len(wantPayloads) {
-		t.Fatalf("原生帧 %d 条，上游 data: 行 %d 条", len(frames), len(wantPayloads))
+	if len(frames) != len(realUpstreamStreamFrames) {
+		t.Fatalf("原生帧 %d 条，块 %d 块", len(frames), len(realUpstreamStreamFrames))
 	}
-	for i, want := range wantPayloads {
+	for i, want := range realUpstreamStreamFrames {
 		if string(frames[i]) != want {
 			t.Errorf("第 %d 条原生帧 =\n  %s\n期望\n  %s", i+1, frames[i], want)
 		}
@@ -688,25 +670,29 @@ func TestChatStreamNativeKeepsTextFallback(t *testing.T) {
 		t.Errorf("done 事件 %d 条", dones)
 	}
 
-	// 原生帧与 payload 逐字对应，一条不多一条不少。
+	// 原生帧与块逐字对应，一条不多一条不少。两块各自只有一行 data。
 	frames := nativeFrames(t, collected)
-	if len(frames) != len(payloads) {
-		t.Fatalf("原生帧 %d 条，data: 行 %d 条", len(frames), len(payloads))
+	want := []string{"data: " + payloads[0], "data: " + payloads[1]}
+	if len(frames) != len(want) {
+		t.Fatalf("原生帧 %d 条，块 %d 块", len(frames), len(want))
 	}
-	for i := range payloads {
-		if string(frames[i]) != payloads[i] {
-			t.Errorf("第 %d 条原生帧 = %s，期望 %s", i+1, frames[i], payloads[i])
+	for i := range want {
+		if string(frames[i]) != want[i] {
+			t.Errorf("第 %d 条原生帧 = %s，期望 %s", i+1, frames[i], want[i])
 		}
 	}
 }
 
-// TestChatStreamNativeSkipsDoneSentinel 钉住 `[DONE]` 不发原生帧。
+// TestChatStreamNativeDoneBlockIsFramed 钉住 `[DONE]` 块照发原生帧，且归一化
+// done 仍是一条。
 //
-// 它不是 JSON 载荷，而调用方那侧的渲染层自己会写终止帧；把它原样转出去会让
-// 客户端收到两个终止符。
-func TestChatStreamNativeSkipsDoneSentinel(t *testing.T) {
+// 客户端那侧的终止符必须原生字节直达：帧由原样写出，不再经渲染层重新编码，
+// 所以这里吞掉它等于让调用方收不到结束标记。两条同时成立才算对——只发帧而
+// 丢了 done，计费与收尾会缺一条；只发 done 而丢了帧，客户端拿不到终止符。
+func TestChatStreamNativeDoneBlockIsFramed(t *testing.T) {
+	delta := `{"type":"response.output_text.delta","sequence_number":0,"output_index":0,"content_index":0,"delta":"在"}`
 	srv := sseServer(t,
-		`data: {"type":"response.output_text.delta","sequence_number":0,"output_index":0,"content_index":0,"delta":"在"}`,
+		"data: "+delta,
 		`data: [DONE]`,
 	)
 	req := nativeRequest([]byte(nativeResponsesBody))
@@ -718,8 +704,16 @@ func TestChatStreamNativeSkipsDoneSentinel(t *testing.T) {
 	}
 	collected := collect(t, events)
 
-	if frames := nativeFrames(t, collected); len(frames) != 1 {
-		t.Errorf("原生帧 %d 条，期望 1 条（[DONE] 不算）", len(frames))
+	// 两块：delta 一块、[DONE] 一块。
+	frames := nativeFrames(t, collected)
+	want := []string{"data: " + delta, "data: [DONE]"}
+	if len(frames) != len(want) {
+		t.Fatalf("原生帧 %d 条，期望 %d 条（[DONE] 块要发）", len(frames), len(want))
+	}
+	for i := range want {
+		if string(frames[i]) != want[i] {
+			t.Errorf("第 %d 条原生帧 = %q，期望 %q", i+1, frames[i], want[i])
+		}
 	}
 	dones := 0
 	for _, ev := range collected {
@@ -774,40 +768,37 @@ func TestChatNativeHeadersAndUsageDeclaration(t *testing.T) {
 	}
 }
 
-// TestChatStreamNativeSkipsNonPayloadLines 钉住「哪些行不产原生帧」。
+// TestChatStreamNativeBlockBoundaries 钉住块模型的三条判据：块边界、块内容
+// 逐字节、以及不产归一化事件的块照样发帧。
 //
-// 一条流里同时放四种行：keep-alive 注释、空 data 行、event: 行、正常 data 行。
-// 判据是「原生帧数 == 正常 data 行数」——多一帧就是客户端多收一个空帧，少一帧
-// 就是丢了一段内容，两者都要红。
+// 一条流里同时放：keep-alive 注释行、连续空行、`data:` 后面什么都没有的空
+// data 行、`event:` 行、同一块内两行 `data:`。判据是「原生帧数 == 非空块数」，
+// 且每帧逐字节等于对应那一块（含 event: 与注释行、行间 \n 原样、末尾不带 \n）。
 //
-// 空 data 行单独列出来：`data:` 后面什么都没有时 TrimPrefix 得到空串，不挡它
-// 就会发出一条 `Frame: []byte("")`，渲染层把它写成 `data: ` 的空帧。
-//
-// 计帧口径是**每条 `data:` 行一帧**：这个包跳过 `event:` 行（事件名在载荷的
-// type 里），所以 event 行本身不产帧，只有它下面那条 data: 产。
-func TestChatStreamNativeSkipsNonPayloadLines(t *testing.T) {
-	normal := []string{
-		`{"type":"response.output_text.delta","sequence_number":0,"output_index":0,"content_index":0,"delta":"你"}`,
-		`{"type":"response.output_text.delta","sequence_number":1,"output_index":0,"content_index":0,"delta":"好"}`,
-		`{"type":"response.completed","sequence_number":2,"response":{"id":"resp_placeholder",` +
-			`"model":"upstream-model","status":"completed","output":[],` +
-			`"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`,
-	}
+// 多一帧就是客户端多收一个空帧，少一帧就是丢了一段内容，两者都要红。空 data
+// 行在这套模型下不再单独跳过：它是块的一部分，随整块原样发出。
+func TestChatStreamNativeBlockBoundaries(t *testing.T) {
+	deltaA := `{"type":"response.output_text.delta","sequence_number":0,"output_index":0,"content_index":0,"delta":"你"}`
+	deltaB := `{"type":"response.output_text.delta","sequence_number":1,"output_index":0,"content_index":0,"delta":"好"}`
+	completed := `{"type":"response.completed","sequence_number":2,"response":{"id":"resp_placeholder",` +
+		`"model":"upstream-model","status":"completed","output":[],` +
+		`"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`
 
-	srv := sseServer(t,
-		": keep-alive",
-		"",                                  // 纯空行，帧分隔
-		"data:",                             // 空 data 行：没有载荷可转发
-		"event: response.output_text.delta", // event 行：不产帧
-		"data: "+normal[0],
-		"data:", // 中间再放一条空的，确认它不会截断后面的帧
-		"event: response.output_text.delta",
-		"data: "+normal[1],
-		": ping",
-		"data:", // 终态之前的空帧同样不发
-		"event: response.completed",
-		"data: "+normal[2],
-	)
+	// sseServer 把每个元素原样写出、后面补一个空行，所以一个元素就是一块：
+	// 多行块写成一个带 \n 的字符串，元素之间给 "" 就形成连续空行（空块）。
+	blocks := []string{
+		// 块 1：注释行 + event: 行 + 一行 data。
+		": keep-alive\nevent: response.output_text.delta\ndata: " + deltaA,
+		"", // 连续空行：空块不发
+		"",
+		// 块 2：空 data 行与一行 data 在同一块里。
+		"data:\nevent: response.output_text.delta\ndata: " + deltaB,
+		// 块 3：同一块内两行 data（SSE 允许，按规范用换行拼接）。
+		"data: " + deltaB + "\ndata: " + deltaB,
+		// 块 4：注释行 + 终态。
+		": ping\nevent: response.completed\ndata: " + completed,
+	}
+	srv := sseServer(t, blocks...)
 
 	req := nativeRequest([]byte(nativeResponsesBody))
 	req.Stream = true
@@ -817,21 +808,28 @@ func TestChatStreamNativeSkipsNonPayloadLines(t *testing.T) {
 	}
 	collected := collect(t, events)
 
-	frames := nativeFrames(t, collected)
-	if len(frames) != len(normal) {
-		t.Fatalf("原生帧 %d 条，正常 data 行 %d 条", len(frames), len(normal))
+	want := []string{
+		blocks[0], // 注释 + event: + data
+		blocks[3], // 空 data 行 + event: + data
+		blocks[4], // 块内两行 data
+		blocks[5], // 注释 + event: + 终态
 	}
-	for i, want := range normal {
-		if string(frames[i]) != want {
-			t.Errorf("第 %d 条原生帧 =\n  %s\n期望\n  %s", i+1, frames[i], want)
+
+	frames := nativeFrames(t, collected)
+	if len(frames) != len(want) {
+		t.Fatalf("原生帧 %d 条，非空块 %d 块：\n%q", len(frames), len(want), frames)
+	}
+	for i := range want {
+		if string(frames[i]) != want[i] {
+			t.Errorf("第 %d 条原生帧 =\n  %q\n期望\n  %q", i+1, frames[i], want[i])
 		}
 		if len(frames[i]) == 0 {
 			t.Errorf("第 %d 条原生帧是空的", i+1)
 		}
 	}
 
-	// 归一化事件照旧：两条 delta 与一次 done，证明空行与注释行只是不产原生帧，
-	// 没有顺带打断正文。
+	// 归一化事件照旧：四行 data 都是正文增量，终态那一块给 done。注释行、
+	// event: 行、空 data 行都不产事件，也不打断正文。
 	var text strings.Builder
 	dones := 0
 	for _, ev := range collected {
@@ -842,11 +840,60 @@ func TestChatStreamNativeSkipsNonPayloadLines(t *testing.T) {
 			dones++
 		}
 	}
-	if text.String() != "你好" {
-		t.Errorf("正文 = %q，期望「你好」", text.String())
+	if text.String() != "你好好好" {
+		t.Errorf("正文 = %q，期望「你好好好」", text.String())
 	}
 	if dones != 1 {
 		t.Errorf("done 事件 %d 条", dones)
+	}
+}
+
+// TestChatStreamNativeFlushesBeforeReturn 钉住「`return` 之前那一块的帧没丢」。
+//
+// 终态事件那一支解析完之后直接返回（usage 与 done 已经发出去）。如果攒着的块
+// 还没发就返回，调用方会缺最后一块——而最后一块恰恰是终态，客户端据此判流
+// 正常结束。所以这里断言：最后一条原生帧就是终态那一块，且它排在 done 之前。
+func TestChatStreamNativeFlushesBeforeReturn(t *testing.T) {
+	completed := `{"type":"response.completed","sequence_number":1,"response":{"id":"resp_placeholder",` +
+		`"model":"upstream-model","status":"completed","output":[],` +
+		`"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`
+	terminalBlock := "event: response.completed\ndata: " + completed
+
+	srv := sseServer(t,
+		"event: response.output_text.delta\ndata: "+
+			`{"type":"response.output_text.delta","sequence_number":0,"output_index":0,"content_index":0,"delta":"在"}`,
+		terminalBlock,
+	)
+	req := nativeRequest([]byte(nativeResponsesBody))
+	req.Stream = true
+
+	events, err := newAdapter().ChatStream(context.Background(), testChannel(srv.URL), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collected := collect(t, events)
+
+	lastNative, doneAt := -1, -1
+	for i, ev := range collected {
+		switch ev.Kind {
+		case "native":
+			lastNative = i
+		case "done":
+			doneAt = i
+		}
+	}
+	if doneAt < 0 {
+		t.Fatal("没有 done 事件")
+	}
+	if lastNative < 0 {
+		t.Fatal("一条原生帧都没有")
+	}
+	if lastNative > doneAt {
+		t.Errorf("最后一条原生帧在第 %d 条，done 在第 %d 条：帧必须排在由它解析出的事件之前",
+			lastNative, doneAt)
+	}
+	if got := string(collected[lastNative].Frame); got != terminalBlock {
+		t.Errorf("最后一条原生帧 =\n  %q\n期望终态那一块\n  %q", got, terminalBlock)
 	}
 }
 
