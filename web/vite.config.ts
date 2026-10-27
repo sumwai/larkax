@@ -90,12 +90,16 @@ export default defineConfig(({ mode, command }) => {
       emptyOutDir: true,
       rollupOptions: {
         output: {
-          // 路由分包：consumer / merchant / admin 三块各自成 chunk，
-          // 避免单个入口把 19 个页面全部装进一个文件。
+          // 按目录分包：`src/pages/` 下的模块进 `app`，其余交给 rollup 按引用关系落块。
+          // 被页面引到的也进 `app`，所以 `app` 里大量是非页面模块：`react`、`react-router`、
+          // `@tanstack`、`@radix-ui`、`src/auth`、`src/i18n`、`src/components/ui` 等。
+          // `index` 只剩入口与只被入口引到的少数模块：`main`、`App`、`react-dom/client`、
+          // `ConsoleShell`、`MockBanner`、`ErrorBoundary`、`api/queries/client`。
+          // 两块首屏一起加载，这是缓存粒度的划分，不是按路由懒加载。
+          // 成员有变动时，用 `vite build --sourcemap` 看各 chunk 的 `sources` 复核一遍，别凭印象补。
           manualChunks(id: string) {
-            if (!id.includes('/src/pages/')) return undefined
-            if (id.includes('/pages/ops/') || id.includes('/pages/admin/')) return 'ops'
-            return 'app'
+            if (id.includes('/src/pages/')) return 'app'
+            return undefined
           },
         },
       },

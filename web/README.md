@@ -115,11 +115,12 @@ never changes what the server allows.
   `client.ts` is the fetch client (CSRF header on writes, same-origin
   credentials), `mock.ts` is the same-shaped fixture. Pages import `api` from
   `src/api/index.ts`; swapping the implementation is a one-line change there.
-- `src/styles/tokens.css` — design tokens. The visual reference is
-  <https://p.larkax.com/components.html>; components read tokens and never
-  hard-code colors.
-- `src/components/` — UI primitives (`ui.tsx`, `icons.tsx`), app shell, date
-  range picker, chart and code card.
+- `src/index.css` — design tokens and the Tailwind theme mapping: base colour
+  scales, semantic tokens, dark-mode overrides, spacing, radii and shadows.
+  Components take their colours from these tokens; a few still use raw `white`
+  utilities where the token set has no equivalent.
+- `src/components/` — `ConsoleShell` (top bar and nav), `ErrorBoundary`, the page
+  title helper, the mock-mode banner, and the `ui/` primitives.
 - `src/pages/` — one file per route.
 - `src/i18n/` — Chinese and English dictionaries; the browser language picks
   the default, and the settings page persists the choice.
