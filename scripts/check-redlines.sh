@@ -156,6 +156,16 @@ scan() {
     else
       subject=$frag
     fi
+    # 形态类模式带左边界（`(^|[^A-Za-z0-9])`），grep -o 会把那个前导字符
+    # 一起收进片段。若直接拿它喂 ALLOW，`$sk_live_…` 会命中变量引用规则
+    # `\$\{?[A-Za-z0-9_]*\}?` 而被放行——修误报引出漏报。
+    # 所以判放行前先剥掉**恰好一个**前导非字母数字字符（左边界带进来的那个），
+    # 不剥更多：`"${LARKAX_API_KEY}"` 的 `"` 是原文的、不是边界，多剥会让
+    # 变量引用规则匹配不上，反而把正常的占位符报成命中。
+    # 报出来的片段（`$line`）保持原样。
+    case "$subject" in
+      [^A-Za-z0-9]*) subject=${subject#?} ;;
+    esac
     grep -qiE "$ALLOW" <<<"$subject" && continue
     printf '%s\n' "$line"
   done <<< "$out"

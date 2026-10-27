@@ -153,6 +153,11 @@ expect_clean "单词中间的前缀形态不是密钥" '- [59](lessons/59-parall
 expect_clean "单词中间的 sk 形态" 'the disk-space-usage-line.md' 'sample.md'
 expect_hit "行首的密钥前缀仍命中" 'sk_live_abcdefghijklmnop' 'sample.go'
 expect_hit "引号后的密钥前缀仍命中" 'key = "rk_live_abcdefghijklmnop"' 'sample.go'
+# 左边界把前导字符一起带进了命中片段，若直接拿它喂 ALLOW，`$` 会命中
+# 变量引用规则 `\$\{?[A-Za-z0-9_]*\}?` 而被放行——修误报引出漏报。
+# 这条钉住「片段要先去掉边界字符再判放行」这个决定。
+expect_hit "变量引用形态的真密钥仍命中" 'STRIPE_SECRET=$sk_live_abcdefghijklmnop' '.env'
+expect_hit "花括号变量形态的真密钥仍命中" 'SECRET=${sk_live_abcdefghijklmnop}' '.env'
 
 # ── --all 必须覆盖尚未 add 的文件 ─────────────────────────────────────────
 #
