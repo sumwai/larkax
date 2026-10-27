@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/sumwai/larkax/internal/channel"
@@ -79,8 +80,36 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 		return nil, statusErr
 	}
 
+	// 直通时 Raw 要的是**上游原始响应体**，而解码器消费掉的那一份拿不回来，
+	// 所以直通先把整份读出来再解析；枢纽那条路保持原来的流式解码，不为一个
+	// 只在直通时用到的字节切面把整份响应体缓冲一遍。
+	//
+	// 读完之后 body 已空，上面的 Drain 无副作用。
+	native := a.nativeEligible(req)
 	var parsed claudeResponse
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
+	var respBody []byte
+	if native {
+		respBody, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         fmt.Errorf("读取上游响应失败: %w", err),
+			}
+		}
+		// 用解码器读那份已读出的字节而不是 json.Unmarshal：解码器容忍尾随
+		// 空白与尾随内容，与直接解码 resp.Body 的宽严完全一致——换成
+		// Unmarshal 会让「响应体后面多一个字节」从接受变成报错。
+		if decodeErr := json.NewDecoder(bytes.NewReader(respBody)).Decode(&parsed); decodeErr != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         fmt.Errorf("解析上游响应失败: %w", decodeErr),
+			}
+		}
+	} else if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
 		return nil, &channel.ErrUpstream{
 			StatusCode:  resp.StatusCode,
 			GotResponse: true,
@@ -120,6 +149,28 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 	// 状态码照实带出去：响应方向的快照要把「上游回了几号」单独记一列，
 	// 而它只在这里出现过一次（见 channel.Response.StatusCode）。
 	out.StatusCode = resp.StatusCode
+
+	// 直通时 Raw 用上游原始响应体，而不是 relay 编回来的那份：dto 不认识的
+	// 字段（usage.cache_creation.ephemeral_5m_input_tokens、container、
+	// stop_sequence 等）在枢纽那条路已经丢了，读 Raw 的一方要靠直通看到它们。
+	//
+	// 解析失败不回退到枢纽那一份：回退会让「直通的 Raw 少字段」变成静默的
+	// 行为差异，而调用方无从分辨这次到底是哪条路。用与解析 parsed 相同的
+	// 解码器读同一份字节：两者对尾随空白与尾随内容的宽严必须一致，换成
+	// json.Unmarshal 会让「响应体后面多一个字节」从接受变成可重试的错误，
+	// 而可重试意味着换一个候选渠道重发——同一笔钱付两次。
+	if native {
+		var raw map[string]any
+		if rawErr := json.NewDecoder(bytes.NewReader(respBody)).Decode(&raw); rawErr != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         fmt.Errorf("解析上游原始响应失败: %w", rawErr),
+			}
+		}
+		out.Raw = raw
+	}
 	return out, nil
 }
 
@@ -149,7 +200,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 	// 函数要先带着事件通道返回，响应体要活到调用方读完事件为止。
 	// 交给 pumpResponse 收尾，顺序仍是先排空、后关闭。
 	events := make(chan channel.StreamEvent)
-	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), events)
+	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), a.nativeEligible(req), events)
 	return events, nil
 }
 
@@ -158,7 +209,10 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 // 单独一个方法而不是写在 goroutine 的闭包里：响应体的收尾只在关闭点
 // 完整可见时才好核对，而闭包里的 resp.Body.Close() 会被静态检查当成
 // 「这个响应体没人关」。
-func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning bool, events chan channel.StreamEvent) {
+//
+// native 表示这次走了同协议直通：pump 额外把每一帧原始载荷发成 native
+// 事件。它是参数而不是 Adapter 上的字段——适配器不保存请求状态。
+func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning, native bool, events chan channel.StreamEvent) {
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
@@ -166,7 +220,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, complet
 	// 就结束，那时它是网关知道「上游回过一个响应」的唯一途径（见
 	// channel.StreamEvent.StatusCode）。
 	events <- channel.StreamEvent{Kind: "start", StatusCode: resp.StatusCode}
-	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, native, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -224,12 +278,23 @@ func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
 	return quota.State{}, channel.ErrUnsupported
 }
 
-// encodeRequest 把统一请求编码成 Anthropic Messages 的 JSON。
+// encodeRequest 把这次请求编码成要发出去的 Anthropic Messages 报文。
+//
+// 同协议直通时原文就是报文来源（见 encodeNative）；没有原文、或入口协议
+// 与渠道协议不同时，按统一字段编码（见 encodeHub）。
+func (a *Adapter) encodeRequest(ctx context.Context, req *channel.Request) ([]byte, error) {
+	if a.nativeEligible(req) {
+		return a.encodeNative(req)
+	}
+	return a.encodeHub(ctx, req)
+}
+
+// encodeHub 按统一字段编码一份 Anthropic Messages 报文。
 //
 // 走 relaykit 的转换而不是自己拼：OpenAI 与 Anthropic 的差异不只是字段名
 // （system 是顶层字段而不是一条消息、tool_use 与 tool_result 的结构不同、
 // max_tokens 是必填）。那些差异 relaykit 已经处理过并有测试覆盖。
-func (a *Adapter) encodeRequest(ctx context.Context, req *channel.Request) ([]byte, error) {
+func (a *Adapter) encodeHub(ctx context.Context, req *channel.Request) ([]byte, error) {
 	openaiReq, err := relay.ToRelaykit(req)
 	if err != nil {
 		return nil, fmt.Errorf("编码请求失败: %w", err)

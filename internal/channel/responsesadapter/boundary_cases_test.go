@@ -30,7 +30,7 @@ func pumpEvents(t *testing.T, ctx context.Context, body io.Reader) []channel.Str
 	events := make(chan channel.StreamEvent)
 	go func() {
 		defer close(events)
-		newAdapter().pump(ctx, http.StatusOK, true, body, events)
+		newAdapter().pump(ctx, http.StatusOK, true, false, body, events)
 	}()
 	return collect(t, events)
 }
