@@ -1764,8 +1764,8 @@ runner 镜像自带。bash-completion 是 `make install` 用例要的：它靠�
   [LESSONS.md](../LESSONS.md) 第 16 条）。计数会打印在日志里，
   「0 条跑过」与「全部通过」因此分得开。
 - `eslint` 带 `--max-warnings 0`：警告留着不管，下一次「只加一条警告」就没人拦。
-  `web/src/pages/ops` 下的组件与共享函数已按这条规则分成两个文件
-  （`common.tsx` 与 `common-helpers.tsx`），没有文件级豁免。
+  没有按文件或按目录的规则豁免。`web/eslint.config.js` 里有两个 `files` 块：`**/*.{ts,tsx}` 那一块是全部规则所在，`['vite.config.ts', 'eslint.config.js']` 那一块只补 Node 全局、不加规则。所以配置文件自身 `--print-config` 出来是 0 条规则（它是 `.js`，不匹配前一块），但有 Node 全局。
+  按符号的豁免只有一处：`react-refresh/only-export-components` 的 `allowExportNames` 表（`web/eslint.config.js` 里）。在组件文件里加一个共享导出要先往表里补名字，补之前先想清楚是不是该拆文件。单行确属误报时用 `eslint-disable-next-line` 就地写一行理由。
 
 耗时量级（本地一次完整跑；CI 上的实际耗时以那次运行的日志为准）：
 `npm ci` 约 10 秒（依赖缓存热的量级）、`tsc -b` 约 20 秒、

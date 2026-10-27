@@ -1,10 +1,9 @@
 import { Component, useMemo, type ErrorInfo, type ReactNode } from 'react'
-import { useLocation, useRouteError } from 'react-router-dom'
-import { useI18n } from '../i18n'
+import { useRouteError } from 'react-router-dom'
 import { detectLang } from '../i18n/lang'
 import { en } from '../i18n/en'
 import { zh } from '../i18n/zh'
-import { Button, Card, CopyButton } from './ui'
+import { Button, Card } from './ui'
 
 export interface BoundaryDetail {
   /** 被抛出的原值。`throw` 不要求是 Error，所以类型是 unknown。 */
@@ -66,53 +65,6 @@ interface DiagnosticLabels {
 }
 
 /**
- * 路由内容的边界。
- *
- * 这条必须挂在外壳内部、只包住 `<Outlet />`：出错时侧栏与顶栏还在，用户能
- * 直接切去别的页面。`key={pathname}` 让每次路由变化都换一个新的边界实例，
- * 旧路由的错误状态随之丢掉——不用在 componentDidUpdate 里手比地址。
- */
-export function RouteErrorBoundary({ children }: { children: ReactNode }) {
-  const { pathname } = useLocation()
-  return (
-    <ErrorBoundary
-      key={pathname}
-      fallback={(detail) => <RouteErrorPage detail={detail} pathname={pathname} />}
-    >
-      {children}
-    </ErrorBoundary>
-  )
-}
-
-function RouteErrorPage({ detail, pathname }: { detail: BoundaryDetail; pathname: string }) {
-  const { t } = useI18n()
-  const diagnostics = diagnosticLines(detail, pathname, {
-    time: t('errors.time'),
-    route: t('errors.route'),
-    message: t('errors.message'),
-  })
-
-  return (
-    <Card role="alert" className="flex flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-lg font-semibold tracking-tight">{t('errors.renderTitle')}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{t('errors.renderBody')}</p>
-      </div>
-      <div className="flex items-center gap-2">
-        <Button onClick={() => window.location.reload()}>{t('errors.reload')}</Button>
-        <CopyButton value={diagnostics} label={t('errors.copyDiagnostics')} />
-      </div>
-      <div>
-        <div className="pb-1 text-caps text-faint">{t('errors.diagnostics')}</div>
-        <pre className="overflow-x-auto rounded-sm bg-muted p-3 font-mono text-xs leading-5">
-          {diagnostics}
-        </pre>
-      </div>
-    </Card>
-  )
-}
-
-/**
  * 最外层边界：包住 App 的整棵 Providers 子树。
  *
  * 它不能依赖任何 context——I18nProvider 自己就可能正在抛错。所以文案直接从
@@ -158,11 +110,11 @@ function FatalErrorPage({ detail }: { detail: BoundaryDetail }) {
 }
 
 /**
- * data router 根路由的错误页。
+ * 路由树的错误页。
  *
- * 根级页面（落地页、登录页、404）没有内层边界，渲染期异常会被路由器的
- * `errorElement` 接住；这里把它交回与最外层边界同一个致命错误页，免得
- * 转成 data router 之后换了一张 router 自带的错误页。
+ * 整棵路由只在挂 `errorElement` 的那一层有兜底，任何一页的渲染期异常都冒到这里；
+ * 这里把它交回与最外层边界同一个致命错误页，免得转成 data router 之后换了一张
+ * router 自带的错误页。
  *
  * 只能用在路由的 `errorElement` 里：`useRouteError` 在别处拿不到值。
  */
