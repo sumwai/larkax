@@ -157,7 +157,11 @@ expect_hit "引号后的密钥前缀仍命中" 'key = "rk_live_abcdefghijklmnop"
 # 变量引用规则 `\$\{?[A-Za-z0-9_]*\}?` 而被放行——修误报引出漏报。
 # 这条钉住「片段要先去掉边界字符再判放行」这个决定。
 expect_hit "变量引用形态的真密钥仍命中" 'STRIPE_SECRET=$sk_live_abcdefghijklmnop' '.env'
-expect_hit "花括号变量形态的真密钥仍命中" 'SECRET=${sk_live_abcdefghijklmnop}' '.env'
+expect_hit "引号变量形态的真密钥仍命中" 'password = "$sk_live_abcdefghijklmnop"' 'app.yaml'
+# 剥字符只对形态类生效。赋值类模式没有左边界，片段就是原文，剥了会把
+# 正常的未加引号变量引用（变量名 ≥12 字符时会撞上赋值模式的长度下限）
+# 报成命中。
+expect_clean "未加引号的变量引用" 'export API_KEY=$LARKAX_API_KEY_VALUE' 'setup.sh'
 
 # ── --all 必须覆盖尚未 add 的文件 ─────────────────────────────────────────
 #
