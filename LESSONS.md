@@ -72,3 +72,5 @@
 | [54](lessons/54-dead-code-gates-skip-constants.md) | 三道死代码门只管函数、方法与整包，导出常量没有调用点它们一起也报不出来 | 改 `internal/quota` 的单位常量、`internal/snapshot` 的占位常量，或怀疑「有实现、没有调用方」而三道门全绿时 | 活 |
 | [55](lessons/55-delegation-granularity-not-parallelism.md) | 多 agent 的活慢在颗粒度与收口，不在并行度；并发上限常常一次都没碰到 | 起 workflow、把一批活拆给多个子代理之前 | 活 |
 | [56](lessons/56-baseline-run-must-not-overwrite-worktree.md) | 拿基线做对照时用 `git show HEAD:file > file` 覆盖了工作树，未提交的改动只剩在暂存区 | 跑基线对比、把同一个文件切到旧版本验证时 | 活 |
+| [57](lessons/57-contract-current-state-needs-code-pointer.md) | 契约或注释里「某函数现在会做 X」这句话指不到一行代码，就是在说假话，照着它写出来的实现会静默不工作 | 写契约段、写描述现状的注释、读别人写的「已确认」时 | 活 |
+| [58](lessons/58-expectation-isomorphic-to-implementation.md) | 期望值由与被测代码同构的逻辑算出，实现判错时期望值跟着错，用例照绿、判别力为零 | 写解析器 / 分块器 / 归一化的用例、评审这类用例时 | 活 |
