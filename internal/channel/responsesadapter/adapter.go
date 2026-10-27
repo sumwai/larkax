@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -63,6 +64,7 @@ func (a *Adapter) Endpoint() channel.Endpoint { return channel.EndpointResponses
 
 // Chat 发起一次非流式请求。
 func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Request) (*channel.Response, error) {
+	native := a.nativeEligible(req)
 	body, err := a.encodeRequest(ctx, ch, req, false)
 	if err != nil {
 		return nil, err
@@ -79,8 +81,38 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 		return nil, statusErr
 	}
 
-	var parsed responsesResponse
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
+	// 直通时 Raw 要的是上游响应的原始字节：从解析后的结构再序列化回去已经
+	// 丢掉了转换层不认识的字段。所以那一条先把整段读出来再解，读完之后 body
+	// 是空的，上面那两个 defer 因此没有副作用。跨协议那一条保持原来的解码方式。
+	var (
+		parsed responsesResponse
+		raw    []byte
+	)
+	if native {
+		var readErr error
+		raw, readErr = io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         fmt.Errorf("读取上游响应失败: %w", readErr),
+			}
+		}
+		// 用解码器读那份已读出的字节，而不是 json.Unmarshal：两者宽严不同，
+		// 解码器容忍尾随空白与尾随内容，Unmarshal 只容忍尾随空白。选解码器是
+		// 为了让这一支与下面那条直接解码 resp.Body 的分支完全一致——换成
+		// Unmarshal 会让「响应体后面多了一段内容」在直通上是报错、在枢纽上
+		// 是接受，而同一条上游响应不该有这两个结果。
+		if decodeErr := json.NewDecoder(bytes.NewReader(raw)).Decode(&parsed); decodeErr != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         fmt.Errorf("解析上游响应失败: %w", decodeErr),
+			}
+		}
+	} else if decodeErr := json.NewDecoder(resp.Body).Decode(&parsed); decodeErr != nil {
 		return nil, &channel.ErrUpstream{
 			StatusCode:  resp.StatusCode,
 			GotResponse: true,
@@ -101,6 +133,20 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 			Retryable:   true,
 			Err:         err,
 		}
+	}
+	// 直通时 Raw 换成原文解出的 map：它不经转换层的 dto 裁剪，上游给了什么
+	// 这里就有什么。跨协议时保持上面那条路填的那份（见 channel.Response.Raw）。
+	if native {
+		var rawMap map[string]any
+		if mapErr := json.NewDecoder(bytes.NewReader(raw)).Decode(&rawMap); mapErr != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         fmt.Errorf("解析上游原始响应失败: %w", mapErr),
+			}
+		}
+		out.Raw = rawMap
 	}
 	// 状态码照实带出去：响应方向的快照要把「上游回了几号」单独记一列，
 	// 而它只在这里出现过一次（见 channel.Response.StatusCode）。
@@ -177,7 +223,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 	// 函数要先带着事件通道返回，响应体要活到调用方读完事件为止。
 	// 交给 pumpResponse 收尾，顺序仍是先排空、后关闭。
 	events := make(chan channel.StreamEvent)
-	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), events)
+	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), a.nativeEligible(req), events)
 	return events, nil
 }
 
@@ -186,7 +232,9 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 // 单独一个方法而不是写在 goroutine 的闭包里：响应体的收尾只在关闭点
 // 完整可见时才好核对，而闭包里的 resp.Body.Close() 会被静态检查当成
 // 「这个响应体没人关」。
-func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning bool, events chan channel.StreamEvent) {
+//
+// native 表示这次请求是同协议直通，由 pump 决定要不要额外发原生帧。
+func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning, native bool, events chan channel.StreamEvent) {
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
@@ -194,7 +242,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, complet
 	// 就结束，那时它是网关知道「上游回过一个响应」的唯一途径（见
 	// channel.StreamEvent.StatusCode）。
 	events <- channel.StreamEvent{Kind: "start", StatusCode: resp.StatusCode}
-	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, native, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -253,7 +301,14 @@ func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
 }
 
 // encodeRequest 把统一请求编码成上游 JSON。
+//
+// 同协议直通时以调用方发来的原文为报文来源（见 encodeNative）；其余情况
+// 按统一字段编一份。
 func (a *Adapter) encodeRequest(ctx context.Context, ch channel.Channel, req *channel.Request, stream bool) ([]byte, error) {
+	if a.nativeEligible(req) {
+		return a.encodeNative(ch, req, stream)
+	}
+
 	openaiReq, err := relay.ToRelaykit(req)
 	if err != nil {
 		return nil, fmt.Errorf("编码请求失败: %w", err)

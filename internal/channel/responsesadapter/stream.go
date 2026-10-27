@@ -70,7 +70,12 @@ type responsesStreamEvent struct {
 //
 // completionIncludesReasoning 是渠道声明的用量口径（见
 // channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
-func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning bool, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// native 表示这次调用是同协议直通：每个 `data:` 载荷在翻译之前另外发一条
+// Kind == "native" 的帧，让调用方拿到与上游逐字一致的流。原生帧是**叠加**的，
+// 归一化事件一条不少照旧发——下游的中途冻结估算与快照正文都只认那几个 Kind
+// （见 channel.StreamEvent 的 native 一段）。
+func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning, native bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个事件可能很大：长文本的一次性增量、或一整段工具参数。
 	// 默认的 64KB 上限会把合法响应判为读取失败。
@@ -186,8 +191,25 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 			// response.completed 已经让我们返回了。走到这里说明**没有**
 			// 终态事件：结束标记照发，但不伪造用量——用量按增量估算，
 			// 而那是调用方的事。
+			//
+			// 它不是 JSON 载荷，所以直通时也不发原生帧：调用方那侧的渲染层
+			// 自己会写终止帧（见 internal/api 的 responsesStream.finish），
+			// 把这一行原样转出去会让它收到第二个终止符。
 			events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
 			return
+		}
+
+		// 原生帧先发，归一化事件随后。顺序是固定的：调用方按帧序号对齐
+		// 上游时，看到的第一条必须是上游本来那一条。
+		//
+		// 放在解析之前：解析失败的载荷同样原样转发。上游发了一个我们不认识
+		// 的事件形状，那正是直通要救的情形——按归一化路径它会被静默跳过。
+		if native {
+			events <- channel.StreamEvent{
+				Kind:         "native",
+				NativeFormat: channel.ProtocolOpenAIResponses,
+				Frame:        []byte(payload),
+			}
 		}
 
 		var ev responsesStreamEvent

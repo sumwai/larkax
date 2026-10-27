@@ -29,7 +29,11 @@ import (
 //
 // completionIncludesReasoning 是渠道声明的用量口径（见
 // channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
-func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning bool, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// native 表示这次走了同协议直通：每个 data: 载荷在归一化事件之前先发一条
+// 带原始字节的 native 事件。归一化事件照旧一条不少——下游的中途估算与快照
+// 正文都靠它们。
+func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning, native bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个分片可能很大（长文本的一次性增量、或 base64 图片）。
 	// 默认的 64KB 上限会让合法的响应被判为「读取失败」。
@@ -63,8 +67,22 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 		if payload == "[DONE]" {
 			// 正常结束。计费层需要知道「流结束了」，而不是靠超时去猜；
 			// 结束原因在这里一并给出。
+			//
+			// [DONE] 不发 native 帧：它不是 JSON 载荷，而渲染层自己会写
+			// 终止帧（见 internal/api/stream.go 的 openAIStream.finish）。
+			// 把这一行也当成 native 帧发出去，调用方会看到两个终止符。
 			events <- channel.StreamEvent{Kind: "done", FinishReason: finishReason}
 			return
+		}
+
+		if native {
+			// 先发 native 帧再发归一化事件，顺序固定：调用方的渲染层按
+			// 顺序拼接，先看到原文那一帧才可能与归一化事件对得上。
+			events <- channel.StreamEvent{
+				Kind:         "native",
+				NativeFormat: channel.ProtocolOpenAI,
+				Frame:        []byte(payload),
+			}
 		}
 
 		var chunk openAIStreamChunk

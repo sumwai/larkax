@@ -333,6 +333,26 @@ type Request struct {
 	// 适配器是最后一道。而「插件能覆盖 Authorization」意味着它能
 	// 冒充别的渠道身份。
 	Headers map[string]string
+
+	// NativeBody 是调用方发来的**原始请求体字节**（解析之前的那一份），
+	// 只在同协议直通时被适配器读取：上游那套协议与调用方一致时，适配器
+	// 以它为报文来源，而不是从上面的统一字段重新编码一份。
+	//
+	// nil 表示没有。内部调用（systemone.Parse 那条路）与跨协议请求都是这一种，
+	// 那时适配器一律走统一字段编码的路径。幂等重放**不是** nil：重放经
+	// relay.ParseRequest 重新解析同一份原始请求体，这个字段照常带上，
+	// 与首次请求走同一条路。
+	//
+	// 它与上游报文的关系要读准：枢纽编码那条路完全不读它，所以跨协议请求的
+	// 报文不会因为它的存在而改变；而同协议直通时它**本身就是**报文的来源——
+	// 适配器解析它、改动原文里必须由网关决定的字段（例如上游模型名）、
+	// 再序列化发出，不是在编好的报文上另加东西。反过来做（先按统一字段编码
+	// 一份，再从原文回填几个字段）等于把原文里 dto 不认识的字段又丢一次，
+	// 正好废掉直通。
+	//
+	// 它也不进日志、不进快照：原样转储请求体会把调用方塞进来的任何东西
+	// 写进这两处，而它们不该承载调用方的原始字节。
+	NativeBody []byte
 }
 
 // Message 是一条对话消息。
@@ -466,7 +486,17 @@ type Response struct {
 	Message       Message
 	FinishReason  string
 	Usage         Usage
-	// Raw 是上游原样响应，用于排查。
+	// Raw 是上游响应的原始形状，用于排查。它有两种来源，取决于这次走的是
+	// 哪条路：
+	//
+	//   - 跨协议（Request.NativeBody == nil）：由 relay.toRawMap 把内部响应
+	//     结构编回 map。dto 不认识的字段在那一层已经丢了，所以它不是上游字节，
+	//     只是「我们所理解的那份响应」的再序列化。
+	//   - 同协议直通：上游响应体 json.Unmarshal 出的 map，不做任何 dto 裁剪，
+	//     上游给了什么这里就有什么。
+	//
+	// 两种都只供排查，不参与计费：键名与嵌套形状随实现变化而不报错，读它的
+	// 计算会静默错下去（计费要读 Usage，见它的 Reported）。
 	Raw map[string]any
 }
 
@@ -476,11 +506,17 @@ type Response struct {
 // 但归一化之后要传达的信息就是这几类。适配器负责把上游的分片序列
 // 翻译成这几种事件，路由层与计费层只认这里。
 type StreamEvent struct {
-	// Kind 取值：start、delta、annotation、tool_use、usage_input、usage、done、error。
+	// Kind 取值：start、delta、annotation、tool_use、usage_input、usage、done、error、native。
 	//
 	// "start" 是每条流的第一条事件，只带 StatusCode。它不是正文：
 	// 网关消费它（记下上游那次响应的状态码），**不转发给调用方**。
 	// 它存在的理由见 StatusCode。
+	//
+	// "native" 是**叠加**事件而不是替代：直通模式下归一化事件照旧一条不少地发，
+	// 它只是额外带上上游那一帧的原始载荷（见 Frame）。把它当成「有它就不发别的」
+	// 会丢掉 delta 与 tool_use，而下游的中途冻结估算只在这两个 Kind 上推进、
+	// 快照正文也靠它们——缺了它们，上游不报 usage 时结算会按输出 token 为 0
+	// 计费，快照骨架里也没有正文。
 	Kind string
 
 	// StatusCode 在 Kind == "start" 时有效：这条流对应的那次 HTTP 响应
@@ -534,6 +570,26 @@ type StreamEvent struct {
 	// Err 在 Kind == "error" 时非空。上游在流中途报错是常见情形：
 	// 已经吐出的部分要计费，剩余部分不能假装正常结束。
 	Err error
+
+	// NativeFormat 在 Kind == "native" 时有效：这一帧属于哪套协议。
+	//
+	// 渲染层按它判「调用方协议的与它一致才原样转发」——一致时把 Frame 原样
+	// 写出去，不一致时这条事件被忽略，调用方拿到的是按自己协议重新渲染的
+	// 归一化事件。
+	NativeFormat Protocol
+
+	// Frame 在 Kind == "native" 时有效：上游 SSE `data:` 行的**载荷字节**。
+	//
+	// 已经去掉 `data:` 前缀与行尾换行，首尾空白已 trim；不含 `event:` 行。
+	// Anthropic 的载荷里带 `type` 字段（message_start、content_block_delta 等），
+	// 事件名取它；OpenAI chat 既没有 `event:` 行、载荷里也没有 `type` 字段
+	// （见 internal/channel/openaiadapter/dto.go 的 openAIStreamChunk），
+	// 帧就是纯 data 载荷。
+	//
+	// 不带 `data:` 前缀是有意的：渲染层用 internal/api/stream.go 的 frame
+	// 结构重写帧，由它自己写 `event:` 行与 `data: ` 前缀。带前缀进来会写出
+	// `data: data: {...}`。裸换行同样不能有——SSE 按行切帧，一帧会被拆成两帧。
+	Frame []byte
 }
 
 // ToolCallDelta 是流式响应里工具调用的一段增量。

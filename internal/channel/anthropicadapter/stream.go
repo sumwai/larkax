@@ -41,7 +41,14 @@ import (
 //
 // completionIncludesReasoning 是渠道声明的用量口径（见
 // channel.UsageCompletionIncludesReasoning），原样交给 relay.UsageFromRelaykit。
-func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning bool, body io.Reader, events chan<- channel.StreamEvent) {
+//
+// native 表示这次走了同协议直通：每个 data: 载荷在归一化事件之前先发一条
+// 带原始字节的 native 事件。归一化事件照旧一条不少，取值与顺序不变——下游
+// 的中途估算与快照正文都靠它们，而 native 帧只是叠加（见 channel.StreamEvent
+// 的 Kind）。
+//
+// 它是参数而不是 Adapter 上的字段：适配器不保存请求状态，必须并发安全。
+func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReasoning, native bool, body io.Reader, events chan<- channel.StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	// 单个事件可能很大：长文本的一次性增量、或一整段 tool 参数。
 	// 默认的 64KB 上限会把合法响应判为读取失败。
@@ -124,6 +131,23 @@ func (a *Adapter) pump(ctx context.Context, status int, completionIncludesReason
 			emitUsage()
 			events <- channel.StreamEvent{Kind: "done", FinishReason: stopReason}
 			return
+		}
+
+		if native {
+			// 先发 native 帧再发归一化事件，顺序固定：调用方的渲染层按顺序
+			// 拼接，先看到原文那一帧才可能与归一化事件对得上。
+			//
+			// 不产归一化事件的行（ping、content_block_stop、以及这个包里
+			// 没有对应分支的其他事件）照样发 native 帧：调用方要看的是与
+			// 上游一致的流。
+			//
+			// [DONE] 不发（在上面已经返回）：它不是 JSON 载荷，而是上面那条
+			// 兼容路径的东西，Anthropic 自己的流里没有它。
+			events <- channel.StreamEvent{
+				Kind:         "native",
+				NativeFormat: channel.ProtocolAnthropic,
+				Frame:        []byte(payload),
+			}
 		}
 
 		var raw map[string]any

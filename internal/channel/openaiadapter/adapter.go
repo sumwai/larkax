@@ -107,6 +107,21 @@ func (a *Adapter) Chat(ctx context.Context, ch channel.Channel, req *channel.Req
 	// 状态码照实带出去：响应方向的快照要把「上游回了几号」单独记一列，
 	// 而它只在这里出现过一次（见 channel.Response.StatusCode）。
 	out.StatusCode = resp.StatusCode
+	if a.nativeEligible(req) {
+		// 直通时 Raw 放原始响应体本身：枢纽路径的 Raw 是内部结构再序列化
+		// 出来的副本，本包窄结构不认识的字段在那一层已经丢了。排查要看的是
+		// 上游到底回了什么。
+		raw, rawErr := nativeRaw(parsed)
+		if rawErr != nil {
+			return nil, &channel.ErrUpstream{
+				StatusCode:  resp.StatusCode,
+				GotResponse: true,
+				Retryable:   true,
+				Err:         rawErr,
+			}
+		}
+		out.Raw = raw
+	}
 	return out, nil
 }
 
@@ -140,7 +155,7 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 	// 函数要先带着事件通道返回，响应体要活到调用方读完事件为止。
 	// 交给 pumpResponse 收尾，顺序仍是先排空、后关闭。
 	events := make(chan channel.StreamEvent)
-	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), events)
+	go a.pumpResponse(ctx, resp, channel.UsageCompletionIncludesReasoning(ch.Setting), a.nativeEligible(req), events)
 	return events, nil
 }
 
@@ -149,7 +164,9 @@ func (a *Adapter) ChatStream(ctx context.Context, ch channel.Channel, req *chann
 // 单独一个方法而不是写在 goroutine 的闭包里：响应体的收尾只在关闭点
 // 完整可见时才好核对，而闭包里的 resp.Body.Close() 会被静态检查当成
 // 「这个响应体没人关」。
-func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning bool, events chan channel.StreamEvent) {
+//
+// native 表示这次走了同协议直通：pump 额外把每一帧原始载荷发成 native 事件。
+func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, completionIncludesReasoning, native bool, events chan channel.StreamEvent) {
 	defer close(events)
 	defer func() { _ = resp.Body.Close() }()
 	defer httpx.Drain(resp.Body)
@@ -157,7 +174,7 @@ func (a *Adapter) pumpResponse(ctx context.Context, resp *http.Response, complet
 	// 就结束，那时它是网关知道「上游回过一个响应」的唯一途径（见
 	// channel.StreamEvent.StatusCode）。
 	events <- channel.StreamEvent{Kind: "start", StatusCode: resp.StatusCode}
-	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, resp.Body, events)
+	a.pump(ctx, resp.StatusCode, completionIncludesReasoning, native, resp.Body, events)
 }
 
 // ListModels 查询上游可用模型。
@@ -220,7 +237,13 @@ func (a *Adapter) Quota(context.Context, channel.Channel) (quota.State, error) {
 }
 
 // encodeRequest 把统一请求编码成上游 JSON。
+//
+// 同协议直通时原文就是报文来源（见 encodeNative），跨协议或没有原文时按
+// 统一字段编码。
 func (a *Adapter) encodeRequest(ch channel.Channel, req *channel.Request, stream bool) ([]byte, error) {
+	if a.nativeEligible(req) {
+		return a.encodeNative(ch, req, stream)
+	}
 	converted, err := relay.ToRelaykit(req)
 	if err != nil {
 		return nil, fmt.Errorf("编码请求失败: %w", err)
