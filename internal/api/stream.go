@@ -97,7 +97,7 @@ func writeStreamHeaders(w http.ResponseWriter) {
 // **推迟的实现必须在第一个 event 里把它写出去**：帧的顺序是契约的一部分，
 // 留到 finish 就等于整条流都没有 message_start。
 //
-// 三个方法都不导出：接口与两个实现都是本包的内部结构，没有任何包外调用点。
+// 方法都不导出：接口与三个实现都是本包的内部结构，没有任何包外调用点。
 // 导出它们只会让人以为别处可以按形状直接调，而顺序这一半契约在调用方那边。
 //
 // 方法收 io.Writer 而不是 http.ResponseWriter：渲染器不该知道 flush 的存在，
@@ -106,35 +106,155 @@ type streamRenderer interface {
 	start(w io.Writer) error
 	event(w io.Writer, ev channel.StreamEvent) error
 	finish(w io.Writer) error
+
+	// errorFrame 写一次流中途失败，**不碰「第一帧还没写」这个状态**。
+	//
+	// 它单独成一个方法而不是从 event 里绕过去，是为了直通那条路（见
+	// nativeStreamPassthrough）：直通流里归一化事件一律不转发，而余额切断注入的
+	// error 是唯一要写出去的合成帧。若借道 event，各协议的惰性首帧会先被
+	// 触发，在错误帧前面多写一帧合成信封——那正是直通要禁的东西。
+	errorFrame(w io.Writer, err error) error
 }
 
 // newStreamRenderer 按调用协议选一个渲染器。
 //
 // 认不出的协议返回错误而不是回落到其中一套：两套协议的帧形状不兼容，
 // 回落会让调用方拿到一套它读不懂的帧，而失败现场离原因很远。
+//
+// 返回的总是原生直通包装器（见 nativeStreamPassthrough）：直通与否要按**流里收到
+// 的事件**判，而选协议这一步是在第一个事件之前做的——只能先包上，等第一个
+// 事件到了再定。
 func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Time, inputTokens int64) (streamRenderer, error) {
+	var inner streamRenderer
 	switch protocol {
 	case channel.ProtocolOpenAI:
-		return &openAIStream{id: id, model: model, created: now.Unix()}, nil
+		inner = &openAIStream{id: id, model: model, created: now.Unix()}
 	case channel.ProtocolAnthropic:
-		return &anthropicStream{
+		inner = &anthropicStream{
 			id:         id,
 			model:      model,
 			input:      inputTokens,
 			textIndex:  -1,
 			toolBlocks: map[int]int{},
-		}, nil
+		}
 	case channel.ProtocolOpenAIResponses:
-		return &responsesStream{
+		inner = &responsesStream{
 			id:        id,
 			model:     model,
 			created:   now.Unix(),
 			textIndex: -1,
 			tools:     map[int]*responsesStreamTool{},
-		}, nil
+		}
 	default:
 		return nil, fmt.Errorf("协议 %q 没有流式响应形状", protocol)
 	}
+	return &nativeStreamPassthrough{inner: inner, protocol: protocol}, nil
+}
+
+// ── 同协议直通 ─────────────────────────────────────────────────────────
+
+// nativeStreamPassthrough 包住协议渲染器，在见到匹配的 native 帧后切到直通。
+//
+// # 判据为什么是「见过匹配的 native 帧」
+//
+// 直通与否不能从别的地方看出来：
+//
+//   - 不能看**首条事件的形状**。上游常常先发一个 `ping`（或一个纯注释块），
+//     它是首条、而它本来就是 native——按「首条是 delta 才算归一化流」去判，
+//     这类流会被误判成枢纽流，于是客户端收到一份重新渲染的副本、上游那份
+//     字节则被丢掉；
+//   - 不能看 `res.Channel`。调用方是**先建渲染器、后拿到 res**（见 serveStream：
+//     newStreamRenderer 在 ChatStream 之前），建的时候还不知道渠道是哪一个；
+//   - 不能看事件里的 `Raw` 之类。那属于非流式结果，事件流里没有它。
+//
+// 逐帧判据是够用的，因为适配器保证 native 块先于由它解析出的归一化事件发出
+// （见 channel.StreamEvent 的 Frame），而 `start` 事件不转发给渲染器（网关
+// 内部消费）。所以一条直通流到达渲染器的第一条事件必然是 native：见到它就
+// 已经能确定整条流的形状，不必等到结束。
+//
+// # 直通之后一个字都不自己合成
+//
+// 上游原文已经把内容送到客户端了，再按归一化事件写一份就是重复：同一个
+// delta 会出现两遍。首帧、每一帧正文、收尾的 message_delta / [DONE]，全都
+// 由上游那份字节负责。这里因此把归一化事件一律吞掉，只放余额切断过去
+// （理由见 event）。
+//
+// # 为什么不能借 frame{} 写原生块
+//
+// `frame` 只会写 `event:` 与一行 `data:`，它服务的是枢纽分支——那条路上的
+// 载荷都来自 json.Marshal，可以假定 data 里没有裸换行。原生块没有这个前提：
+// 它可能带注释行（`:` 开头，keep-alive 就是这种）、带多条 `data:` 行、带
+// 自己的 `event:` 行。拆开再按 frame 写会把块内结构改掉，拼出来的已不是上游
+// 那一块。所以原生帧直接按字节写出，再补一个块分隔符。
+type nativeStreamPassthrough struct {
+	inner    streamRenderer
+	protocol channel.Protocol
+	// nativeSeen 表示这条流见过与本协议匹配的 native 帧，此后整条流走直通。
+	nativeSeen bool
+}
+
+// start 什么都不写。
+//
+// 首帧的写入交给了 inner 的惰性首帧（三个渲染器都在第一个事件时才写）：
+// 此刻还不知道这条流是不是直通，写了就晚了——上游那份字节随后到达时，
+// 客户端已经先收到一帧本地合成的信封。
+func (p *nativeStreamPassthrough) start(io.Writer) error { return nil }
+
+func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) error {
+	if ev.Kind == "native" {
+		if ev.NativeFormat != p.protocol {
+			// 另一套协议的帧。跨协议那条路上适配器也会发 native 帧（它的
+			// 来源协议与调用协议不同），而客户端读不懂它——忽略即可，归一化
+			// 事件照旧走枢纽渲染。
+			return nil
+		}
+		p.nativeSeen = true
+		// 原样写出，再补一个空行：Frame 是块内各行用 `\n` 连起来的字节，
+		// 不带末尾换行，也不带那个起分隔作用的空行（见 channel.StreamEvent
+		// 的 Frame）。两处都要检查：写失败意味着调用方已经不在了。
+		if _, err := w.Write(ev.Frame); err != nil {
+			return err
+		}
+		_, err := io.WriteString(w, "\n\n")
+		return err
+	}
+
+	if !p.nativeSeen {
+		return p.inner.event(w, ev)
+	}
+
+	// 直通流：归一化事件一个字都不写——上游原文已经把同一份内容送出去了。
+	//
+	// 唯一的例外是余额切断：它是网关**自己注入**的错误事件（见
+	// internal/gateway 的 streamFreeze），上游那条流里没有对应的 native 帧，
+	// 抑制它等于无因截断——客户端只会看到一条没有结束标记的流，分不出是
+	// 余额用尽、上游断了还是网络问题。
+	//
+	// 上游流内的错误则相反：native 字节已经把那份错误块送到客户端手里，
+	// 再写一帧合成的错误就是同一件事说两遍。
+	if ev.Kind == "error" && errors.Is(ev.Err, store.ErrInsufficientAvailable) {
+		// 走 errorFrame 而不是 event：inner.event 会顺带写出惰性首帧，
+		// 而在直通流里那帧是重复的（上游已经发过自己的 message_start /
+		// response.created）。
+		return p.inner.errorFrame(w, ev.Err)
+	}
+	return nil
+}
+
+func (p *nativeStreamPassthrough) finish(w io.Writer) error {
+	if p.nativeSeen {
+		// 收尾串与终 chunk 都由上游原文负责。
+		return nil
+	}
+	return p.inner.finish(w)
+}
+
+// errorFrame 满足接口，但**不会被 serveStream 调到**：调用方只按
+// start / event / finish 驱动，而错误帧是各渲染器自己在 event 里写的
+// （直通那条路见 p.event）。保留它只为让包装器仍是一份 streamRenderer——
+// 将来若有人把包装器再包一层，透传是唯一说得通的语义。
+func (p *nativeStreamPassthrough) errorFrame(w io.Writer, err error) error {
+	return p.inner.errorFrame(w, err)
 }
 
 // ── 帧 ─────────────────────────────────────────────────────────────────
@@ -236,6 +356,10 @@ type openAIStream struct {
 	model   string
 	created int64
 
+	// started 表示首片已经写出去了。与 anthropicStream 同一个形状：首帧由
+	// 第一个事件写出（见 start）。
+	started bool
+
 	usage        *channel.Usage
 	finishReason string
 }
@@ -283,13 +407,40 @@ type openAIStreamToolFunction struct {
 	Arguments string `json:"arguments"`
 }
 
-func (s *openAIStream) start(w io.Writer) error {
-	// 第一片只带 role。官方的第一片是 {"role":"assistant","content":""}，
-	// 空 content 被 omitempty 省掉，客户端行为不变。
+func (s *openAIStream) start(io.Writer) error {
+	// 第一帧推迟到第一个事件（见 writeStart）。理由两条：
+	//
+	//   - 直通流的第一条事件是 native 帧，那时整条流根本不该有本地合成的
+	//     信封（见 nativeStreamPassthrough）；
+	//   - 零事件的流一条帧都不写。它是失败流（不计费、没有 done、按截断
+	//     处置），写一帧 role 片会让客户端以为流正常开始了。
+	//
+	// 非直通流的输出与改动前逐字节相同：第一帧仍然在第一个事件到达时写出，
+	// 只是从「start 时写」变成「同一个 event 调用里先写」。唯一的例外是
+	// 第一个事件就是 error——那种流不再写这一帧（见 event 里的守卫）。
+	return nil
+}
+
+// writeStart 写第一片（只带 role）。
+//
+// 官方的第一片是 {"role":"assistant","content":""}，空 content 被 omitempty
+// 省掉，客户端行为不变。
+func (s *openAIStream) writeStart(w io.Writer) error {
 	return s.chunk(w, openAIStreamDelta{Role: "assistant"}, nil)
 }
 
 func (s *openAIStream) event(w io.Writer, ev channel.StreamEvent) error {
+	if !s.started {
+		s.started = true
+		// error 不写首帧：上游接受请求后立刻失败时它就是第一个事件，
+		// 先写一帧 role 片会让客户端以为回答正常开始了，而这条流一个字
+		// 都没有。错误帧本身已经说明「这次调用失败了」。
+		if ev.Kind != "error" {
+			if err := s.writeStart(w); err != nil {
+				return err
+			}
+		}
+	}
 	switch ev.Kind {
 	case "delta":
 		return s.chunk(w, openAIStreamDelta{Content: ev.Text}, nil)
@@ -339,13 +490,18 @@ func (s *openAIStream) event(w io.Writer, ev channel.StreamEvent) error {
 		return nil
 
 	case "error":
-		f, err := streamErrorFrame(channel.ProtocolOpenAI, ev.Err)
-		if err != nil {
-			return err
-		}
-		return f.write(w)
+		return s.errorFrame(w, ev.Err)
 	}
 	return nil
+}
+
+// errorFrame 写一次流中途失败。
+func (s *openAIStream) errorFrame(w io.Writer, err error) error {
+	f, err := streamErrorFrame(channel.ProtocolOpenAI, err)
+	if err != nil {
+		return err
+	}
+	return f.write(w)
 }
 
 func (s *openAIStream) finish(w io.Writer) error {
@@ -563,8 +719,13 @@ func (s *anthropicStream) writeStart(w io.Writer, first channel.StreamEvent) err
 func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 	if !s.started {
 		s.started = true
-		if err := s.writeStart(w, ev); err != nil {
-			return err
+		// error 不写首帧，理由见 openAIStream.event 同一个位置：上游接受
+		// 请求后立刻失败时它就是第一个事件，先写 message_start 再报错会让
+		// 客户端以为这条消息正常开始了，而它一个正文块都没有。
+		if ev.Kind != "error" {
+			if err := s.writeStart(w, ev); err != nil {
+				return err
+			}
 		}
 	}
 	switch ev.Kind {
@@ -623,13 +784,22 @@ func (s *anthropicStream) event(w io.Writer, ev channel.StreamEvent) error {
 		return nil
 
 	case "error":
-		f, err := streamErrorFrame(channel.ProtocolAnthropic, ev.Err)
-		if err != nil {
-			return err
-		}
-		return f.write(w)
+		return s.errorFrame(w, ev.Err)
 	}
 	return nil
+}
+
+// errorFrame 写一次流中途失败。
+//
+// 它**不**写 message_start：错误可能落在第一个事件上（上游接受请求后立刻
+// 失败），而那时首帧还没出去。补一帧 message_start 再报错，客户端会以为
+// 消息正常开始了——而这条流一个正文块都没有。
+func (s *anthropicStream) errorFrame(w io.Writer, err error) error {
+	f, err := streamErrorFrame(channel.ProtocolAnthropic, err)
+	if err != nil {
+		return err
+	}
+	return f.write(w)
 }
 
 func (s *anthropicStream) finish(w io.Writer) error {
@@ -789,6 +959,10 @@ type responsesStream struct {
 	model   string
 	created int64
 
+	// started 表示 response.created 已经写出去了，首帧由第一个事件写出
+	// （见 start）。
+	started bool
+
 	// seq 是每个事件的 sequence_number。官方 SDK 的事件模型把它标成必填，
 	// 所以每个事件都要带上，而且从 0 起递增。
 	seq int64
@@ -861,11 +1035,18 @@ type responsesEvent struct {
 	Param   *string `json:"param,omitempty"`
 }
 
-// start 写 response.created，它是这条流的第一条事件。
+// start 什么都不写，response.created 由第一个事件写出去（见 writeStart）。
+//
+// 理由与 openAIStream.start 相同：直通流的第一条事件是 native 帧，那时这条
+// 流不该有本地合成的信封；零事件的流也一帧都不写（它是失败流，一帧
+// response.created 会让客户端以为流正常开始了）。
+func (s *responsesStream) start(io.Writer) error { return nil }
+
+// writeStart 写 response.created，它是非直通流的第一条事件。
 //
 // 与非流式那份的差别只有 status 与空的 output：这条流还没开始产出，
 // 而客户端要拿这个 id 与 model 去建自己的状态。
-func (s *responsesStream) start(w io.Writer) error {
+func (s *responsesStream) writeStart(w io.Writer) error {
 	return s.emit(w, "response.created", responsesEvent{
 		Response: &responsesResponse{
 			ID:         s.id,
@@ -881,6 +1062,17 @@ func (s *responsesStream) start(w io.Writer) error {
 }
 
 func (s *responsesStream) event(w io.Writer, ev channel.StreamEvent) error {
+	if !s.started {
+		s.started = true
+		// error 不写首帧，理由见 openAIStream.event 同一个位置：上游接受
+		// 请求后立刻失败时它就是第一个事件，先写 response.created 再报错会
+		// 让客户端以为这次响应正常开始了。
+		if ev.Kind != "error" {
+			if err := s.writeStart(w); err != nil {
+				return err
+			}
+		}
+	}
 	switch ev.Kind {
 	case "delta":
 		if err := s.openText(w); err != nil {
