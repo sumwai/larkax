@@ -703,6 +703,26 @@ func (h *Handler) serveOnce(w http.ResponseWriter, r *http.Request, protocol cha
 	if sess != nil {
 		defer sess.Close()
 		defer h.logPluginFailures(r.Context(), sess, requestID)
+		// 挂了这三个 hook 就退回枢纽编码，把原文摘掉。
+		//
+		// 直通把调用方的原文原样发上游，而这三个 hook 改的都是**枢纽那条路
+		// 上的东西**：onRequest 改的标量要等适配器从统一字段重编报文时才落
+		// 进报文，onResponse 改的是 Response.Message.Content，onStream 改的是
+		// 归一化之后的事件。原文一字不改地发出去，它们的改动一个都到不了
+		// 上游或调用方——插件作者看到的是「配了没生效」。摘掉原文，两条分支
+		// 都完整生效：直通与枢纽的差别只剩「报文怎么出来」，hook 的语义不变。
+		//
+		// 判据必须落在适配器之前：请求那半边在适配器编码报文时就定了，等到
+		// api 侧再退，上游已经收到旁路了 hook 的原文，救不回来。
+		//
+		// 它不放在 ParseRequest：那时会话还没建（见 serve 里的
+		// relay.ParseRequest），判不出这次请求挂没挂 hook。摘的是这份请求
+		// 指针上的字段，之后选路、重试都在同一份上看到它。
+		if sess.Plugin.Module.Has(plugin.HookRequest) ||
+			sess.Plugin.Module.Has(plugin.HookResponse) ||
+			sess.Plugin.Module.Has(plugin.HookStream) {
+			upstream.NativeBody = nil
+		}
 	}
 
 	req := h.billingRequest(user, upstream, requestID, protocol)
