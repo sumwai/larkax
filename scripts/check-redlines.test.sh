@@ -146,6 +146,14 @@ expect_hit "TOML 配置里的真口令" 'password = "correct-horse-battery-stapl
 expect_hit "源码里的私钥头" '-----BEGIN RSA PRIVATE KEY-----' 'sample.go'
 expect_hit "源码里的本机路径" 'root = /home/somebody/work/larkax' 'sample.go'
 
+# 密钥前缀必须在词首——`sk|pk|rk` 只在「一个词的开始」才是密钥前缀，
+# 词中间出现的 `rk-` 是普通英文（`parallel-work-shares-...` 里的 `rk-s`）。
+# 缺这条左边界，任何含 `rk`/`sk`/`pk` 结尾的单词加连字符都会被报成密钥。
+expect_clean "单词中间的前缀形态不是密钥" '- [59](lessons/59-parallel-work-shares-package-namespace.md)' 'sample.md'
+expect_clean "单词中间的 sk 形态" 'the disk-space-usage-line.md' 'sample.md'
+expect_hit "行首的密钥前缀仍命中" 'sk_live_abcdefghijklmnop' 'sample.go'
+expect_hit "引号后的密钥前缀仍命中" 'key = "rk_live_abcdefghijklmnop"' 'sample.go'
+
 # ── --all 必须覆盖尚未 add 的文件 ─────────────────────────────────────────
 #
 # 只扫 git ls-files（已跟踪）会留一个盲区：新写的文件在推送前不在扫描范围内，
