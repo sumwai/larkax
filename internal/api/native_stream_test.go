@@ -357,6 +357,236 @@ func jsonObjectOf(t *testing.T, body string) map[string]any {
 	return nil
 }
 
+// OpenAI 的用量分片**不单独转发**，它的 usage 并进结束分片。
+//
+// # 这是第四类例外，不是直通的副作用
+//
+// docs/api.md 的「与上游契约的已知偏差」写着：官方在结束分片**之后**另发
+// 一个 `choices` 为空的用量分片，而我们把它合并进结束分片——分开写会让按
+// `choices[0]` 取值的朴素客户端读到空数组而崩。这一条是**刻意的偏离**，
+// 所以直通也必须照做，不能「上游发什么就转什么」。
+//
+// 判据按 pm 的口径钉**原因**不钉后果：响应里不出现 `choices` 为空的分片。
+// 帧数只是它的一个后果，只钉帧数的话，把合并换成「丢掉用量分片」也照样绿。
+func TestNativePassthroughMergesUsageIntoFinishBlock(t *testing.T) {
+	const (
+		finish = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+			`"model":"m-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+		usageOnly = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+			`"model":"m-1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`
+	)
+
+	rec := nativeStreamPost(t, PathChatCompletions,
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolOpenAI, Frame: []byte(finish)},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolOpenAI, Frame: []byte(usageOnly)},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolOpenAI, Frame: []byte("data: [DONE]")},
+		channel.StreamEvent{Kind: "usage", Usage: &channel.Usage{PromptTokens: 12, CompletionTokens: 7}},
+		channel.StreamEvent{Kind: "done", FinishReason: "stop"},
+	)
+
+	frames := strings.Split(strings.TrimSuffix(rec.Body.String(), "\n\n"), "\n\n")
+	if len(frames) != 2 {
+		t.Fatalf("收到 %d 帧，期望 2 帧（结束分片 + [DONE]）：%q", len(frames), rec.Body.String())
+	}
+	for i, f := range frames {
+		if strings.Contains(f, `"choices":[]`) {
+			t.Errorf("第 %d 帧的 choices 是空数组：%s\n"+
+				"我们承诺把用量合并进结束分片（见 docs/api.md 的已知偏差）", i, f)
+		}
+	}
+
+	// 用量在结束分片里，且结束分片的其余键原样保留。
+	merged := jsonObjectOf(t, frames[0])
+	if _, ok := merged["choices"].([]any); !ok {
+		t.Errorf("结束分片的 choices 没了：%s", frames[0])
+	}
+	usage, _ := merged["usage"].(map[string]any)
+	if usage == nil {
+		t.Fatalf("结束分片里没有 usage——用量分片被丢掉了，而不是合并：%s", frames[0])
+	}
+	if usage["prompt_tokens"] != float64(12) || usage["completion_tokens"] != float64(7) ||
+		usage["total_tokens"] != float64(19) {
+		t.Errorf("合并进来的 usage = %v，期望上游那片报的 12/7/19", usage)
+	}
+	if object, _ := merged["object"].(string); object != "chat.completion.chunk" {
+		t.Errorf("object = %q，期望原样保留（合并只加 usage 一个键）", object)
+	}
+	if frames[1] != "data: [DONE]" {
+		t.Errorf("最后一帧 = %q，期望 [DONE]", frames[1])
+	}
+}
+
+// 结束分片之后、用量分片之前被切断时，结束分片仍然交出去。
+//
+// 这是上面那条 flush 放在 error 分支里的判据：上游按「结束分片 → 用量分片」
+// 发流，余额在那两步之间用完是一个真实存在的时刻。丢掉攒着的那一块，客户端
+// 手里就是一条**有正文、没 finish_reason、也没 [DONE]** 的流——它分不出这是
+// 「正常结束但尾部丢了」还是「上游挂了」。
+func TestNativePassthroughFlushesFinishBlockBeforeCutoff(t *testing.T) {
+	const finish = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+		`"model":"m-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+
+	rec := nativeStreamPost(t, PathChatCompletions,
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolOpenAI, Frame: []byte(finish)},
+		channel.StreamEvent{Kind: "error", Err: store.ErrInsufficientAvailable},
+	)
+
+	want := sseBody(finish) + sseBody(
+		`data: {"error":{"message":"`+msgInsufficientBalanceStream+`","type":"server_error","param":null,"code":null}}`,
+	)
+	if got := rec.Body.String(); got != want {
+		t.Errorf("结束分片被吞掉了\n got = %q\nwant = %q", got, want)
+	}
+}
+
+// message_delta 缺 input_tokens 时补的是**上游报过的那个数**，不是本地估算。
+//
+// # 为什么不补估算
+//
+// contract/README.md 写着「无论哪条路，`message_delta.usage.input_tokens`
+// 都是真值」，contract/check.py 断言的正是它等于上游报的数。Anthropic 上游
+// 在 message_start 里就报了真值（那一帧是流的第一帧，直通原样转给了调用方），
+// 而 message_delta 里**可能不带**（真样本 native_test.go:772 就是不带的那种）。
+// 那时补一个按字数算的估算，客户端会在同一条流里看到一个 12 后面跟一个 3。
+//
+// 钉两件事：补上了这个键；补的值是上游报的数而不是估算。
+func TestNativePassthroughFillsDeltaInputTokensFromUpstream(t *testing.T) {
+	// 上游报 42，本地估算必然不是 42（handler 给的 alias 与请求正文见
+	// newTestHandler 与 streamBody），所以「补的是 42」不会与估算混淆。
+	const (
+		start = `event: message_start` + "\n" +
+			`data: {"type":"message_start","message":{"id":"msg_1","type":"message",` +
+			`"role":"assistant","model":"m-1","content":[],"usage":{"input_tokens":42,"output_tokens":1}}}`
+		delta = `event: message_delta` + "\n" +
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
+			`"usage":{"output_tokens":7}}`
+		stop = `event: message_stop` + "\n" + `data: {"type":"message_stop"}`
+	)
+
+	rec := nativeStreamPost(t, PathMessages,
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(start)},
+		channel.StreamEvent{Kind: "usage_input", Usage: &channel.Usage{PromptTokens: 42}},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(delta)},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(stop)},
+		channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
+	)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"input_tokens":42`) {
+		t.Errorf("message_delta 里没补上上游报的 input_tokens=42：%q", body)
+	}
+	if !strings.Contains(body, `"output_tokens":7`) {
+		t.Errorf("上游报的 output_tokens 没保留：%q", body)
+	}
+
+	// message_start 那一块原样转发（上游报了就不动），所以 42 出现两次：
+	// 一次在 start 里，一次是补进 delta 的那个。
+	if n := strings.Count(body, `"input_tokens":42`); n != 2 {
+		t.Errorf("input_tokens=42 出现 %d 次，期望 2 次（message_start 原样 + 补进 message_delta 的）\n%s", n, body)
+	}
+}
+
+// 上游从头到尾没报输入量时，补本地估算——不补的话这个键就不存在，而承诺
+// 说的是它总是有值。
+//
+// 这一条是上一条的另一半：上游在 message_start 里也不报 input_tokens 时，
+// 适配器不发 usage_input（见 anthropicadapter 的
+// TestChatStreamWithoutInputUsageEmitsNoEarlyUsage），于是 reportedInputTokens
+// 一直是 0，只能退回估算。
+func TestNativePassthroughFallsBackToEstimateForDeltaInputTokens(t *testing.T) {
+	// newTestHandler 的本地估算（见 streamBody 与 alias）：断言它确实被用了，
+	// 比断言「有个正数」直接。
+	wantEstimate := strconv.FormatInt(tokens.EstimatedTokens("m-1", "hi"), 10)
+
+	rec := nativeStreamPost(t, PathMessages,
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic,
+			Frame: []byte(`event: message_start` + "\n" +
+				`data: {"type":"message_start","message":{"id":"msg_1","type":"message",` +
+				`"role":"assistant","model":"m-1","content":[],"usage":{"output_tokens":1}}}`)},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic,
+			Frame: []byte(`event: message_delta` + "\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
+				`"usage":{"output_tokens":7}}`)},
+	)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"input_tokens":`+wantEstimate) {
+		t.Errorf("message_delta 里没补上估算的 input_tokens=%s：%q", wantEstimate, body)
+	}
+}
+
+// 上游报过输入量时不覆盖：message_delta 自己带了就以它为准。
+//
+// 与上一条合起来钉死「只补缺的键」：两条都出现，说明实现是「有就留、没就补」，
+// 而不是「一律改写」。
+func TestNativePassthroughKeepsDeltaInputTokensFromUpstream(t *testing.T) {
+	const delta = `event: message_delta` + "\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
+		`"usage":{"input_tokens":77,"output_tokens":7}}`
+
+	rec := nativeStreamPost(t, PathMessages,
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic,
+			Frame: []byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1",` +
+				`"type":"message","role":"assistant","model":"m-1","content":[],` +
+				`"usage":{"input_tokens":42,"output_tokens":1}}}`)},
+		channel.StreamEvent{Kind: "usage_input", Usage: &channel.Usage{PromptTokens: 42}},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(delta)},
+	)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"input_tokens":77`) {
+		t.Errorf("上游在 message_delta 里报的 77 被改掉了：%q", body)
+	}
+	// 42 只该在 message_start 里出现一次。它若也出现在 message_delta 里，
+	// 说明实现是「一律用上游报过的数改写」，而不是「缺了才补」——上游在那
+	// 一帧报的 77 就不作数了，那同样是替上游改数。
+	if n := strings.Count(body, `"input_tokens":42`); n != 1 {
+		t.Errorf("input_tokens=42 出现 %d 次，期望 1 次（只在 message_start 里）\n%s", n, body)
+	}
+}
+
+// 上游没有另发用量分片时，结束分片原样写出——不补一个 usage：替上游编一个
+// 用量就是另一种错。
+//
+// 两条分支各测一次：下一块是别的内容（flush 在那一刻发生），以及流直接结束
+// （flush 在 finish 里发生）。少了后者，严格按「结束分片 → [DONE]」发流的
+// 上游会把 finish_reason 弄丢，而客户端看到的是一条没有终止原因的正常结束。
+func TestNativePassthroughForwardsFinishBlockWithoutUsage(t *testing.T) {
+	const (
+		finish = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+			`"model":"m-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+		done = "data: [DONE]"
+	)
+
+	for _, tc := range []struct {
+		name   string
+		frames []string
+	}{
+		{name: "下一块是 [DONE]", frames: []string{finish, done}},
+		{name: "流到结束分片为止", frames: []string{finish}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []channel.StreamEvent
+			for _, f := range tc.frames {
+				events = append(events, channel.StreamEvent{
+					Kind: "native", NativeFormat: channel.ProtocolOpenAI, Frame: []byte(f),
+				})
+			}
+			events = append(events, channel.StreamEvent{Kind: "done", FinishReason: "stop"})
+
+			rec := nativeStreamPost(t, PathChatCompletions, events...)
+
+			want := sseBody(tc.frames...)
+			if got := rec.Body.String(); got != want {
+				t.Errorf("响应体\n got = %q\nwant = %q", got, want)
+			}
+			if strings.Contains(rec.Body.String(), `"usage"`) {
+				t.Errorf("上游没报用量，我们却写了一个：%q", rec.Body.String())
+			}
+		})
+	}
+}
+
 // 这是有意改变：零事件流本就是失败流（不计费、没有 done、按截断处置），
 // 写一帧 role 片 / response.created 会让客户端以为流正常开始了。Anthropic
 // 的 start 本来就是空的，另外两套以前会写。

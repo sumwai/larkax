@@ -192,8 +192,15 @@ type nativeStreamPassthrough struct {
 	// model 是回显给调用方的模型名（他要的那个，见 modelNames）。
 	model string
 	// inputTokens 是本地估算的输入量。只在 message_delta 没报 input_tokens
-	// 时用它补那个键（见 rewriteMessageDeltaInputTokens）。
+	// **且上游也没在别处报过**时用它补那个键（见 rewriteMessageDeltaInputTokens）。
 	inputTokens int64
+	// reportedInputTokens 是上游自己报过的输入量，0 表示还没报。
+	//
+	// Anthropic 上游在流的最前面（message_start）就报它，而 message_delta
+	// 里可能不再带。那种情况下补进去的必须是这个真值，不是本地估算：本地
+	// 估算按字数算，认得「你好」两个字是 3，而上游报的是 12。契约测试断言的
+	// 正是 message_delta 里这一处等于上游报的数（见 contract/check.py）。
+	reportedInputTokens int64
 	// nativeSeen 表示这条流见过与本协议匹配的 native 帧，此后整条流走直通。
 	nativeSeen bool
 	// nextSeq 是下一条**我们造的帧**该用的 sequence_number（仅 Responses 用）。
@@ -206,6 +213,11 @@ type nativeStreamPassthrough struct {
 	// upstreamError 表示刚刚拦下了一个上游错误块。随后到达的归一化 error
 	// 事件据此补一帧我们自己的错误帧（见 event）。
 	upstreamError bool
+	// finishBlock 是攒着的结束分片（OpenAI 的 finish_reason 片）。
+	//
+	// 上游把用量发在它**之后**，而我们要合并成一片，所以先攒着——见
+	// writeFinishBlock 与 flushFinishBlock。
+	finishBlock []byte
 }
 
 // start 什么都不写。
@@ -224,6 +236,14 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			return nil
 		}
 		p.nativeSeen = true
+		// 上游把用量发在结束分片**之后**（OpenAI 的顺序是：finish_reason
+		// 分片 → choices 为空的用量分片 → [DONE]），而我们要把它们合并成
+		// 一片。所以结束分片得先攒着，等看到用量（或这一块是别的）再写出去。
+		// 见 docs/api.md 的「与上游契约的已知偏差」。
+		//
+		// 攒着的那一块在**这一块判完之后**才决定怎么处理：这一块是错误块就
+		// 原样写出再拦下错误，是用量分片就并进去，别的块则先原样写出、再看
+		// 这一块自己要不要攒。三条分支各自负责 flush，这里不预先写。
 		if isUpstreamErrorBlock(p.protocol, ev.Frame) {
 			// 上游的错误块**不转发**（见 docs/api.md 的「流中途的错误」一节：
 			// `message` 里不回上游原文）。记下这一刻，由随后到达的归一化
@@ -232,6 +252,9 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			// 判据落在**这里**而不是 error 事件上：适配器先发 native 帧、
 			// 再发由它解析出的归一化事件（见 channel.StreamEvent 的 Frame），
 			// 所以等 error 事件到了再判，那块字节已经写出去了。
+			if err := p.flushFinishBlock(w); err != nil {
+				return err
+			}
 			p.upstreamError = true
 			return nil
 		}
@@ -242,20 +265,34 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			block = rewritten
 		}
 		p.observeSequence(block)
-		if rewritten, ok := rewriteMessageDeltaInputTokens(p.protocol, block, p.inputTokens); ok {
+		if usage, ok := p.absorbUsageOnlyBlock(block); ok {
+			// 用量分片**不单独转发**：我们承诺把它合并进结束分片（见
+			// docs/api.md 的「与上游契约的已知偏差」一节）。它上游是发在
+			// 结束分片**之后**的，所以结束分片这会儿已经攒在 finishBlock 里，
+			// 直接合进去写出去。
+			//
+			// 这不是直通的副作用，是我们刻意偏离上游的一处：分开写会让按
+			// `choices[0]` 取值的朴素客户端读到空数组而崩。
+			return p.writeFinishBlock(w, usage)
+		}
+		// 到这里的块既不是错误块也不是用量分片，所以攒着的结束分片（如果有）
+		// 等不到用量了——原样写出去。
+		if err := p.flushFinishBlock(w); err != nil {
+			return err
+		}
+		if p.isFinishBlock(block) {
+			// 结束分片先攒着：上游的用量紧跟在它后面。若下一个块不是用量
+			// 分片（上游不报用量），上面那个 flush 会把它原样写出去。
+			p.finishBlock = block
+			return nil
+		}
+		if rewritten, ok := rewriteMessageDeltaInputTokens(p.protocol, block, p.inputTokensForDelta()); ok {
 			// 上游的 message_delta 没报 input_tokens，而我们承诺过那一处是真值
 			// （见 contract/README.md 的「跨协议流式的 message_start」一节）。
 			// 只补缺的那个键；上游报了就原样留。
 			block = rewritten
 		}
-		// 原样写出，再补一个空行：Frame 是块内各行用 `\n` 连起来的字节，
-		// 不带末尾换行，也不带那个起分隔作用的空行（见 channel.StreamEvent
-		// 的 Frame）。两处都要检查：写失败意味着调用方已经不在了。
-		if _, err := w.Write(block); err != nil {
-			return err
-		}
-		_, err := io.WriteString(w, "\n\n")
-		return err
+		return writeNativeBlock(w, block)
 	}
 
 	if !p.nativeSeen {
@@ -289,6 +326,13 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 	//     终止信号。措辞由 errorFrame 给，不回上游原文。
 	if ev.Kind == "error" {
 		if errors.Is(ev.Err, store.ErrInsufficientAvailable) || p.upstreamError {
+			// 攒着的结束分片先写出去。丢掉它的话，客户端拿到的是一条没有
+			// finish_reason 的流——那正是「不要静默丢一块」要避免的。上游
+			// 真按结束分片 → 用量分片的顺序发时，截断发生在那之间，这里是
+			// 唯一能把结束分片交出去的地方。
+			if err := p.flushFinishBlock(w); err != nil {
+				return err
+			}
 			// 走 errorFrame 而不是 event：inner.event 会顺带写出惰性首帧，
 			// 而在直通流里那帧是重复的。
 			//
@@ -305,12 +349,22 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			return p.inner.errorFrame(w, ev.Err)
 		}
 	}
+	// 上游报过的输入量记下来：message_delta 若没带 input_tokens，补进去的
+	// 得是它，不是本地估算（见 reportedInputTokens 的注释）。
+	if ev.Kind == "usage_input" && ev.Usage != nil && ev.Usage.PromptTokens > 0 {
+		p.reportedInputTokens = ev.Usage.PromptTokens
+	}
 	// 推进 inner 的状态，输出丢弃。
 	return p.inner.event(io.Discard, ev)
 }
 
 func (p *nativeStreamPassthrough) finish(w io.Writer) error {
 	if p.nativeSeen {
+		// 攒着的结束分片若还没写出去（上游没发用量分片，且它后面也没有别的
+		// 块），在这里原样写出。不写的话调用方收不到 finish_reason。
+		if err := p.flushFinishBlock(w); err != nil {
+			return err
+		}
 		// 收尾串与终 chunk 都由上游原文负责。
 		return nil
 	}
@@ -566,6 +620,194 @@ func (p *nativeStreamPassthrough) observeSequence(block []byte) {
 	if seq := int64(v) + 1; seq > p.nextSeq {
 		p.nextSeq = seq
 	}
+}
+
+// absorbUsageOnlyBlock 取走 OpenAI 那个 choices 为空的用量分片。
+//
+// # 为什么它不转发
+//
+// docs/api.md 的「与上游契约的已知偏差」一节写着：**我们有意把用量合并进
+// 结束分片**，因为「分开写会让按 `choices[0]` 取值的朴素客户端读到空数组
+// 而崩」。这是对上游形状的**刻意偏离**，不是枢纽路径的实现细节——直通若把
+// 上游那一块原样发出去，调用方就收到一个 `choices: []` 的分片，那是文档
+// 点名要避免的。
+//
+// 所以拿到的 usage 由调用方立刻并进攒着的结束分片（见 writeFinishBlock），
+// 这个分片本身不落地。
+//
+// # 判据：choices 是空数组且带 usage
+//
+// 两个条件都要成立。只判 `choices` 为空会误吞「上游发了个空 choices 别的
+// 东西」的块；只判有 usage 会误吞正常分片（有些上游在每个分片里都带
+// usage）。认不出就返回 false，那块照原样转发——认错的方向必须是「多转
+// 一块」，不是「静默吞掉一块」。
+func (p *nativeStreamPassthrough) absorbUsageOnlyBlock(block []byte) (map[string]any, bool) {
+	if p.protocol != channel.ProtocolOpenAI {
+		return nil, false
+	}
+	m, ok := jsonBlock(block)
+	if !ok {
+		return nil, false
+	}
+	choices, ok := m["choices"].([]any)
+	if !ok || len(choices) != 0 {
+		return nil, false
+	}
+	usage, ok := m["usage"].(map[string]any)
+	if !ok || len(usage) == 0 {
+		return nil, false
+	}
+	return usage, true
+}
+
+// isFinishBlock 判断一个原生块是不是 OpenAI 的结束分片。
+//
+// 判据：`choices` 非空、第一项的 `finish_reason` 非空字符串，且这块**没有**
+// usage。最后一条不是判「是不是结束分片」，是判「要不要攒」：上游已经在
+// 结束分片里带了用量，说明它不另发用量分片，没什么可合的，直接转发。
+//
+// 只对 OpenAI 生效。另外两套协议没有「用量单独一片」这个形状。
+func (p *nativeStreamPassthrough) isFinishBlock(block []byte) bool {
+	if p.protocol != channel.ProtocolOpenAI {
+		return false
+	}
+	m, ok := jsonBlock(block)
+	if !ok {
+		return false
+	}
+	if _, exists := m["usage"]; exists {
+		return false
+	}
+	choices, ok := m["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return false
+	}
+	first, ok := choices[0].(map[string]any)
+	if !ok {
+		return false
+	}
+	reason, _ := first["finish_reason"].(string)
+	return reason != ""
+}
+
+// writeFinishBlock 把攒着的结束分片写出去，并（若给了 usage）把用量并进去。
+//
+// 合并是我们对上游形状的**刻意偏离**，不是直通的实现细节：docs/api.md 的
+// 「与上游契约的已知偏差」一节写着分开写会让按 `choices[0]` 取值的朴素客户端
+// 读到空数组而崩。所以用量分片本身不转发，它的 usage 在这里并进结束分片，
+// 客户端看到的分片序列里不出现 `choices: []`。
+//
+// 合并点在这里而不是在收到用量分片的时候，是因为上游的顺序是
+// finish_reason 分片 → 用量分片，合并只能发生在前者已经攒下之后。
+func (p *nativeStreamPassthrough) writeFinishBlock(w io.Writer, usage map[string]any) error {
+	block := p.finishBlock
+	p.finishBlock = nil
+	if block == nil {
+		// 用量分片先于结束分片到（非常规顺序），或者上游压根没发结束分片。
+		// 没有可合并的块，就没有理由替上游造一个——这一片的 usage 就此丢掉。
+		// 丢掉一处用量，好过让调用方收到一个 `choices: []` 的分片（那是这条
+		// 契约要避免的形状，见上）。
+		return nil
+	}
+	if usage != nil {
+		if merged, ok := mergeUsageIntoBlock(block, usage); ok {
+			block = merged
+		}
+	}
+	return writeNativeBlock(w, block)
+}
+
+// flushFinishBlock 把攒着的结束分片原样写出去。
+//
+// 用在两种「用量分片不会来了」的时机：新的一块到达、以及整条流结束
+// （见 finish）。
+func (p *nativeStreamPassthrough) flushFinishBlock(w io.Writer) error {
+	block := p.finishBlock
+	p.finishBlock = nil
+	if block == nil {
+		return nil
+	}
+	return writeNativeBlock(w, block)
+}
+
+// mergeUsageIntoBlock 把 usage 并进一个块，其余键不动。
+//
+// 块里已经有 usage 时不覆盖（那说明上游自己给了，替它改数就是另一个错误）。
+// 解析不了、重建不出来时返回 false，调用方按原文写出——认不出的方向必须是
+// 「多转一块」，不是「丢掉一块」。
+func mergeUsageIntoBlock(block []byte, usage map[string]any) ([]byte, bool) {
+	m, ok := jsonBlock(block)
+	if !ok {
+		return block, false
+	}
+	if _, exists := m["usage"]; exists {
+		return block, false
+	}
+	m["usage"] = usage
+	eventName, _ := sseBlockParts(block)
+	return rebuildBlock(eventName, m)
+}
+
+// inputTokensForDelta 是 message_delta 缺 input_tokens 时该补的那个数。
+//
+// 上游自己报过就用它报的（message_start 里的 usage.input_tokens 是**真值**），
+// 没报过才退回本地估算。顺序不能反：本地估算按字数算，比上游报的数低得多，
+// 而契约测试断言的正是 message_delta 那一处等于上游报的数。
+func (p *nativeStreamPassthrough) inputTokensForDelta() int64 {
+	if p.reportedInputTokens > 0 {
+		return p.reportedInputTokens
+	}
+	return p.inputTokens
+}
+
+// writeNativeBlock 写一个原生块：原字节 + 一个空行。
+//
+// Frame 是块内各行用 `\n` 连起来的字节，不带末尾换行，也不带那个起分隔作用
+// 的空行（见 channel.StreamEvent 的 Frame），所以两处都补上。两处都要检查：
+// 写失败意味着调用方已经不在了。
+func writeNativeBlock(w io.Writer, block []byte) error {
+	if _, err := w.Write(block); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, "\n\n")
+	return err
+}
+
+// jsonBlock 解析一个原生块的数据载荷成一个 JSON 对象。
+//
+// 与 rewriteModelKey 等处共用的读取方式，抽出来只为一件事：把「认块」这条
+// 判据的解析写法收在一处，省得四份各写一遍而在边角上分岔。
+func jsonBlock(block []byte) (map[string]any, bool) {
+	_, payloads := sseBlockParts(block)
+	if len(payloads) == 0 {
+		return nil, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(strings.Join(payloads, "\n")), &m); err != nil || m == nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// rebuildBlock 把改过的载荷写回一个 SSE 块。
+//
+// 保留原块的 `event:` 行（如果有）；数据换成重新序列化的那一份。注释行与
+// id:/retry: 行不保留——它们在这几类要改的块里本就不出现，真出现了也说明
+// 上游发了个非常规形状，那时重建出来的块仍然合法（SSE 允许没有注释行）。
+func rebuildBlock(eventName string, m map[string]any) ([]byte, bool) {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return nil, false
+	}
+	var b strings.Builder
+	if eventName != "" {
+		b.WriteString("event: ")
+		b.WriteString(eventName)
+		b.WriteString("\n")
+	}
+	b.WriteString("data: ")
+	b.Write(raw)
+	return []byte(b.String()), true
 }
 
 // ── 帧 ─────────────────────────────────────────────────────────────────

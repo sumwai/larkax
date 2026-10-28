@@ -314,21 +314,19 @@ func (u *streamUpstream) serveAnthropic(w io.Writer, r *http.Request, flush func
 	}
 
 	write("content_block_stop", `{"type":"content_block_stop","index":0}`)
-	// message_delta 带上 input_tokens：真上游的样本里带（见
-	// anthropicadapter 的 adapter_test.go:594，那一份是
-	// `usage:{"input_tokens":77,"output_tokens":25}`）。假上游以前只给
-	// output_tokens，靠网关那一层补——那恰好把「上游给不给」这件事测成了
-	// 无关变量。带上它，直通与枢纽两条路才对得上同一个上游。
+	// message_delta **不带** input_tokens：真上游两种形状都发过（带的是
+	// anthropicadapter 的 adapter_test.go:594 那份，不带的是它 native_test.go:772
+	// 那份）。
 	//
-	// usage 为 nil 时**不写这个键**：报一个 0 等于上游声称「输入零 token」，
-	// 与「没报」是两件事（见 fakeUpstream 的 cacheRead 注释，同一个理由）。
-	deltaUsage := fmt.Sprintf(`"output_tokens":%d`, output)
-	if u.usage != nil {
-		deltaUsage = fmt.Sprintf(`"input_tokens":%d,"output_tokens":%d`, input, output)
-	}
+	// 让假上游不带，是为了把网关那一层测进去：缺了它就把上游在 message_start
+	// 报过的**真值**补进来（见 internal/api 的 inputTokensForDelta）。假上游
+	// 自己带上，那一层在 e2e 里就是死代码——两条路都绿，但绿的理由不同。
+	//
+	// usage 为 nil 时 message_start 里也报 0，走的是「上游没报过，退回本地
+	// 估算」那条分支。
 	write("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-			`"usage":{%s}}`, deltaUsage))
+			`"usage":{"output_tokens":%d}}`, output))
 	write("message_stop", `{"type":"message_stop"}`)
 }
 
@@ -777,15 +775,15 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 		t.Errorf("Content-Type = %q，期望 text/event-stream", ct)
 	}
 
-	// 一、帧序列。六帧：角色分片、两片正文、带 finish_reason 的结束分片、
-	// 带用量的分片、[DONE]。
+	// 一、帧序列。五帧：角色分片、两片正文、带用量的结束分片、[DONE]。
 	//
-	// 六个而不是五个：直通把上游字节原样转发，上游把用量放在**结束分片之后
-	// 另发的一个 choices 为空的分片**里（见 nativeStreamFrames 真样本）。枢纽
-	// 路径把两者合并成一片（见 stream.go 开篇「两处已知的简化」），直通不合并。
+	// 五个而不是六个：上游把用量放在结束分片之后**另发的一个 choices 为空的
+	// 分片**里（见 nativeStreamFrames 真样本），而我们把两者合并成一片——
+	// 这是 docs/api.md 的「与上游契约的已知偏差」里写着的一处**刻意偏离**：
+	// 分开写会让按 `choices[0]` 取值的朴素客户端读到空数组而崩。
 	frames := readFrames(t, resp.Body, 0)
-	if len(frames) != 6 {
-		t.Fatalf("收到 %d 帧，期望 6 帧：%+v", len(frames), frames)
+	if len(frames) != 5 {
+		t.Fatalf("收到 %d 帧，期望 5 帧：%+v", len(frames), frames)
 	}
 	for i, f := range frames {
 		if f.event != "" {
@@ -815,17 +813,32 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 	if last.Choices[0].FinishReason == nil || *last.Choices[0].FinishReason != "stop" {
 		t.Errorf("结束分片的 finish_reason = %s，期望 stop", showPtr(last.Choices[0].FinishReason))
 	}
-	// 用量在紧跟着的下一片里（choices 为空）。直通不合并这两片。
-	usage := decodeChunk(t, frames[4])
-	if usage.Usage == nil {
-		t.Fatal("用量分片里没有 usage——流式的用量必须在结束之前给出来")
+	// 用量就在这一个结束分片里（上游是另发一片的，我们按文档合并）。
+	if last.Usage == nil {
+		t.Fatal("结束分片里没有 usage——流式的用量必须在结束之前给出来")
 	}
-	if usage.Usage.PromptTokens != 12 || usage.Usage.CompletionTokens != 7 ||
-		usage.Usage.TotalTokens != 19 {
-		t.Errorf("usage = %+v，期望上游报的 12/7/19", *usage.Usage)
+	if last.Usage.PromptTokens != 12 || last.Usage.CompletionTokens != 7 ||
+		last.Usage.TotalTokens != 19 {
+		t.Errorf("usage = %+v，期望上游报的 12/7/19", *last.Usage)
 	}
-	if frames[5].data != "[DONE]" {
-		t.Errorf("最后一帧 = %q，期望 [DONE]", frames[5].data)
+	if frames[4].data != "[DONE]" {
+		t.Errorf("最后一帧 = %q，期望 [DONE]", frames[4].data)
+	}
+
+	// 没有任何一帧的 choices 是空数组。
+	//
+	// 这条比帧数直接：它钉的是原因（分开写会让按 choices[0] 取值的朴素客户端
+	// 读到空数组而崩，见 docs/api.md 的已知偏差），不是后果（帧数是 5 还是 6）。
+	// 上游确实发过一个 choices 为空的分片，我们把它合并掉了。
+	for i, f := range frames {
+		if f.data == "[DONE]" {
+			continue
+		}
+		chunk := decodeChunk(t, f)
+		if len(chunk.Choices) == 0 {
+			t.Errorf("第 %d 帧的 choices 是空数组：%s\n"+
+				"我们承诺把用量合并进结束分片，不把上游那个空 choices 的分片转给调用方", i, f.data)
+		}
 	}
 
 	// 二、钱：12 × 0.00001 + 7 × 0.00003 = 0.00033000，与非流式那条路同一个数。

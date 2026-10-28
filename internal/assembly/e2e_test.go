@@ -660,8 +660,13 @@ func (f *fakeUpstream) serveResponsesStream(w http.ResponseWriter) {
 			// type 必须写在载荷里，不能只写在 event: 行上：适配器跳过 event:
 			// 行，按载荷里的 type 分支（真实上游两处都有，而载荷那一处才是
 			// 它读的）。只写 event: 行的话这条事件会被当成不认识而静默丢掉。
+			//
+			// 这一帧**不带** sequence_number，也没有别的字段：真上游的流内
+			// 错误样本不在仓库里，所以这里只给适配器读的那个 type 与一句
+			// 可辨认的 message。带上一个我们没见过的字段，等于把「上游会发
+			// 它」这件事写进假上游，而那不是证据。
 			writeResponsesEvent(w, "error", map[string]any{
-				"type": "error", "sequence_number": seq,
+				"type":    "error",
 				"message": "placeholder upstream failure",
 			})
 			flush()
