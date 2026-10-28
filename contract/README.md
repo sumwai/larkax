@@ -35,8 +35,8 @@
 | 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error`；Responses 另有「缺 `max_output_tokens`」与「空 `input`」两条，文案分别点名这两个字段 |
 | 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`；OpenAI 与 Responses 的 `error.code` 是 `upstream_http_error`（`error.type` 仍是 `api_error`），Anthropic 的 `error.type` 就是那个码 |
-| 同协议直通·非流式 | 上游收到的报文与调用方原文逐字段等价（`model`、`stream` 除外）；响应里 `container`、`usage.service_tier`、非空的 `stop_sequence` 原样到达——枢纽那条路会裁掉它们 |
-| 同协议直通·流式 | 扩展思考的 `thinking_delta` 到了调用方（统一事件流不转发它）；`message_start.message.model` 回显调用方写的名字；`message_delta.usage.input_tokens` 是上游报的真值 |
+| 同协议直通·非流式 | 上游收到的报文与调用方原文逐字段等价（`model`、`stream` 除外）；响应里 `container`、`usage.service_tier`、非空的 `stop_sequence` 原样到达——枢纽那条路会裁掉它们；`id` 等于响应头 `x-request-id`，不是上游那个 |
+| 同协议直通·流式 | 扩展思考的 `thinking_delta` 到了调用方（统一事件流不转发它）；`message_start.message.model` 回显调用方写的名字；`message_start.message.id` 等于响应头 `x-request-id`；`message_delta.usage.input_tokens` 是上游报的真值 |
 | 模型清单 | `models.list()` 与 `models.retrieve()` 读到的是可用模型：`object`、`id`、`owned_by`（取目录里的 vendor）、`created`；`models.list()` 的响应顶层还有 `currency`（站点级常量，默认资产 `CNY`；`data` 每一条与单条 `models.retrieve()` 都不带）；配了计价规则的模型带 `offers`，且规则写了输入价时 `offers[].price` 与 `prices.prompt` 都等于种子规则算出的每 1000 个输入 token 金额（断绝对值，不断两者相等）；不可用时抛 `NotFoundError`，`error.code` 是 `model_not_found`。这条只在 `openai` 那一套里跑——两条路径与调用协议无关，而 `anthropic` 客户端没有对应的资源方法 |
 
 「流式·余额耗尽」那一条需要一个**真的**余额不足：假上游没法让服务端走进那条路，
@@ -66,10 +66,11 @@
 | `model` 换成上游名 | 选路在别名翻名之后（`internal/route` 的 `upstreamRequest`），上游要它的名字 |
 | `stream` 总是重写 | 这次走流式还是非流式只由入口决定（`channel.Request.Stream`），不能由原文说了算 |
 
-`api.md` 的「同协议直通」一节另列了三处**响应**方向的例外：含 `model` 的块只改
-那一个键、`message_delta` 缺 `usage.input_tokens` 时补上游报过的真值、上游流内的
-错误块换成我们的错误帧。那三处的逐字节判据在 Go 那侧的 `internal/assembly`
-直通用例里。
+`api.md` 的「同协议直通」一节另列了四处**响应**方向的例外：含 `id` 的块只改
+那一个键（响应标识由网关决定）、含 `model` 的块只改那一个键、`message_delta`
+缺 `usage.input_tokens` 时补上游报过的真值、上游流内的错误块换成我们的错误帧。
+后三处的逐字节判据在 Go 那侧的 `internal/assembly` 直通用例里；`id` 那一条两边
+都有——Go 侧判「只改了一个键」，这一侧判「改成了响应头报的那个值」。
 
 **逐字节那条判据不在这一份里。** Python 只看得见 SDK 解析后的事件对象，判不了
 「上游的字节有没有原样转发」——SSE 注释行与同块多条 `data:` 在这种视角下根本

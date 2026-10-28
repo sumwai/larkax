@@ -832,7 +832,7 @@ func nativePassthrough(protocol channel.Protocol, upstream *channel.Request, ch 
 // 字节**逐字段等价、不逐字节相同**：要对照就按 JSON 对象比，别拿字节比。
 //
 // 流式那一半有同一条偏差，原因不同——那边是「含 `model` 的那一块要改写」，
-// 改写就得重新序列化那一块（见 stream.go 的 rewriteModelKey）。所以两份文档
+// 改写就得重新序列化那一块（见 stream.go 的 rewriteBlockKeys）。所以两份文档
 // 说的是同一句话：**直通保证内容逐字段等价，不保证逐字节相同**。
 func renderNativePassthrough(id, model string, raw map[string]any) ([]byte, error) {
 	if raw == nil {

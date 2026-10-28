@@ -33,16 +33,16 @@ import (
 // `data: ` 两种行，遇到注释行判红、同块多条 data 只留最后一条——直通原生块
 // 两者都带，解析一遍再比会把「原样转发」测成「能从里面解析出什么」。
 //
-// # 两处**刻意偏离**上游字节，各自都有出处
+// # 三处**刻意偏离**上游字节，各自都有出处
 //
-//  1. 含 `model` 的块要改写（docs/api.md:134 的「入站别名」一节：响应体里的
-//     model 回显调用方写的名字，流式与非流式一样）。实现见 internal/api 的
-//     rewriteModelKey。
+//  1. 含 `id` 与 `model` 的块要改写（docs/api.md 的「入站别名」一节：响应体里的
+//     model 回显调用方写的名字，流式与非流式一样；「同协议直通」一节：`id` 是
+//     本次请求的关联标识）。实现见 internal/api 的 rewriteBlockKeys。
 //  2. `message_delta` 缺 `input_tokens` 时要补（contract/README.md 写着那一处
 //     总是真值；真上游两种形状都发过）。实现见 internal/api 的
 //     rewriteMessageDeltaInputTokens。
 //
-// 所以下面断言的是「除这两块外逐字节相同」，不是「整份相同」——把这两处也
+// 所以下面断言的是「除这几块外逐字节相同」，不是「整份相同」——把这几处也
 // 纳入逐字节比较，等于让夹具替实现圆谎。
 //
 // # 没有 LARKAX_DB_DSN 时跳过
@@ -61,6 +61,13 @@ import (
 type nativeUpstream struct {
 	contentType string
 	body        string
+	// bodyForStream 给了就按请求体的 `stream` 决定回哪一种内容，`body` 与
+	// `contentType` 都不看。
+	//
+	// 只在「同一个假上游要同时接流式与非流式」那一处用（见 id 一致性那条）：
+	// 分成两个假上游的话，两次调用打的是不同服务，而那条用例要证的正是
+	// 「同一个模型、同一个标识，两条路给同一个答案」。
+	bodyForStream func(isStream bool) string
 	// headers 是额外要回的头，用来钉「上游的头不会混进我们的响应」。
 	headers map[string]string
 
@@ -78,12 +85,28 @@ func (u *nativeUpstream) handler() http.Handler {
 		u.paths = append(u.paths, r.URL.Path)
 		u.mu.Unlock()
 
+		contentType, payload := u.contentType, u.body
+		if u.bodyForStream != nil {
+			// 请求体里那个 `stream` 是**调用方发的**原文，适配器会把它覆写成
+			// 本次调用的实际取值（见 anthropicadapter 的 encodeNative），所以
+			// 这里读到的是这条请求真正的走向。
+			var req struct {
+				Stream bool `json:"stream"`
+			}
+			_ = json.Unmarshal(body, &req)
+			payload = u.bodyForStream(req.Stream)
+			contentType = "application/json"
+			if req.Stream {
+				contentType = "text/event-stream"
+			}
+		}
+
 		for k, v := range u.headers {
 			w.Header().Set(k, v)
 		}
-		w.Header().Set("Content-Type", u.contentType)
+		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, u.body)
+		_, _ = io.WriteString(w, payload)
 	})
 }
 
@@ -477,8 +500,9 @@ func TestNativePassthroughMessagesNonStreamAppliesOverrides(t *testing.T) {
 //   - `message_delta` **不带** `input_tokens`（真上游两种形状都发过，这一种
 //     是 native_test.go 里那份）。
 //
-// `model` 故意写成上游自己的名字：改名那一块是两处刻意偏离之一，下面按
-// 「只改这一个键」判它。
+// `model` 与 `id` 故意写成上游自己的值：这两处是刻意偏离，下面按「只改这两个
+// 键」判它们。id 用的是上游那种 `msg_…` 形状，与我们的 request_id 明显不同——
+// 同形的话，改写看不出来（见 LESSONS 的「夹具遮住被测行为」那类）。
 const nativeAnthropicStream = `event: message_start
 data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"vendor/reported-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}
 
@@ -525,11 +549,16 @@ data: {"type":"message_stop"}` + "\n\n"
 // 合成信封、多渲一条归一化事件，块数就对不上；而逐字节比抓住了另一半
 // 「合成帧恰好替换了某帧」。
 //
-// 两处偏离按「最小改动」判：
+// 两处刻意偏离按「最小改动」判：
 //
-//   - message_start：只把 `message.model` 换成调用方的名字，其余键一个不动；
+//   - message_start：只把 `message.id` 与 `message.model` 换成网关决定的那两个
+//     值，其余键一个不动；
 //   - message_delta：只补 `usage.input_tokens`，且补的是**上游在
 //     message_start 报过的 12**，不是本地按字数估出来的那个数。
+//
+// `id` 的期望值取响应头 `x-request-id`：那是非流式直通那条路用的同一个来源
+// （`renderNativePassthrough` 的 id 就是它），所以这条同时钉住「两条路给同一个
+// 答案」——这正是 `id` 改写要修的那件事。
 func TestNativePassthroughMessagesStreamForwardsUpstreamBytes(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
@@ -588,12 +617,16 @@ func TestNativePassthroughMessagesStreamForwardsUpstreamBytes(t *testing.T) {
 		t.Errorf("响应体按块切分后拼不回原字节\n got = %q\n拼回 = %q", got, rejoined)
 	}
 
-	// 两处刻意偏离的位置：model 在 message_start，input_tokens 在
+	// 两处刻意偏离的位置：id 与 model 都在 message_start，input_tokens 在
 	// message_delta。其余每一块都逐字节等于上游。
+	wantID := resp.Header.Get("x-request-id")
+	if wantID == "" {
+		t.Fatal("响应头里没有 x-request-id——id 改写那条判据没有期望值可比（见 observe.Middleware）")
+	}
 	for i, want := range upstreamBlocks {
 		switch {
 		case strings.HasPrefix(want, "event: message_start"):
-			assertRewrittenModelBlock(t, i, gotBlocks[i], want, model)
+			assertRewrittenModelBlock(t, i, gotBlocks[i], want, wantID, model)
 		case strings.HasPrefix(want, "event: message_delta"):
 			assertFilledDeltaBlock(t, i, gotBlocks[i], want)
 		default:
@@ -642,13 +675,13 @@ func TestNativePassthroughMessagesStreamForwardsUpstreamBytes(t *testing.T) {
 	assertWallet(t, db, user, "99.99967", "0")
 }
 
-// assertRewrittenModelBlock 判「只改了 model 这一个键」。
+// assertRewrittenModelBlock 判「只改了 id 与 model 这两个键」。
 //
-// 期望值由**上游那一块**加上一处改动推出来，而不是另写一份夹具：另写一份
+// 期望值由**上游那一块**加上两处改动推出来，而不是另写一份夹具：另写一份
 // 会让两个来源各自漂移，而漂移的那一份不会报错。重建成 `event:` 行 + 一行
-// data（与 rewriteModelKey 的重建方式相同）之后逐字节比——键序由
+// data（与 rewriteBlockKeys 的重建方式相同）之后逐字节比——键序由
 // json.Marshal 的字典序决定，两侧走的是同一个序列化器。
-func assertRewrittenModelBlock(t *testing.T, i int, got, upstream, wantModel string) {
+func assertRewrittenModelBlock(t *testing.T, i int, got, upstream, wantID, wantModel string) {
 	t.Helper()
 
 	payload := decodeJSONObject(t, []byte(dataPayloadOf(t, upstream)))
@@ -656,10 +689,15 @@ func assertRewrittenModelBlock(t *testing.T, i int, got, upstream, wantModel str
 	if message == nil {
 		t.Fatalf("第 %d 块（message_start）里没有 message 对象：%q", i, upstream)
 	}
+	if message["id"] == wantID {
+		t.Fatalf("第 %d 块的夹具里 id 已经等于请求标识：改写 id 那条路成了空操作，"+
+			"把 rewriteBlockKeys 里那一支删掉用例也照样绿", i)
+	}
+	message["id"] = wantID
 	message["model"] = wantModel
 
 	want := "event: message_start\ndata: " + string(mustMarshal(payload))
-	assertBlockDiff(t, fmt.Sprintf("第 %d 块（message_start，只改 model）", i), got, want)
+	assertBlockDiff(t, fmt.Sprintf("第 %d 块（message_start，只改 id 与 model）", i), got, want)
 }
 
 // assertFilledDeltaBlock 判「只补了 input_tokens 这一个键」。
@@ -724,8 +762,9 @@ func dataPayloadOf(t *testing.T, block string) string {
 // ── CRLF ─────────────────────────────────────────────────────────────
 
 // nativeCRLFStream 与上面那条流同形，但行尾是 CRLF，且 `model` 报的就是
-// 调用方写的名字（很多上游就是这么回显的）——于是这条用例里**没有**任何
-// 刻意偏离，期望值可以整份按字节写出来。
+// 调用方写的名字（很多上游就是这么回显的），`id` 用上游那种形状。于是这条
+// 用例里**只有 id 一处**刻意偏离（`model` 与请求名相同，改写是空操作），
+// 期望值可以整份按字节写出来——把那个 id 换成响应头报的那个即可。
 const nativeCRLFStream = "event: message_start\r\n" +
 	`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"%s","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}` + "\r\n" +
 	"\r\n" +
@@ -743,7 +782,9 @@ const nativeCRLFStream = "event: message_start\r\n" +
 // 带它；internal/api 写块时只补 `\n\n`，不做替换。将来谁为了「保留原始字节」
 // 改成自己切行，客户端可见的形状变化会在这里显形。
 //
-// **块内容本身没有被碰**：去掉的只有行尾那一个 `\r`。
+// 判据按块比而不是整份比：`message_start` 那一块要改 id，改就得重新序列化，
+// 于是它的键序与上游不同（见 docs/api.md 的「逐字段等价、不逐字节相同」）。
+// 其余每一块逐字节等于上游（去掉 \r 之后）。
 func TestNativePassthroughStreamCRLFBecomesLFAtScan(t *testing.T) {
 	db := testDB(t)
 	sealer := testSealer(t)
@@ -755,10 +796,7 @@ func TestNativePassthroughStreamCRLFBecomesLFAtScan(t *testing.T) {
 	user := seedUser(t, db, false, balance)
 	key := issueKey(t, db, user)
 
-	crlf := fmt.Sprintf(nativeCRLFStream, model)
-	want := strings.ReplaceAll(crlf, "\r\n", "\n")
-
-	fake := &nativeUpstream{contentType: "text/event-stream", body: crlf}
+	fake := &nativeUpstream{contentType: "text/event-stream", body: fmt.Sprintf(nativeCRLFStream, model)}
 	upstreamSrv := httptest.NewServer(fake.handler())
 	t.Cleanup(upstreamSrv.Close)
 
@@ -773,14 +811,183 @@ func TestNativePassthroughStreamCRLFBecomesLFAtScan(t *testing.T) {
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
+	// 上游那份按 CRLF 切块之前先归一成 LF——这样两边的块边界是同一个口径，
+	// 「块内容相同」与「行尾没有 \r」成了两件事，各自能红。
+	upstreamLF := strings.ReplaceAll(fmt.Sprintf(nativeCRLFStream, model), "\r\n", "\n")
+	wantID := resp.Header.Get("x-request-id")
+	if wantID == "" {
+		t.Fatal("响应头里没有 x-request-id——id 改写那条判据没有期望值可比（见 observe.Middleware）")
+	}
+
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("读响应体失败: %v", err)
 	}
-	if got := string(raw); got != want {
-		t.Errorf("客户端收到的字节 = %q，期望 %q（行尾 \\r 在扫描阶段被吃掉，块内容不变）", got, want)
+	got := string(raw)
+	if strings.Contains(got, "\r") {
+		t.Errorf("响应体里还留着 \\r：%q", got)
 	}
-	if strings.Contains(string(raw), "\r") {
-		t.Errorf("响应体里还留着 \\r：%q", raw)
+
+	upstreamBlocks := splitSSEBlocks(t, upstreamLF)
+	gotBlocks := splitSSEBlocks(t, got)
+	if len(gotBlocks) != len(upstreamBlocks) {
+		t.Fatalf("客户端收到 %d 块，上游发了 %d 块：出现了合成帧或丢了帧\n got = %q",
+			len(gotBlocks), len(upstreamBlocks), got)
 	}
+	for i, want := range upstreamBlocks {
+		if strings.HasPrefix(want, "event: message_start") {
+			// 这一块的 id 由网关决定，model 与请求名相同（改写是空操作）。
+			assertRewrittenModelBlock(t, i, gotBlocks[i], want, wantID, model)
+			continue
+		}
+		assertBlockDiff(t, fmt.Sprintf("第 %d 块", i), gotBlocks[i], want)
+	}
+}
+
+// ── 两条路的响应标识必须一致 ──────────────────────────────────────────
+
+// `id` 是本次请求的关联标识，不是上游内容的副本：枢纽那两条路与非流式直通都
+// 写我们的 request_id，流式直通若不写，同一个响应对象在两条路上就有相反的
+// 答案，而调用方按响应区分不出「该拿哪个 id 去问客服」。
+//
+// # 判据：两条路各自「等于自己的 request_id」
+//
+// 不能拿同一个调用方标识发两次请求——`billing_requests.request_id` 上有唯一
+// 约束，第二次会在预留那一步撞键（见 serveOnce 的 ErrClaimed 分支）。所以两次
+// 带**不同**的标识，然后对每一条各自断言「响应体里的 id == 响应头 x-request-id」：
+// 这两处本来就该是同一个值（非流式直通与枢纽都一样），流式直通漏改时它们会分岔。
+//
+// 两条路都断言，是因为只钉一条钉不住「两条路语义相同」——一条对、一条错时，
+// 单看对的那条看不出来。
+//
+// 上游那两个 id 同时断言不出现，堵住「原样转发上游」这条路。
+func TestNativePassthroughIDIsSameOnStreamAndNonStream(t *testing.T) {
+	db := testDB(t)
+	sealer := testSealer(t)
+	ctx := context.Background()
+
+	const balance = "100"
+	model := unique("e2e-native-id")
+	upstreamName := "vendor/" + model
+
+	merchant := seedUser(t, db, true, "0")
+	user := seedUser(t, db, false, balance)
+	key := issueKey(t, db, user)
+
+	// 一个假上游按请求体的 `stream` 决定回哪种形状：两次调用打到同一处，
+	// 「两条路」的差别只在网关这一侧，不在上游。
+	fake := &nativeUpstream{}
+	fake.bodyForStream = func(isStream bool) string {
+		if isStream {
+			return strings.ReplaceAll(nativeAnthropicStream, "vendor/reported-model", model)
+		}
+		return nativeAnthropicReply
+	}
+	upstreamSrv := httptest.NewServer(fake.handler())
+	t.Cleanup(upstreamSrv.Close)
+
+	channelID := seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, model, "anthropic", 0)
+	// 目录先建：别名表的规范名对目录有外键。
+	seedCatalogModel(t, db, model)
+	seedAlias(t, db, channelID, upstreamName, model)
+	seedRule(t, db, model, `{"prompt": 0.00001, "completion": 0.00003}`)
+
+	app := newApp(t, db, sealer)
+	public := httptest.NewServer(app.Public)
+	t.Cleanup(public.Close)
+
+	// 上游那两个标识（非流式响应里的、流式 message_start 里的）：一个都不许
+	// 到调用方手里。
+	upstreamIDs := []string{"msg_01XFDUDYJgAACzvnptvVoYEL", `"msg_01"`}
+
+	post := func(clientID string, body []byte) (*http.Response, []byte) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			public.URL+"/v1/messages", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("构造请求失败: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("x-request-id", clientID)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("发请求失败: %v", err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("读响应失败: %v", err)
+		}
+		return resp, raw
+	}
+
+	// 一、非流式：直通换 id 是既有行为，这里钉住它的口径。
+	const nonStreamClientID = "native-id-nonstream"
+	nonStreamResp, nonStreamRaw := post(nonStreamClientID, nativeThinkingBody(model, false))
+	if nonStreamResp.StatusCode != http.StatusOK {
+		t.Fatalf("非流式状态码 = %d，期望 200。响应体：%s", nonStreamResp.StatusCode, nonStreamRaw)
+	}
+	nonStreamID, _ := decodeJSONObject(t, nonStreamRaw)["id"].(string)
+	if want := nonStreamResp.Header.Get("x-request-id"); nonStreamID != want {
+		t.Errorf("非流式：响应体的 id = %q，响应头 x-request-id = %q——两处必须是同一个值",
+			nonStreamID, want)
+	}
+	for _, upstreamID := range upstreamIDs {
+		if strings.Contains(string(nonStreamRaw), upstreamID) {
+			t.Errorf("非流式响应里出现了上游的 id %q——id 由网关决定，不该原样转发", upstreamID)
+		}
+	}
+
+	// 二、流式：同一个口径。
+	const streamClientID = "native-id-stream"
+	streamResp, streamRaw := post(streamClientID, nativeThinkingBody(model, true))
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("流式状态码 = %d，期望 200。响应体：%s", streamResp.StatusCode, streamRaw)
+	}
+	streamID := messageStartID(t, string(streamRaw))
+	if want := streamResp.Header.Get("x-request-id"); streamID != want {
+		t.Errorf("流式：message_start 的 id = %q，响应头 x-request-id = %q——两处必须是同一个值；"+
+			"与非流式那条路同一条口径\n%s", streamID, want, streamRaw)
+	}
+	for _, upstreamID := range upstreamIDs {
+		if strings.Contains(string(streamRaw), upstreamID) {
+			t.Errorf("流式响应里出现了上游的 id %q——id 由网关决定，不该原样转发\n%s",
+				upstreamID, streamRaw)
+		}
+	}
+
+	// 三、两条路确实是「同一个来源」：各自等于各自请求带过去的那个标识。
+	if nonStreamID != nonStreamClientID {
+		t.Errorf("非流式响应的 id = %q，期望调用方带的 %q", nonStreamID, nonStreamClientID)
+	}
+	if streamID != streamClientID {
+		t.Errorf("流式响应的 id = %q，期望调用方带的 %q", streamID, streamClientID)
+	}
+}
+
+// messageStartID 取流式响应里 message_start 那一块的 message.id。
+//
+// 按块找而不是按行扫：注释块与多 data 块在别的用例里都出现过，而这里只要
+// 「第一个报 message_start 的块里那个 id」。
+func messageStartID(t *testing.T, body string) string {
+	t.Helper()
+
+	for _, block := range splitSSEBlocks(t, body) {
+		if !strings.HasPrefix(block, "event: message_start") {
+			continue
+		}
+		payload := decodeJSONObject(t, []byte(dataPayloadOf(t, block)))
+		message, _ := payload["message"].(map[string]any)
+		if message == nil {
+			t.Fatalf("message_start 块里没有 message 对象：%q", block)
+		}
+		id, _ := message["id"].(string)
+		if id == "" {
+			t.Fatalf("message_start 块里的 message.id 不是字符串：%q", block)
+		}
+		return id
+	}
+	t.Fatalf("响应体里没有 message_start 块：%q", body)
+	return ""
 }

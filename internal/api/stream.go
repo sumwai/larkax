@@ -148,7 +148,7 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 	default:
 		return nil, fmt.Errorf("协议 %q 没有流式响应形状", protocol)
 	}
-	return &nativeStreamPassthrough{inner: inner, protocol: protocol, model: model, inputTokens: inputTokens}, nil
+	return &nativeStreamPassthrough{inner: inner, protocol: protocol, id: id, model: model, inputTokens: inputTokens}, nil
 }
 
 // ── 同协议直通 ─────────────────────────────────────────────────────────
@@ -189,6 +189,14 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 type nativeStreamPassthrough struct {
 	inner    streamRenderer
 	protocol channel.Protocol
+	// id 是回显给调用方的响应标识（本次请求的 request_id）。
+	//
+	// 它与 model 是同一类东西：**由网关决定、不取上游那份**。非流式直通
+	// （api.go 的 renderNativePassthrough）与枢纽两条路都写它，直通流式不写
+	// 就会让同一个响应对象在两条路上有相反的 id——调用方按响应区分不出
+	// 「这次是谁的账单、该拿哪个 id 去问客服」（见 docs/api.md 的同协议直通
+	// 一节）。上游在哪些位置报 id 见 rewriteBlockKeys。
+	id string
 	// model 是回显给调用方的模型名（他要的那个，见 modelNames）。
 	model string
 	// inputTokens 是本地估算的输入量。只在 message_delta 没报 input_tokens
@@ -259,9 +267,11 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			return nil
 		}
 		block := ev.Frame
-		if rewritten, ok := rewriteModelKey(p.protocol, block, p.model); ok {
-			// 上游在这块里报了它自己的模型名，而后我们承诺回显调用方写的名字
-			// （见 docs/api.md 的「入站别名」一节）。只改那个键，其余键不动。
+		if rewritten, ok := rewriteBlockKeys(p.protocol, block, p.id, p.model); ok {
+			// 上游在这块里报了它自己的响应标识与模型名，而后我们承诺两者都由网关
+			// 决定：`id` 是本次请求的关联标识（客户端与账单都按它对齐），`model`
+			// 回显调用方写的名字（见 docs/api.md 的「入站别名」与「同协议直通」
+			// 两节）。一处改写只动这两个键，其余键不动。
 			block = rewritten
 		}
 		p.observeSequence(block)
@@ -459,26 +469,44 @@ func sseBlockParts(block []byte) (eventName string, payloads []string) {
 	return eventName, payloads
 }
 
-// rewriteModelKey 把一块原生帧里汇报的模型名改成调用方写的那个。
+// rewriteBlockKeys 把一块原生帧里汇报的响应标识与模型名改成我们承诺的那两个。
 //
-// # 为什么只改这一个键
+// # 这两个键为什么同一条规矩
 //
-// 同协议直通把上游那份字节原样交给调用方，而上游在每一块里都报它自己的模型
-// 名（OpenAI chat 五个分片每个都有 `model`）。`docs/api.md` 的「入站别名」
-// 一节承诺**响应体里的 `model` 回显调用方写的名字**，且明写流式与非流式一样。
-// 不回显就是把上游的真名泄漏给调用方，也让按响应判断模型的 SDK 出错。
+// 它们都不是「上游内容的副本」，而是**由网关决定的东西**：
 //
-// 只改 `model`，其余键一个不动：这是「逐字段等价、不逐字节相同」那条偏差的
-// 流式形态（非流式见 api.go 的 renderNativePassthrough）。重新序列化会让键序
-// 与上游不同、大整数过一遍 float64——这一点与那边是同一个代价，不再重复解释。
+//   - `id` 是本次请求的关联标识——客户端与账单都按它对齐（非流式直通
+//     api.go 的 renderNativePassthrough 与枢纽那两条路都写我们的 request_id）；
+//   - `model` 回显调用方写的名字（docs/api.md 的「入站别名」一节，明写流式与
+//     非流式一样）。
+//
+// 直通若原样转发上游那两个值，同一个响应对象在两条路上就有相反的答案：非流式
+// 给我们的 request_id、流式给上游的 id，而调用方无从分辨哪个才是它的。
+//
+// # 只改这两个键，且只在它们出现在对应那一层时
+//
+// 上游在每一块里都报这两样（OpenAI chat 五个分片每个都有 `id` 与 `model`）；
+// Anthropic 在 `message_start` 的 `message` 对象里报；Responses 在
+// `response` 对象里报。**只认那一层**：`content_block.id`（工具调用的
+// `toolu_…`）、Responses 的 `item_id` 与 `output[].id` 是上游内容自己的标识，
+// 客户端靠它们在同一块流里配对，改掉就是另一处破坏。
+//
+// 其余键一个不动：这是「逐字段等价、不逐字节相同」那条偏差的流式形态
+// （非流式见 api.go 的 renderNativePassthrough）。重新序列化会让键序与上游
+// 不同、大整数过一遍 float64——这与那边是同一个代价，不再重复解释。
 //
 // # 认不出就不改
 //
-// 返回 false 表示「这块里没有可改的 model」，调用方照原字节转发。判据与
-// isUpstreamErrorBlock 同一个纪律：解析不了、没有 data 行、model 已经是目标
-// 名字——一律不动。认错的方向必须是「多转了一块原文」，不是「把内容改坏」。
-func rewriteModelKey(protocol channel.Protocol, frame []byte, want string) ([]byte, bool) {
-	if want == "" {
+// 返回 false 表示「这块里没有需要改的键」，调用方照原字节转发。判据与
+// isUpstreamErrorBlock 同一个纪律：解析不了、没有 data 行、认不出那一层、
+// 两个键的值都已经是我们要的——一律不动。认错的方向必须是「多转了一块原文」，
+// 不是「把内容改坏」。
+//
+// 键**不存在**时也不补：非流式那边缺了会补（响应体必须有个 id），而流里每一块
+// 各自独立，给没有 id 的块凭空加一个不在任何上游事件里出现过的东西，等于
+// 伪造上游没说过的话。
+func rewriteBlockKeys(protocol channel.Protocol, frame []byte, wantID, wantModel string) ([]byte, bool) {
+	if wantID == "" && wantModel == "" {
 		return frame, false
 	}
 	eventName, payloads := sseBlockParts(frame)
@@ -491,12 +519,12 @@ func rewriteModelKey(protocol channel.Protocol, frame []byte, want string) ([]by
 		return frame, false
 	}
 
-	// model 的位置按协议不同，三套协议各有各的嵌套：
+	// 这两样所在的那一层按协议不同，三套协议各有各的嵌套：
 	//   - OpenAI chat：顶层；
-	//   - Anthropic：`message.model`（message_start 里）；
-	//   - Responses：`response.model`（每个流事件的 response 对象里）。
-	// 认错一层就等于没改——那时上游真名照样泄漏出去，而用例可能因为夹具
-	// 恰好同名而全绿（本文件的对应用例专门造了不同的名字来盯这一点）。
+	//   - Anthropic：`message.id` / `message.model`（message_start 里）；
+	//   - Responses：`response.id` / `response.model`（流事件的 response 对象里）。
+	// 认错一层就等于没改——那时上游真名与上游 id 照样泄漏出去，而用例可能因为
+	// 夹具恰好同名而全绿（本文件的对应用例专门造了不同的值来盯这一点）。
 	target := m
 	switch protocol {
 	case channel.ProtocolAnthropic:
@@ -512,19 +540,31 @@ func rewriteModelKey(protocol channel.Protocol, frame []byte, want string) ([]by
 		}
 		target = nested
 	}
-	got, ok := target["model"].(string)
-	if !ok || got == want {
+
+	changed := false
+	if wantID != "" {
+		if got, ok := target["id"].(string); ok && got != wantID {
+			target["id"] = wantID
+			changed = true
+		}
+	}
+	if wantModel != "" {
+		if got, ok := target["model"].(string); ok && got != wantModel {
+			target["model"] = wantModel
+			changed = true
+		}
+	}
+	if !changed {
 		return frame, false
 	}
-	target["model"] = want
 
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return frame, false
 	}
 	// 重建这一块：保留原块的 event: 行（如果有），data 换成改过的载荷。
-	// 其余字段（注释行、id: 行）在正常上游的 model 块里不会出现——真出现就
-	// 走下面这条路重建，而它们本来也不是数据。
+	// 其余行（注释行、`id:` 行）在正常上游的这两块里不会出现——真出现就走
+	// 下面这条路重建，而它们本来也不是数据。
 	var b strings.Builder
 	if eventName != "" {
 		b.WriteString("event: ")
@@ -775,7 +815,7 @@ func writeNativeBlock(w io.Writer, block []byte) error {
 
 // jsonBlock 解析一个原生块的数据载荷成一个 JSON 对象。
 //
-// 与 rewriteModelKey 等处共用的读取方式，抽出来只为一件事：把「认块」这条
+// 与 rewriteBlockKeys 等处共用的读取方式，抽出来只为一件事：把「认块」这条
 // 判据的解析写法收在一处，省得四份各写一遍而在边角上分岔。
 func jsonBlock(block []byte) (map[string]any, bool) {
 	_, payloads := sseBlockParts(block)

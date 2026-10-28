@@ -36,6 +36,11 @@ const nativeTestRequestID = "req-native-test"
 //
 // 与 streamRequest 的差别只有两处：请求标识固定（见上），以及返回原始
 // ResponseRecorder——本文件的断言要看**字节**，不看解析出来的帧。
+//
+// 夹具里那几块的 `id` 写的**就是**这个标识：直通要把它改写成请求标识，两者
+// 相同时改写是空操作，于是「逐字节等于上游那几块」这条判据才成立。改写本身
+// 由 TestNativePassthroughRewritesIDAndModelInRawFrames 单独钉——那里造的是
+// 与请求标识**不同**的上游 id，短路掉改写它会红。
 func nativeStreamPost(t *testing.T, path string, events ...channel.StreamEvent) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -108,8 +113,8 @@ func nativeStreamCases() []nativeStreamCase {
 			nativeFrames: []string{
 				// keep-alive：纯注释块，没有归一化事件。
 				": keep-alive",
-				`data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"m-1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
-				`data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"m-1","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}`,
+				`data: {"id":"req-native-test","object":"chat.completion.chunk","created":1700000000,"model":"m-1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
+				`data: {"id":"req-native-test","object":"chat.completion.chunk","created":1700000000,"model":"m-1","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}`,
 				`data: [DONE]`,
 			},
 			finishReason: "stop",
@@ -131,7 +136,7 @@ func nativeStreamCases() []nativeStreamCase {
 			path:     PathMessages,
 			protocol: channel.ProtocolAnthropic,
 			nativeFrames: []string{
-				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m-1","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":42,"output_tokens":1}}}`,
+				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"req-native-test","type":"message","role":"assistant","model":"m-1","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":42,"output_tokens":1}}}`,
 				`event: ping` + "\n" + `data: {"type":"ping"}`,
 				// 同块内两条 data: 行：SSE 规范按换行拼接，转发时要原样保留。
 				`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}`,
@@ -158,9 +163,9 @@ func nativeStreamCases() []nativeStreamCase {
 			path:     PathResponses,
 			protocol: channel.ProtocolOpenAIResponses,
 			nativeFrames: []string{
-				`event: response.created` + "\n" + `data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","status":"in_progress","model":"m-1","output":[]}}`,
+				`event: response.created` + "\n" + `data: {"type":"response.created","sequence_number":0,"response":{"id":"req-native-test","object":"response","status":"in_progress","model":"m-1","output":[]}}`,
 				`event: response.output_text.delta` + "\n" + `data: {"type":"response.output_text.delta","sequence_number":1,"output_index":0,"content_index":0,"delta":"你"}` + "\n" + `data: {"type":"response.output_text.delta","sequence_number":2,"output_index":0,"content_index":0,"delta":"好"}`,
-				`event: response.completed` + "\n" + `data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","object":"response","status":"completed","model":"m-1","output":[]}}`,
+				`event: response.completed` + "\n" + `data: {"type":"response.completed","sequence_number":3,"response":{"id":"req-native-test","object":"response","status":"completed","model":"m-1","output":[]}}`,
 			},
 			finishReason: "stop",
 			hubBaseline: sseBody(
@@ -239,22 +244,29 @@ func TestNativePassthroughForwardsRawFrames(t *testing.T) {
 	}
 }
 
-// 上游块里的 model 被改写调用方请求的名字，其余键一个不动。
+// 上游块里的 `id` 与 `model` 被改写成我们承诺的值，其余键一个不动。
 //
 // # 为什么这条要单独钉
 //
-// 上面那些夹具的原生帧里 model 恰好就是请求名（m-1），所以改写是空操作——
-// 把 rewriteModelKey 整个短路掉，它们照样全绿。那样一条恒真的路径不能证明
-// 改写生效（见 LESSONS 里「钉住改动前后都成立的行为」）。
+// 上面那些夹具里这两个键恰好就是我们要的值（`req-native-test` 与 `m-1`），
+// 所以改写是空操作——把 rewriteBlockKeys 整个短路掉，它们照样全绿。那样一条
+// 恒真的路径不能证明改写生效（见 LESSONS 里「钉住改动前后都成立的行为」）。
 //
-// 这条造一份 model 与请求名**不同**的上游字节，逐字段判两件事：
-//   - model 变成了调用方要的那个名字（docs/api.md 的「入站别名」一节承诺
+// 这条造一份两个值都与我们要的**不同**的上游字节，逐字段判三件事：
+//   - `id` 变成本次请求的 request_id（与非流式直通、枢纽两条路同一个答案）；
+//   - `model` 变成调用方要的那个名字（docs/api.md 的「入站别名」一节承诺
 //     流式与非流式一样）；
-//   - 其余键与值原样保留（改写只动那一个键，不是重造整帧）。
-func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
+//   - 其余键与值原样保留（改写只动那两个键，不是重造整帧）。
+//
+// 第三件里最要紧的是**下层 id 不许动**：Anthropic 的 `content_block.id`
+// （`toolu_…`）与 Responses 的 `item_id` 是上游内容自己的标识，客户端靠它们
+// 在同一块流里配对，改掉就是在别处破坏。
+func TestNativePassthroughRewritesIDAndModelInRawFrames(t *testing.T) {
 	const upstreamModel = "upstream-real-name"
 	// 调用方要的名字由测试处理器固定（见 newTestHandler 的别名/模型名）。
 	const wantedModel = "m-1"
+	// 上游报的响应标识，与 nativeTestRequestID 不同——改写才看得出来。
+	const upstreamID = "upstream-response-id"
 
 	cases := []struct {
 		name     string
@@ -266,7 +278,7 @@ func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
 			name:     "OpenAI",
 			path:     PathChatCompletions,
 			protocol: channel.ProtocolOpenAI,
-			frame: `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+			frame: `data: {"id":"` + upstreamID + `","object":"chat.completion.chunk","created":1700000000,` +
 				`"model":"` + upstreamModel + `","choices":[{"index":0,"delta":{"content":"你好"},` +
 				`"finish_reason":null}]}`,
 		},
@@ -274,8 +286,9 @@ func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
 			name:     "Anthropic",
 			path:     PathMessages,
 			protocol: channel.ProtocolAnthropic,
+			// content_block.id 是下游的工具调用标识，改它会让客户端配不上对。
 			frame: `event: message_start` + "\n" +
-				`data: {"type":"message_start","message":{"id":"msg_1","type":"message",` +
+				`data: {"type":"message_start","message":{"id":"` + upstreamID + `","type":"message",` +
 				`"role":"assistant","model":"` + upstreamModel + `","content":[],` +
 				`"usage":{"input_tokens":42,"output_tokens":1}}}`,
 		},
@@ -283,9 +296,11 @@ func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
 			name:     "Responses",
 			path:     PathResponses,
 			protocol: channel.ProtocolOpenAIResponses,
-			// Responses 把 model 嵌在 response 对象里，与另外两套的顶层位置不同。
+			// Responses 把 id 与 model 都嵌在 response 对象里，位置与另外两套不同；
+			// 而 item_id 在**顶层**，属于上游内容的标识，不许动。
 			frame: `event: response.created` + "\n" +
-				`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1",` +
+				`data: {"type":"response.created","sequence_number":0,"item_id":"msg_upstream",` +
+				`"response":{"id":"` + upstreamID + `",` +
 				`"object":"response","status":"in_progress","model":"` + upstreamModel + `",` +
 				`"output":[]}}`,
 		},
@@ -304,8 +319,12 @@ func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
 				t.Errorf("上游的模型名泄漏给了调用方：%q\n"+
 					"响应里的 model 必须是调用方请求的那个（见 docs/api.md 的「入站别名」）", got)
 			}
+			if strings.Contains(got, upstreamID) {
+				t.Errorf("上游的响应标识泄漏给了调用方：%q\n"+
+					"响应里的 id 必须是本次请求的 request_id（与非流式直通、枢纽两条路一致）", got)
+			}
 			inner := jsonObjectOf(t, got)
-			// model 的落点按协议不同，与 rewriteModelKey 里那三层对应。
+			// 这两个键的落点按协议不同，与 rewriteBlockKeys 里那三层对应。
 			switch tc.protocol {
 			case channel.ProtocolAnthropic:
 				nested, _ := inner["message"].(map[string]any)
@@ -323,13 +342,21 @@ func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
 			if model, _ := inner["model"].(string); model != wantedModel {
 				t.Errorf("model = %q，期望 %q", model, wantedModel)
 			}
-			// 其余键原样：这条造的是 OpenAI 那块，它至少有 id 与 object。
+			if id, _ := inner["id"].(string); id != nativeTestRequestID {
+				t.Errorf("id = %q，期望本次请求标识 %q（流式与非流式直通必须给同一个答案）",
+					id, nativeTestRequestID)
+			}
+			// 其余键原样：这条造的是 OpenAI 那块，它至少有 object。
 			if tc.protocol == channel.ProtocolOpenAI {
-				if id, _ := inner["id"].(string); id != "chatcmpl-1" {
-					t.Errorf("id = %q，期望原样保留的 chatcmpl-1（改写只动 model 一个键）", id)
-				}
 				if object, _ := inner["object"].(string); object != "chat.completion.chunk" {
 					t.Errorf("object = %q，期望原样保留的 chat.completion.chunk", object)
+				}
+			}
+			// 下游的标识不许动：改了整个流里客户端就配不上对了。
+			if tc.protocol == channel.ProtocolOpenAIResponses {
+				if itemID, _ := jsonObjectOf(t, got)["item_id"].(string); itemID != "msg_upstream" {
+					t.Errorf("item_id = %q，期望原样保留的 msg_upstream（它是上游内容的标识，不是响应标识）",
+						itemID)
 				}
 			}
 		})
@@ -370,9 +397,9 @@ func jsonObjectOf(t *testing.T, body string) map[string]any {
 // 帧数只是它的一个后果，只钉帧数的话，把合并换成「丢掉用量分片」也照样绿。
 func TestNativePassthroughMergesUsageIntoFinishBlock(t *testing.T) {
 	const (
-		finish = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+		finish = `data: {"id":"req-native-test","object":"chat.completion.chunk","created":1700000000,` +
 			`"model":"m-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
-		usageOnly = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+		usageOnly = `data: {"id":"req-native-test","object":"chat.completion.chunk","created":1700000000,` +
 			`"model":"m-1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`
 	)
 
@@ -423,7 +450,7 @@ func TestNativePassthroughMergesUsageIntoFinishBlock(t *testing.T) {
 // 手里就是一条**有正文、没 finish_reason、也没 [DONE]** 的流——它分不出这是
 // 「正常结束但尾部丢了」还是「上游挂了」。
 func TestNativePassthroughFlushesFinishBlockBeforeCutoff(t *testing.T) {
-	const finish = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+	const finish = `data: {"id":"req-native-test","object":"chat.completion.chunk","created":1700000000,` +
 		`"model":"m-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
 
 	rec := nativeStreamPost(t, PathChatCompletions,
@@ -455,7 +482,7 @@ func TestNativePassthroughFillsDeltaInputTokensFromUpstream(t *testing.T) {
 	// newTestHandler 与 streamBody），所以「补的是 42」不会与估算混淆。
 	const (
 		start = `event: message_start` + "\n" +
-			`data: {"type":"message_start","message":{"id":"msg_1","type":"message",` +
+			`data: {"type":"message_start","message":{"id":"req-native-test","type":"message",` +
 			`"role":"assistant","model":"m-1","content":[],"usage":{"input_tokens":42,"output_tokens":1}}}`
 		delta = `event: message_delta` + "\n" +
 			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
@@ -501,7 +528,7 @@ func TestNativePassthroughFallsBackToEstimateForDeltaInputTokens(t *testing.T) {
 	rec := nativeStreamPost(t, PathMessages,
 		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic,
 			Frame: []byte(`event: message_start` + "\n" +
-				`data: {"type":"message_start","message":{"id":"msg_1","type":"message",` +
+				`data: {"type":"message_start","message":{"id":"req-native-test","type":"message",` +
 				`"role":"assistant","model":"m-1","content":[],"usage":{"output_tokens":1}}}`)},
 		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic,
 			Frame: []byte(`event: message_delta` + "\n" +
@@ -553,7 +580,7 @@ func TestNativePassthroughKeepsDeltaInputTokensFromUpstream(t *testing.T) {
 // 上游会把 finish_reason 弄丢，而客户端看到的是一条没有终止原因的正常结束。
 func TestNativePassthroughForwardsFinishBlockWithoutUsage(t *testing.T) {
 	const (
-		finish = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+		finish = `data: {"id":"req-native-test","object":"chat.completion.chunk","created":1700000000,` +
 			`"model":"m-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
 		done = "data: [DONE]"
 	)

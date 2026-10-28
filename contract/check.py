@@ -871,8 +871,12 @@ def anthropic_native_nonstream(ctx: Ctx) -> str:
       ——所以它们到了，就是这次真的走了直通。
     """
     params = native_request()
-    resp = ctx.client.messages.create(
+    # 走 with_raw_response：id 那条判据要把响应体里的 id 与响应头 x-request-id
+    # 对照，而 SDK 解析后的 Message 对象不带响应头。
+    raw = ctx.client.messages.with_raw_response.create(
         model=ctx.model(NATIVE_SUFFIX), **native_create_kwargs(params))
+    resp = raw.parse()
+    headers = raw.http_response.headers
 
     echo = upstream_echo(resp)
     check("上游收到的 model", echo.get("model"), native_upstream_name(ctx))
@@ -887,6 +891,14 @@ def anthropic_native_nonstream(ctx: Ctx) -> str:
     check("content[0].text", resp.content[0].text, TEXT)
     check("usage.input_tokens", resp.usage.input_tokens, PROMPT_TOKENS)
     check("usage.output_tokens", resp.usage.output_tokens, COMPLETION_TOKENS)
+    # 响应标识由**网关**决定，不取上游那份（上游假设回的是 `msg_native`）：
+    # 它必须等于本次请求的关联标识，也就是响应头 x-request-id。非流式直通与
+    # 流式直通口径相同，流式那一侧见 anthropic_native_stream。
+    #
+    # SDK 的 `.request_id` 读的是 OpenAI 家的 `request-id` 头，我们的叫
+    # `x-request-id`，所以直接读原始头。
+    check("上游的 id 没被原样转发", resp.id != "msg_native", True)
+    check("id 等于响应头 x-request-id", resp.id, headers.get("x-request-id"))
     # 这两个是**直通的判据**，不是可有可无的花边：枢纽那条路读不出来。
     check("usage.service_tier", getattr(resp.usage, "service_tier", None), "standard")
     container = getattr(resp, "container", None)
@@ -905,17 +917,23 @@ def anthropic_native_stream(ctx: Ctx) -> str:
     - 扩展思考的 `thinking_delta` 到了调用方——统一事件流把它当中间产物扔掉，
       所以它出现即证明走的是直通；
     - `message_start.message.model` 回显的是调用方写的名字（上游报的是它自己的）；
+    - `message_start.message.id` 是网关给的响应标识（等于响应头 x-request-id），
+      不是上游的 `msg_native`——与非流式直通同一条口径；
     - `message_delta.usage.input_tokens` 有值，且等于上游在 `message_start`
       报的那个数——上游只在 message_start 报过它，网关补的是那个真值。
     """
     params = native_request()
     stream = ctx.client.messages.create(
         model=ctx.model(NATIVE_SUFFIX), stream=True, **native_create_kwargs(params))
+    # 响应头里带着本次请求的关联标识：id 改写那条判据要拿它当期望值。
+    # Stream 对象把原始响应挂在 `.response` 上（见 anthropic/_streaming.py）。
+    stream_headers = stream.response.headers
 
     seen = []
     text = ""
     thinking = ""
     echo = None
+    start_id = None
     start_model = None
     start_input_tokens = None
     delta_input_tokens = None
@@ -925,6 +943,7 @@ def anthropic_native_stream(ctx: Ctx) -> str:
         for event in stream:
             seen.append(event.type)
             if event.type == "message_start":
+                start_id = event.message.id
                 start_model = event.message.model
                 start_input_tokens = event.message.usage.input_tokens
                 echo = getattr(event.message, "native_echo", None)
@@ -948,6 +967,12 @@ def anthropic_native_stream(ctx: Ctx) -> str:
     # 思考增量只在直通下到得了调用方：统一事件流不转发它。
     check("思考增量", thinking, "想一想。")
     check("message_start.message.model", start_model, ctx.model(NATIVE_SUFFIX))
+    # 响应标识：与非流式直通同一条口径——网关给的那个，不是上游的
+    # `msg_native`（假上游在 message_start 里报的就是它）。
+    check("message_start.message.id 不是上游的",
+          start_id != "msg_native", True)
+    check("message_start.message.id 等于响应头 x-request-id",
+          start_id, stream_headers.get("x-request-id"))
     check("message_start 的 input_tokens", start_input_tokens, PROMPT_TOKENS)
     # 上游的 message_delta **不带** input_tokens，这一处是网关补的，补的是
     # message_start 里那个真值——不是本地按字数估出来的数。
