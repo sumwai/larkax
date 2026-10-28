@@ -346,6 +346,96 @@ func TestEveryDerivedPathAnswersHelpFlag(t *testing.T) {
 	}
 }
 
+// TestLeadingHelpFlagIgnoresTrailingArgs 钉住「求助旗标打头之后，尾巴上的参数不影响结果」。
+//
+// 这条恒等式**就是** HelpOnly 那一笔的语义定义：`<路径> -h extra` 与 `<路径> -h`
+// 必须给出逐字节相同的 rc、stdout、stderr。改之前它不是恒等式——**27 条命令、
+// 54 组（命令 × 两种写法）**上两者不同；其中 8 组（`migrate up/down/status/version`
+// × 两种写法）在基线版本上是 rc=1，因为打帮助之前先去连库，连不上就直接失败。
+//
+// 判据是**两者相同**，不是「rc==0 且输出非空」：后者对「两条路都打错同一份东西」
+// 同样成立。这一条问的是「尾巴被忽略了没有」，而忽略的定义就是「结果一样」。
+//
+// # 进门必须先清 DSN
+//
+// 这条门在全部路径上真敲命令，理由与 #1280 那次相同：门为了断言「有没有帮助」
+// 自己成了这些命令的调用方。清空之后那 8 组 `migrate …` 也在连库之前就把帮助
+// 打出来，与其余路径一致。不清的话它们会因为连不上库而红，而红的原因与这条门
+// 要问的事无关。
+//
+// # 反向锚
+//
+// 光断言「-h extra == -h」在「两者都执行了命令」时也成立。所以另比一组：
+// `<路径> extra`（第一个参数不是旗标）必须与 `<路径> -h extra` **不同**——
+// 证明这一层真的在看第一个参数，而不是把所有带 extra 的调用都归一了。
+func TestLeadingHelpFlagIgnoresTrailingArgs(t *testing.T) {
+	t.Setenv("LARKAX_DB_DSN", "")
+
+	paths := allPathsDerived(t)
+	if len(paths) < 100 {
+		t.Fatalf("只派生出 %d 条路径：扫描器坏了，这条门会安静地通过", len(paths))
+	}
+
+	compared := 0
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			fields := strings.Fields(path)
+			for _, form := range helpForms {
+				withFlag := append(append([]string{}, fields...), form, "extra")
+				bare := append(append([]string{}, fields...), form)
+
+				var flagErr, bareErr error
+				flagOut, flagErrOut := captureStreams(t, func() { flagErr = dispatch(withFlag) })
+				bareOut, bareErrOut := captureStreams(t, func() { bareErr = dispatch(bare) })
+
+				if got, want := processExitCode(flagErr), processExitCode(bareErr); got != want {
+					t.Errorf("%s %s extra 的退出码是 %d，而 %s %s 是 %d",
+						path, form, got, path, form, want)
+				}
+				if flagOut != bareOut {
+					t.Errorf("%s %s extra 的 stdout 与 %s %s 不同：\n带尾巴：%q\n不带：  %q",
+						path, form, path, form, flagOut, bareOut)
+				}
+				if flagErrOut != bareErrOut {
+					t.Errorf("%s %s extra 的 stderr 与 %s %s 不同：\n带尾巴：%q\n不带：  %q",
+						path, form, path, form, flagErrOut, bareErrOut)
+				}
+				compared++
+
+				// 反向锚：**不带旗标**的 `<路径> extra` 必须与 `<路径> -h extra`
+				// 不同。少了它，这一层要是把「所有带 extra 的调用都归一成帮助」，
+				// 上面那些「相同」照样全绿，而命令其实已经无法执行了。
+				//
+				// 这里比的是**无旗标**，不是 `extra -h`：位置参数之后跟 `-h` 时，
+				// 30/199 条路径仍然打帮助。机制是 `TakeLeadingOperand` 先把位置
+				// 参数摘走、剩下的 `-h` 落到叶子的 `fs.Parse` 头上（`flag` 包返回
+				// ErrHelp，`exitWithFailure` 把它当成功）。那是各叶子自己的既有
+				// 行为，不是这一层该管的事；把它并进反向锚，这条门会红在别人的
+				// 地盘上。
+				if form != helpForms[0] {
+					continue
+				}
+				var tailErr error
+				tailOut, tailErrOut := captureStreams(t, func() {
+					tailErr = dispatch(append(append([]string{}, fields...), "extra"))
+				})
+				sameAsHelp := processExitCode(tailErr) == processExitCode(flagErr) &&
+					tailOut == flagOut && tailErrOut == flagErrOut
+				if sameAsHelp {
+					t.Errorf("%s extra 与 %s -h extra 结果完全相同（rc、stdout、stderr 三者"+
+						"都比了）：这一层把所有带 extra 的调用都归一了，那上面那些"+
+						"「相同」什么也证明不了", path, path)
+				}
+			}
+		})
+	}
+
+	// 反向锚之二：对比数不能是 0。派生链断掉时这条门会安静地通过。
+	if compared == 0 {
+		t.Fatal("一组都没比到：派生链断了，这条门什么也没证明")
+	}
+}
+
 // helpForms 是这道门要测的写法。**只有这两种**：`flag` 包虽然也认 `-help` 与
 // `--h`，但基线版本对它们各命令不一致（`plan -help` 退出码 0、`wallet -help` 却
 // 是 2），统一那件事不在本条的范围内，测了会红。
