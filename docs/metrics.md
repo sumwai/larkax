@@ -114,15 +114,23 @@ usage 块，用量按零值占位（不是上游说的 0），于是这次结算
 这一族最该被看见。按 `sum by (usage_source)` 配看板时别漏掉它：漏掉的那一族看
 起来会像「没有这类请求」。
 
-**`unreported` 这一族只由非流式请求产出。** 非流式的两条路——chat 与决策表面
-（`/v1/systemone`）——的来源都由 `internal/gateway` 的 `usageSourceOf` 判，而它只回
-`measured` 与 `unreported` 两个值。**流式请求永远落不到这一族**：它的来源由
-`internal/gateway` 的 `streamUsage` 给出，有上游实测时是 `measured`，没有时取自
-`internal/tokens` 的 `StreamEstimator`，只会是 `tokenized` 或 `estimated`——这个
-分支里没有 `unreported`。所以只跑流式流量的部署上，这一族**一条序列都不会出现**，
-那是正常的：它说明这些请求不走这条路，而不是这一族的计数器没接上（后者看同一次
-查询里别的 `usage_source` 序列在不在）。要判流式有没有拿到上游实测，看 `estimated`
-（就是上面那一条）与 `tokenized` 两族：它们出现，说明那一次的用量是本地算的。
+**`unreported` 这一族只由非流式请求产出。** 全仓唯一产出这个来源的是
+`internal/gateway` 的 `usageSourceOf`（它只回 `measured` 与 `unreported`），而它的
+调用点也只有非流式的 `Chat` 与 `Decide` 两处——即 chat 与决策表面
+（`/v1/systemone`）。流式的来源走 `internal/gateway` 的 `streamUsage`：有上游实测时
+是 `measured`，没有时取自 `internal/tokens` 的 `StreamEstimator`，而 `internal/tokens`
+包里没有任何一处产出 `unreported`：估算器内部也有 `measured`，它是起始值与空增量的
+占位，而合并走 `internal/tokens` 的 `Count.Add`、取较不可信的一侧，合不出
+`unreported`。所以只跑流式流量的部署上，这一族**一条序列都不会出现**，那是正常的：
+它说明这些请求不走这条路，而不是这一族的计数器没接上（后者看同一次查询里别的
+`usage_source` 序列在不在）。要判流式有没有拿到上游实测，看 `estimated`（就是上面
+那一条）与 `tokenized` 两族：它们出现，说明那一次的用量是本地算的。
+
+**为什么非流式没有估算兜底。** 那条路**不估算**：用量要么来自上游响应体，要么
+上游整块没报——那时记 `unreported`、金额为零（见 `internal/gateway` 的
+`Gateway.Counter` 字段注释）。估算要解决的是「已经产出多少、但用量永远到不了」
+这个状态：客户端在途中断开、上游吐了一半就死，而已经产生的 token 上游照收钱。
+流式有这一段在途期，所以它带估算器；非流式没有这一段，也就没有可回落的估算。
 
 **`ratelimit_exact` 是 0。** RPM 限流的计数退回了进程内，那一刻判定是近似的
 （各实例各算各的，放行量偏大）。**它单独看分不出两种情形，要连着
