@@ -127,23 +127,23 @@ func sandboxForMigrateCreate(t *testing.T) string {
 
 // TestMigrateCreateRejectsNamesThatWouldBecomeFiles 钉住「拒掉的名字一个文件都不许留」。
 //
-// 三条输入各自代表一种「会静默变成一个看起来正常的迁移文件」的写法：
+// 两条输入各自代表一种「会静默变成一个看起来正常的迁移文件」的写法：
 //
 //   - `help`：不带横线，是 `migrate <子命令> help` 这条帮助入口的词，HelpOnly
 //     认不出它（它只认 -h/--help），于是它一路走到 goose 的写入点。
-//   - `-h extra`：带两个词，HelpOnly 判的是「恰好一个」，于是让路；goose 的
-//     snakeCase 把 -h 洗成 h，建出 `*_h.sql`——名字看起来完全合法，是三条里
-//     最隐蔽的一条。
 //   - 空串：落成 `*_.sql`，今天就能触发。
 //
-// 三条都断言**目录树逐字节不变**，不是只数文件：见 migrationTreeSnapshot。
+// **`-h extra` 不在这张表里**：HelpOnly 放宽成「第一个参数是求助旗标」之后，
+// 它被这一层收掉、打出帮助、rc=0，不再走到验证这一关。它仍然不许建文件，
+// 但判据不再是「报参数错」——见 TestMigrateCreateTreatsLeadingHelpFlagAsHelp。
+//
+// 全部断言**目录树逐字节不变**，不是只数文件：见 migrationTreeSnapshot。
 func TestMigrateCreateRejectsNamesThatWouldBecomeFiles(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
 	}{
 		{"help 这个词", []string{"create", "help"}},
-		{"带额外参数的 -h", []string{"create", "-h", "extra"}},
 		{"空串", []string{"create", ""}},
 		{"以横线开头的普通词", []string{"create", "-x"}},
 		{"非 ASCII", []string{"create", "中文名"}},
@@ -173,6 +173,53 @@ func TestMigrateCreateRejectsNamesThatWouldBecomeFiles(t *testing.T) {
 			}
 			if code := cli.ExitCode(err); code != 2 {
 				t.Errorf("%v 的退出码是 %d，想要 2（参数错）：%v", tc.args, code, err)
+			}
+		})
+	}
+}
+
+// TestMigrateCreateTreatsLeadingHelpFlagAsHelp 钉住 `-h` 打头就打帮助，一个文件都不建。
+//
+// 这一条脱胎于上一个用例里的 `-h extra` 那一档。原先 HelpOnly 判「参数恰好一个」，
+// 两个词时让路，`-h` 一路走到 goose 的写入点——snakeCase 把它洗成 `h`，建出
+// `*_h.sql`（那个目录是 //go:embed sql/*.sql）。后来 validateMigrationName 挡住了
+// 它，但那是**第二道**防线：命令本来就不该把这个参数当成迁移名。
+//
+// HelpOnly 放宽到「第一个参数是求助旗标」之后，这一档在更早的地方就被收掉，
+// 报的是「你要帮助」而不是「这个名字不合法」。所以判据从「rc=2」变成
+// 「rc=0 + 打出用法 + 一个文件都不建」。
+//
+// 它仍然必须有目录树断言：`-h` 打头却建出文件，正是这条用例要防的那件事。
+func TestMigrateCreateTreatsLeadingHelpFlagAsHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "-h"},
+		{"create", "-h", "extra"},
+		{"create", "--help", "extra"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			sqlDir := sandboxForMigrateCreate(t)
+			before := migrationTreeSnapshot(t, sqlDir)
+
+			out, errOut := captureStreams(t, func() {
+				if err := runMigrate(args); err != nil {
+					t.Errorf("%v 应当打帮助并成功（退出码 0），得到 %v", args, err)
+				}
+			})
+
+			after := migrationTreeSnapshot(t, sqlDir)
+			if diff := describeSnapshotDiff(before, after); diff != "目录树没有变化" {
+				t.Fatalf("%v 产生了副作用：%s\n"+
+					"求助旗标打头就该打用法，不该被当成迁移名——那个目录是 "+
+					"//go:embed sql/*.sql，写进去的东西下次构建就进二进制。", args, diff)
+			}
+
+			// **必须断言真的打出了帮助**，不能只断言「没副作用 + 不报错」。
+			// 少了这一条，把这一档改成「什么都不做、静默返回 nil」也全绿——
+			// 「跳过」与「通过」在输出里长得一样（LESSONS 16）。
+			if !strings.Contains(out+errOut, "larkaxctl migrate") {
+				t.Errorf("%v 没有打出 migrate 的用法，输出是 %q："+
+					"这一档要的是「打帮助」，不是「安静地什么都不做」",
+					args, out+errOut)
 			}
 		})
 	}

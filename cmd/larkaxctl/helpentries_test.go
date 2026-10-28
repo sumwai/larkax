@@ -215,6 +215,109 @@ func TestGroupPathsAnswerBothHelpForms(t *testing.T) {
 	}
 }
 
+// helpSaysItself 判断 `larkaxctl <path> help`（以及单层的 `help <path>`）打出来的
+// 首行是不是点出了这条路径自己。
+//
+// 判据与 TestSubGroupShortUsageStaysWithinBudget 的 selfNaming 同源：
+// `strings.Contains(首行, "larkaxctl "+path)`。不判 rc——深路径的 `help` 一律 rc=0，
+// 包括打错内容的那些，拿 rc 判等于什么都没判。
+func helpSaysItself(t *testing.T, path string) bool {
+	t.Helper()
+	var err error
+	out, errOut := captureStreams(t, func() {
+		err = dispatch(append(strings.Fields(path), "help"))
+	})
+	if err != nil {
+		return false
+	}
+	first := out + errOut
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	return strings.Contains(first, "larkaxctl "+path)
+}
+
+// TestHelpRejectsDeepPath 钉住 `larkaxctl help <深路径>` 报错，而不是静默丢段。
+//
+// 这一条要防的是一类**看不出来**的错：`help wallet payout` 曾经把末尾那段扔掉，
+// 打出来的是 `help wallet` 那一页——两页逐字节相同，人照着根帮助页末行的写法
+// 敲一个深路径，拿到的是父组的说明，而没有任何线索能发现。
+//
+// 只认一层的代价是这条命令从 rc=0 变成 rc=2。判据落在 rc 上，因为那正是这次
+// 变更要钉的东西——「静默」与「报错」在输出上可能只差一行，在退出码上不会。
+//
+// **不给它做逐层下钻**：那要把整条路径喂回分派器（`help a b` → `a b help`），
+// 于是 `help migrate create` 变成 `migrate create help`——而 `help` 在 create
+// 那里是合法的迁移名。深路径本来就有自己的一条路：`larkaxctl <深路径> help`。
+func TestHelpRejectsDeepPath(t *testing.T) {
+	// 从注册表派生，不手抄：手抄的路径名一旦写错，这条用例会去测一条不存在的
+	// 命令（那也会 rc=2，于是照样绿）。
+	var deep []string
+	for _, path := range groupPathsDerived(t) {
+		if strings.Contains(path, " ") {
+			deep = append(deep, path)
+		}
+	}
+	if len(deep) < 10 {
+		t.Fatalf("只派生出 %d 条深路径：注册表扫描坏了，这条用例会安静地通过", len(deep))
+	}
+
+	for _, path := range deep {
+		t.Run(path, func(t *testing.T) {
+			var err error
+			out, errOut := captureStreams(t, func() {
+				err = dispatch(append([]string{"help"}, strings.Fields(path)...))
+			})
+			if err == nil {
+				t.Fatalf("help %s 应当报参数错，却成功了：%q",
+					path, out+errOut)
+			}
+			if code := cli.ExitCode(err); code != 2 {
+				t.Errorf("help %s 的退出码是 %d，想要 2（参数错）：%v", path, code, err)
+			}
+
+			// 报错里给的两条出路，**至少一条真的走得通**。
+			//
+			// 这一条是这条用例的重点。文案里的指引没人验过，正是
+			// payout_test.go:852 那条注释用了一年的坑：它说「笼统的 help 只认
+			// 第一层」，而没有人跑过那条路。这一次换了个位置——报错文案推荐
+			// `larkaxctl <深路径> help`，而 18 条深路径里有 6 条照着敲拿到的是
+			// **父组**的说明。
+			//
+			// 判据是「那条路打出来的首行点出它自己」，不是「rc=0」：深路径的
+			// `<路径> help` 一律 rc=0，包括那 6 条打错内容的。
+			if !strings.Contains(err.Error(), path+" help") {
+				t.Errorf("help %s 的报错没有给出深路径那条写法：%v", path, err)
+			}
+			parent := strings.Fields(path)[0]
+			if !strings.Contains(err.Error(), "larkaxctl help "+parent) {
+				t.Errorf("help %s 的报错没有给出父组那条写法：%v", path, err)
+			}
+
+			deepWorks := helpSaysItself(t, path)
+			parentWorks := helpSaysItself(t, parent)
+			if !deepWorks && !parentWorks {
+				t.Errorf("help %s 的两条出路都走不通：`%s help` 与 `help %s` "+
+					"打出来的都不是自己的说明", path, path, parent)
+			}
+		})
+	}
+
+	// 反向锚：单层路径**不能**被这条判据波及。少了它，把 dispatch 的 help 分支
+	// 改成「一律报错」也能让上面的全部通过。
+	for _, one := range []string{"wallet", "user", "migrate"} {
+		t.Run("单层_"+one, func(t *testing.T) {
+			ok, out := runHelpForm(t, one, "help")
+			if !ok {
+				t.Fatalf("help %s 不该报错，得到：%q", one, out)
+			}
+			if !strings.Contains(out, "larkaxctl "+one) {
+				t.Errorf("help %s 打出来的不是它自己的帮助：%q", one, out)
+			}
+		})
+	}
+}
+
 // TestEveryDerivedPathAnswersHelpFlag 是门二：注册表派生的**每一条**路径
 // （命令组与叶子都算）都要认得 `-h`。
 //
@@ -241,6 +344,140 @@ func TestEveryDerivedPathAnswersHelpFlag(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLeadingHelpFlagIgnoresTrailingArgs 钉住「求助旗标打头之后，尾巴上的参数不影响结果」。
+//
+// 这条恒等式**就是** HelpOnly 那一笔的语义定义：`<路径> -h extra` 与 `<路径> -h`
+// 必须给出逐字节相同的 rc、stdout、stderr。改之前它不是恒等式——**27 条命令、
+// 54 组（命令 × 两种写法）**上两者不同；其中 8 组（`migrate up/down/status/version`
+// × 两种写法）在基线版本上是 rc=1，因为打帮助之前先去连库，连不上就直接失败。
+//
+// 判据是**两者相同**，不是「rc==0 且输出非空」：后者对「两条路都打错同一份东西」
+// 同样成立。这一条问的是「尾巴被忽略了没有」，而忽略的定义就是「结果一样」。
+//
+// # 进门必须先清 DSN
+//
+// 这条门在全部路径上真敲命令，理由与 #1280 那次相同：门为了断言「有没有帮助」
+// 自己成了这些命令的调用方。清空之后那 8 组 `migrate …` 也在连库之前就把帮助
+// 打出来，与其余路径一致。不清的话它们会因为连不上库而红，而红的原因与这条门
+// 要问的事无关。
+//
+// # 反向锚
+//
+// 光断言「-h extra == -h」在「两者都执行了命令」时也成立。所以另比一组：
+// `<路径> extra`（第一个参数不是旗标）必须与 `<路径> -h extra` **不同**——
+// 证明这一层真的在看第一个参数，而不是把所有带 extra 的调用都归一了。
+func TestLeadingHelpFlagIgnoresTrailingArgs(t *testing.T) {
+	t.Setenv("LARKAX_DB_DSN", "")
+
+	paths := allPathsDerived(t)
+	if len(paths) < 100 {
+		t.Fatalf("只派生出 %d 条路径：扫描器坏了，这条门会安静地通过", len(paths))
+	}
+
+	compared := 0
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			fields := strings.Fields(path)
+			for _, form := range helpForms {
+				withFlag := append(append([]string{}, fields...), form, "extra")
+				bare := append(append([]string{}, fields...), form)
+
+				var flagErr, bareErr error
+				flagOut, flagErrOut := captureStreams(t, func() { flagErr = dispatch(withFlag) })
+				bareOut, bareErrOut := captureStreams(t, func() { bareErr = dispatch(bare) })
+
+				if got, want := processExitCode(flagErr), processExitCode(bareErr); got != want {
+					t.Errorf("%s %s extra 的退出码是 %d，而 %s %s 是 %d",
+						path, form, got, path, form, want)
+				}
+				if flagOut != bareOut {
+					t.Errorf("%s %s extra 的 stdout 与 %s %s 不同：\n带尾巴：%q\n不带：  %q",
+						path, form, path, form, flagOut, bareOut)
+				}
+				if flagErrOut != bareErrOut {
+					t.Errorf("%s %s extra 的 stderr 与 %s %s 不同：\n带尾巴：%q\n不带：  %q",
+						path, form, path, form, flagErrOut, bareErrOut)
+				}
+				compared++
+
+				// 反向锚：**不带旗标**的 `<路径> extra` 必须与 `<路径> -h extra`
+				// 不同。少了它，这一层要是把「所有带 extra 的调用都归一成帮助」，
+				// 上面那些「相同」照样全绿，而命令其实已经无法执行了。
+				//
+				// 这里比的是**无旗标**，不是 `extra -h`：位置参数之后跟 `-h` 时，
+				// 30/199 条路径仍然打帮助。机制是 `TakeLeadingOperand` 先把位置
+				// 参数摘走、剩下的 `-h` 落到叶子的 `fs.Parse` 头上（`flag` 包返回
+				// ErrHelp，`exitWithFailure` 把它当成功）。那是各叶子自己的既有
+				// 行为，不是这一层该管的事；把它并进反向锚，这条门会红在别人的
+				// 地盘上。
+				if form != helpForms[0] {
+					continue
+				}
+				var tailErr error
+				tailOut, tailErrOut := captureStreams(t, func() {
+					tailErr = dispatch(append(append([]string{}, fields...), "extra"))
+				})
+				sameAsHelp := processExitCode(tailErr) == processExitCode(flagErr) &&
+					tailOut == flagOut && tailErrOut == flagErrOut
+				if sameAsHelp {
+					t.Errorf("%s extra 与 %s -h extra 结果完全相同（rc、stdout、stderr 三者"+
+						"都比了）：这一层把所有带 extra 的调用都归一了，那上面那些"+
+						"「相同」什么也证明不了", path, path)
+				}
+			}
+		})
+	}
+
+	// 对账三件事，各自的失效方式不同，缺一条就有一种「少扫」漏过去：
+	//
+	//  1. **跑过的路径数**要与独立来源相符。这条挡的是 `allPathsDerived` 自己
+	//     少返回几条——只比 `compared` 与 `len(paths)*len(helpForms)` 挡不住，
+	//     两个数都来自 paths，截短了会一起变小、仍然相等。
+	//  2. **比过的组数**要与 `len(paths) * len(helpForms)` 相符。这条挡的是循环
+	//     体少走几趟（`continue` 前漏了累加、内层只取了第一种写法）。
+	//  3. 组数不为 0，挡住「两份注册表都空」。
+	//
+	// 三条都是「期望值不由被测量本身推出」。原先只有第 3 条，它的形状与
+	// #1280 修掉的 `checked == 0` 一模一样：只判「非零」等于允许少扫。
+	if got, want := len(paths), independentlyCountedPaths(); got != want {
+		t.Fatalf("派生出 %d 条路径，而三份注册表展开取并集是 %d 条："+
+			"allPathsDerived 少返回了 %d 条，这条门会安静地漏掉它们",
+			got, want, want-got)
+	}
+	if want := len(paths) * len(helpForms); compared != want {
+		t.Fatalf("只比了 %d 组，应有 %d 组（%d 条路径 × %d 种写法）："+
+			"某一趟循环没有跑到", compared, want, len(paths), len(helpForms))
+	}
+	if compared == 0 {
+		t.Fatal("一组都没比到：派生链断了，这条门什么也没证明")
+	}
+}
+
+// independentlyCountedPaths 是 allPathsDerived 的**对账来源**：读同样的三份
+// 注册表，在这里再展开一次并去重。
+//
+// 它与 allPathsDerived 刻意是两份代码。合成一份就只剩「自己与自己相等」——
+// 那边少返回几条时，这边跟着少，对账永远成立。两份都读注册表，所以增删命令
+// 两边一起动，不需要维护；只有 allPathsDerived 的**口径**变了才要改这里。
+func independentlyCountedPaths() int {
+	seen := map[string]bool{}
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			seen[c.name] = true
+		}
+	}
+	for _, c := range legacyCommands {
+		seen[c.name] = true
+	}
+	for path, verbs := range completionActionTable {
+		seen[path] = true
+		for _, verb := range verbs {
+			seen[path+" "+verb] = true
+		}
+	}
+	return len(seen)
 }
 
 // helpForms 是这道门要测的写法。**只有这两种**：`flag` 包虽然也认 `-help` 与

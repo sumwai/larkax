@@ -849,9 +849,10 @@ func TestWalletPayoutUnknownIDIsAConflict(t *testing.T) {
 
 // `wallet refund help` 与 `wallet payout help` 打长版说明书，退出码是 0。
 //
-// 这两条是**唯一**能拿到长版的路：笼统的 `larkaxctl help wallet refund` 只认
-// 第一层，到不了这里。所以用法文本里那句指向自己的话必须真的走得通——它是给
-// 读的人照着敲的。
+// 这两条是**唯一**能拿到长版的路：`larkaxctl help wallet refund` 会报错
+// （help 只认一层，深层要写成 `larkaxctl wallet refund help`）。所以用法文本里
+// 那句指向自己的话必须写成这一形态——它是给读的人照着敲的，写成 `larkaxctl help
+// <深路径>` 会得到一个参数错而不是说明书。
 func TestWalletRefundAndPayoutHelpPrintLongUsage(t *testing.T) {
 	cases := []struct {
 		name string
