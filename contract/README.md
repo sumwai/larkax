@@ -223,9 +223,10 @@ python3 contract/check.py \
 - **跨协议**（Anthropic 客户端配 OpenAI 上游）：OpenAI 的用量在**结束分片**里，
   流的开头没有输入用量可给，只能填估算；
 - **同协议但走枢纽**（挂了插件 hook 等，见 `docs/api.md` 的「什么时候不直通」）：
-  上游的 `message_start` 若一个输入量都没报（**报 0 与不带这个键都算「没报」**，
-  见 `internal/channel/anthropicadapter` 的 `readUsage`），适配器就不发
-  `usage_input`，第一帧同样回落到估算。
+  上游的 `message_start` 若**没有** `input_tokens` 这个键，适配器就不发
+  `usage_input`，第一帧同样回落到估算。**报了 0 不算「没报」**——整段 prompt
+  命中缓存时 0 就是真值（缓存量在 `cache_read_input_tokens` 里），那一帧给的是
+  上游报的数。
 
 实测例子（`internal/assembly/stream_e2e_test.go` 的
 `TestStreamMessagesFirstFrameBeforeUpstreamFinishes`）：调用方说 Anthropic，
