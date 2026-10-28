@@ -450,10 +450,14 @@ func helpTextsForGate(t *testing.T) []struct{ what, text string } {
 	// rotate、idempotency、calendar）。**不遍历它们的话，这四条彻底在管辖之外**——
 	// 它们照样打得出帮助、照样进补全表，却没有任何一道门看过那两份文案。
 	//
-	// 它们的 help 与正式命令共用一份（reconcile 用 ledgerHelp、rotate 用
-	// rotateHelp……），所以这一趟检查的是同一个值两遍。**重复不是浪费**：这正是
-	// 「旧路径打出的是不是与新路径同一份」这件事的断言位置；哪天有人给旧路径换了
-	// 一份自己的文案，这里会照出来。
+	// 它们今天与正式命令共用同一份 help 值（reconcile 用 ledgerHelp、rotate 用
+	// rotateHelp……），所以这一趟扫的是同一个字符串两遍，**它证不了「两条路径
+	// 打出的是同一份」**——那要比较运行时输出，由
+	// TestLegacyCommandsShareTheirTargetsHelp 钉住。
+	//
+	// 这里管到它们的价值在别处：指针门与设计理由门扫的是**文本**，多扫两遍不
+	// 坏事；将来哪天旧路径拆出自己的一份文案，那两份新文案自动落在管辖内，不会
+	// 像今天这样整条路径从门缝里溜过去。
 	for _, c := range legacyCommands {
 		texts = append(texts,
 			struct{ what, text string }{c.name + "（旧路径）的短版", c.help.short},
@@ -538,6 +542,14 @@ func TestHelpPointersTargetRealDocSections(t *testing.T) {
 // 直接拿 len(helpTextsForGate(t)) 当期望值的话，那个函数少返回十条，期望值
 // 也跟着少十条，两边一起错，比对仍然相等（与 LESSONS.md 第 58 条的「同构」
 // 是同一个形状）。
+//
+// **它防什么、不防什么**（下一个人会以为它是全防的，所以写在这里）：
+//
+//   - 防：`helpTextsForGate` 静默少返回（某个分支被判空、某个循环被截断）
+//   - 不防：注册表本身少了一条。这里的三个数与那个函数遍历的是同一批变量
+//     （commandGroups、legacyCommands、completionActionTable），注册表少一条，
+//     两边一起少。要防那一档得从另一个来源派生，而第二个来源会与表分岔——
+//     注册表自身的完整性由 TestEveryActionConstantHasAPath 那一组门负责。
 func helpTextsForGateLongCount(t *testing.T) int {
 	t.Helper()
 
