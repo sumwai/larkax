@@ -30,9 +30,12 @@ ok  	...	0.930s          ← 整包也全绿
 
 ```
 --- FAIL: TestNativePassthroughForwardsZeroDeltaInputTokens
-    native_stream_test.go:59x: input_tokens 的 0 没到调用方（真值 0 被当成没报？）
+    native_stream_test.go: input_tokens 的 0 没到调用方（真值 0 被当成没报？）
 FAIL	EXIT=1
 ```
+
+失败文案里不带行号是有意的：那条用例在引入它的分支上才有，行号会随着后续编辑漂，
+而这里要读者认的是**那句话本身**，不是它此刻在第几行。
 
 ## 原因
 
