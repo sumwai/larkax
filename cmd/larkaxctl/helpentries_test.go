@@ -215,6 +215,109 @@ func TestGroupPathsAnswerBothHelpForms(t *testing.T) {
 	}
 }
 
+// helpSaysItself 判断 `larkaxctl <path> help`（以及单层的 `help <path>`）打出来的
+// 首行是不是点出了这条路径自己。
+//
+// 判据与 TestSubGroupShortUsageStaysWithinBudget 的 selfNaming 同源：
+// `strings.Contains(首行, "larkaxctl "+path)`。不判 rc——深路径的 `help` 一律 rc=0，
+// 包括打错内容的那些，拿 rc 判等于什么都没判。
+func helpSaysItself(t *testing.T, path string) bool {
+	t.Helper()
+	var err error
+	out, errOut := captureStreams(t, func() {
+		err = dispatch(append(strings.Fields(path), "help"))
+	})
+	if err != nil {
+		return false
+	}
+	first := out + errOut
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	return strings.Contains(first, "larkaxctl "+path)
+}
+
+// TestHelpRejectsDeepPath 钉住 `larkaxctl help <深路径>` 报错，而不是静默丢段。
+//
+// 这一条要防的是一类**看不出来**的错：`help wallet payout` 曾经把末尾那段扔掉，
+// 打出来的是 `help wallet` 那一页——两页逐字节相同，人照着根帮助页末行的写法
+// 敲一个深路径，拿到的是父组的说明，而没有任何线索能发现。
+//
+// 只认一层的代价是这条命令从 rc=0 变成 rc=2。判据落在 rc 上，因为那正是这次
+// 变更要钉的东西——「静默」与「报错」在输出上可能只差一行，在退出码上不会。
+//
+// **不给它做逐层下钻**：那要把整条路径喂回分派器（`help a b` → `a b help`），
+// 于是 `help migrate create` 变成 `migrate create help`——而 `help` 在 create
+// 那里是合法的迁移名。深路径本来就有自己的一条路：`larkaxctl <深路径> help`。
+func TestHelpRejectsDeepPath(t *testing.T) {
+	// 从注册表派生，不手抄：手抄的路径名一旦写错，这条用例会去测一条不存在的
+	// 命令（那也会 rc=2，于是照样绿）。
+	var deep []string
+	for _, path := range groupPathsDerived(t) {
+		if strings.Contains(path, " ") {
+			deep = append(deep, path)
+		}
+	}
+	if len(deep) < 10 {
+		t.Fatalf("只派生出 %d 条深路径：注册表扫描坏了，这条用例会安静地通过", len(deep))
+	}
+
+	for _, path := range deep {
+		t.Run(path, func(t *testing.T) {
+			var err error
+			out, errOut := captureStreams(t, func() {
+				err = dispatch(append([]string{"help"}, strings.Fields(path)...))
+			})
+			if err == nil {
+				t.Fatalf("help %s 应当报参数错，却成功了：%q",
+					path, out+errOut)
+			}
+			if code := cli.ExitCode(err); code != 2 {
+				t.Errorf("help %s 的退出码是 %d，想要 2（参数错）：%v", path, code, err)
+			}
+
+			// 报错里给的两条出路，**至少一条真的走得通**。
+			//
+			// 这一条是这条用例的重点。文案里的指引没人验过，正是
+			// payout_test.go:852 那条注释用了一年的坑：它说「笼统的 help 只认
+			// 第一层」，而没有人跑过那条路。这一次换了个位置——报错文案推荐
+			// `larkaxctl <深路径> help`，而 18 条深路径里有 6 条照着敲拿到的是
+			// **父组**的说明。
+			//
+			// 判据是「那条路打出来的首行点出它自己」，不是「rc=0」：深路径的
+			// `<路径> help` 一律 rc=0，包括那 6 条打错内容的。
+			if !strings.Contains(err.Error(), path+" help") {
+				t.Errorf("help %s 的报错没有给出深路径那条写法：%v", path, err)
+			}
+			parent := strings.Fields(path)[0]
+			if !strings.Contains(err.Error(), "larkaxctl help "+parent) {
+				t.Errorf("help %s 的报错没有给出父组那条写法：%v", path, err)
+			}
+
+			deepWorks := helpSaysItself(t, path)
+			parentWorks := helpSaysItself(t, parent)
+			if !deepWorks && !parentWorks {
+				t.Errorf("help %s 的两条出路都走不通：`%s help` 与 `help %s` "+
+					"打出来的都不是自己的说明", path, path, parent)
+			}
+		})
+	}
+
+	// 反向锚：单层路径**不能**被这条判据波及。少了它，把 dispatch 的 help 分支
+	// 改成「一律报错」也能让上面的全部通过。
+	for _, one := range []string{"wallet", "user", "migrate"} {
+		t.Run("单层_"+one, func(t *testing.T) {
+			ok, out := runHelpForm(t, one, "help")
+			if !ok {
+				t.Fatalf("help %s 不该报错，得到：%q", one, out)
+			}
+			if !strings.Contains(out, "larkaxctl "+one) {
+				t.Errorf("help %s 打出来的不是它自己的帮助：%q", one, out)
+			}
+		})
+	}
+}
+
 // TestEveryDerivedPathAnswersHelpFlag 是门二：注册表派生的**每一条**路径
 // （命令组与叶子都算）都要认得 `-h`。
 //

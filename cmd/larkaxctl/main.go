@@ -455,6 +455,43 @@ func dispatch(args []string) error {
 			cli.PrintUsage(os.Stderr, usage)
 			return cli.UsageErr(fmt.Errorf("未知子命令 %q", rest[0]))
 		}
+		// 多出来的段**报错**，不静默丢掉。
+		//
+		// 今天 `larkaxctl help wallet payout` 打出来的是 `help wallet` 那一页——
+		// 末尾那段 `payout` 被扔掉、不吭声，而那两页逐字节相同，人没有任何线索
+		// 能发现拿错了。根帮助页末行教的就是 `larkaxctl help <命令>`，人照着敲
+		// 一个深路径，得到的是父组的说明。
+		//
+		// 这里**不做逐层下钻**：那要把整条路径喂回分派器（`help a b` 改写成
+		// `a b help`），于是 `help migrate create` 变成 `migrate create help`——
+		// 而 `help` 在 create 那里是**合法的迁移名**，会去建一个文件。
+		//
+		// # 报错里给的出路必须真的走得通，所以给两条而不是一条
+		//
+		// 原先这里一律说「写成 `larkaxctl <深路径> help`」。那句话对**有自己帮助页**
+		// 的组成立，对另外 6 条不成立——`admin token`、`user delete`、`user key plans`、
+		// `user plan order`、`plan key`、`plan order` 打出来的首行是父组的名字
+		// （它们登记在 helpentries_test.go 的 shortUsageNotSelfNaming 里，是既有欠账）。
+		// 对着这 6 条推荐那条写法，等于教人敲一条照样拿到父组说明的路。
+		//
+		// 为什么不按「有没有自己的一页」分流：那要一张静态表，而表会与各组实现漂
+		// （`shortUsageNotSelfNaming` 已经在测试里漂过一轮）；在报错时实跑一次
+		// `<路径> -h` 探一探则要执行命令，正是 #1277 那一笔刚修掉的形态。
+		//
+		// 所以两句话都给，各自成立、互不冒充：一句是「若它有自己的页面」，一句是
+		// 「父组一定看得见」。TestHelpRejectsDeepPath 断言**第一条真的走得通，
+		// 或者第二条真的走得通**——文案里的指引没有人验过，正是 payout_test.go:852
+		// 那条注释用了一年的坑。
+		//
+		// 报错而不是静默，代价是 `help <深路径>` 从 rc=0 变成 rc=2。那是行为
+		// 变更，写进了 PR 描述。
+		if len(rest) > 1 {
+			path := strings.Join(rest, " ")
+			return cli.UsageErr(fmt.Errorf(
+				"help 只认一层：%q 是深路径。它若有自己的一页，写成 `larkaxctl %s help`；"+
+					"想看它所属那一组，写成 `larkaxctl help %s`",
+				path, path, rest[0]))
+		}
 		cli.PrintUsage(os.Stdout, c.help.long)
 		return nil
 	case "-V", "--version":
