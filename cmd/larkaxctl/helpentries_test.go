@@ -430,10 +430,54 @@ func TestLeadingHelpFlagIgnoresTrailingArgs(t *testing.T) {
 		})
 	}
 
-	// 反向锚之二：对比数不能是 0。派生链断掉时这条门会安静地通过。
+	// 对账三件事，各自的失效方式不同，缺一条就有一种「少扫」漏过去：
+	//
+	//  1. **跑过的路径数**要与独立来源相符。这条挡的是 `allPathsDerived` 自己
+	//     少返回几条——只比 `compared` 与 `len(paths)*len(helpForms)` 挡不住，
+	//     两个数都来自 paths，截短了会一起变小、仍然相等。
+	//  2. **比过的组数**要与 `len(paths) * len(helpForms)` 相符。这条挡的是循环
+	//     体少走几趟（`continue` 前漏了累加、内层只取了第一种写法）。
+	//  3. 组数不为 0，挡住「两份注册表都空」。
+	//
+	// 三条都是「期望值不由被测量本身推出」。原先只有第 3 条，它的形状与
+	// #1280 修掉的 `checked == 0` 一模一样：只判「非零」等于允许少扫。
+	if got, want := len(paths), independentlyCountedPaths(); got != want {
+		t.Fatalf("派生出 %d 条路径，而三份注册表展开取并集是 %d 条："+
+			"allPathsDerived 少返回了 %d 条，这条门会安静地漏掉它们",
+			got, want, want-got)
+	}
+	if want := len(paths) * len(helpForms); compared != want {
+		t.Fatalf("只比了 %d 组，应有 %d 组（%d 条路径 × %d 种写法）："+
+			"某一趟循环没有跑到", compared, want, len(paths), len(helpForms))
+	}
 	if compared == 0 {
 		t.Fatal("一组都没比到：派生链断了，这条门什么也没证明")
 	}
+}
+
+// independentlyCountedPaths 是 allPathsDerived 的**对账来源**：读同样的三份
+// 注册表，在这里再展开一次并去重。
+//
+// 它与 allPathsDerived 刻意是两份代码。合成一份就只剩「自己与自己相等」——
+// 那边少返回几条时，这边跟着少，对账永远成立。两份都读注册表，所以增删命令
+// 两边一起动，不需要维护；只有 allPathsDerived 的**口径**变了才要改这里。
+func independentlyCountedPaths() int {
+	seen := map[string]bool{}
+	for _, g := range commandGroups {
+		for _, c := range g.commands {
+			seen[c.name] = true
+		}
+	}
+	for _, c := range legacyCommands {
+		seen[c.name] = true
+	}
+	for path, verbs := range completionActionTable {
+		seen[path] = true
+		for _, verb := range verbs {
+			seen[path+" "+verb] = true
+		}
+	}
+	return len(seen)
 }
 
 // helpForms 是这道门要测的写法。**只有这两种**：`flag` 包虽然也认 `-help` 与
