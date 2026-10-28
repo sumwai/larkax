@@ -1483,7 +1483,7 @@ cat secret.txt | go run ./cmd/larkaxctl channel create \
 ```sh
 gofmt -l .                          # 列出未格式化的文件
 go vet ./...
-golangci-lint run ./...             # 跨文件与语义检查，配置见 .golangci.yml
+golangci-lint run ./...             # 跨文件与语义检查，配置见 .golangci.yml；版本要钉，见「本地跑门禁的前提」
 go test ./...
 go test -race ./...
 go test -cover ./...
@@ -1662,6 +1662,18 @@ MANPATH="$PWD/man" man larkaxctl-channel
 
 ### 本地跑门禁的前提
 
+- **`golangci-lint` 的版本要钉住，而且「命令没跑成」与「跑完没报问题」同形**。
+  这台机器上直接敲 `golangci-lint` 可能落到一个没有版本设置的 shim 上，它打印
+  `mise ERROR No version is set for shim: golangci-lint` 并**以非零码退出**——
+  但如果你把命令写在 `&&` 链的中间、或者只看「有没有 issues 字样」，那一步就静默跳过了。
+  对齐 CI 的跑法（版本见 `.github/workflows/gates.yml` 的 `version:`）：
+
+  ```sh
+  mise exec golangci-lint@2.14.0 -- golangci-lint run ./...
+  echo "EXIT=$?"
+  ```
+
+  **`EXIT=` 这一行才是判据。** 不要把它接进管道去 `grep`——见 LESSONS 第 16 条。
 - **`check-deadcode.sh` 要先装 `deadcode`**，版本与脚本里的 `PINNED_TOOLS_VERSION`
   一致；不一致时脚本会打印该装哪一版，然后拒绝运行。
 - **集成测试要数据库**：`LARKAX_DB_DSN` 没设时那些用例整包 `t.Skip`，
