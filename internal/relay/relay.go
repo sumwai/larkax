@@ -289,7 +289,11 @@ func ParseRequest(ctx context.Context, protocol channel.Protocol, body []byte) (
 	case channel.ProtocolOpenAIResponses:
 		// 这一条的请求体与另外两条差得远，所以它走自己的解析（见
 		// parseResponsesRequest），转出来的仍是同一个 OpenAI Chat 形状。
-		return parseResponsesRequest(ctx, body)
+		req, err := parseResponsesRequest(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		return withNativeBody(req, body), nil
 	default:
 		// custom 没有固定的请求体形状：它由具体适配器说了算，
 		// 在这里猜一个会让「调用方说的是哪套协议」这件事失去意义。
@@ -299,7 +303,25 @@ func ParseRequest(ctx context.Context, protocol channel.Protocol, body []byte) (
 	if err := kitutil.Unmarshal(body, src); err != nil {
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
 	}
-	return FromRelaykitRequest(ctx, protocol, src)
+	req, err := FromRelaykitRequest(ctx, protocol, src)
+	if err != nil {
+		return nil, err
+	}
+	return withNativeBody(req, body), nil
+}
+
+// withNativeBody 把调用方发来的原始字节挂到解析结果上。
+//
+// 填在这里是因为这是唯一同时拿得到「原始字节」与「验证通过的请求」的位置：
+// 两个解析函数只换回结构，拿不到原文；FromRelaykitRequest 另外也被别处调用，
+// 而且它手上没有字节。放在 ParseRequest 里，入口的首次请求与撞键之后的重试
+// 两个调用点就一次覆盖了。
+//
+// 挂的是同一个切片而不是拷贝：body 来自 readBody 的 io.ReadAll，调用方在
+// 本次请求内不再改它，拷贝只是让一个大请求体在内存里多存一份。
+func withNativeBody(req *channel.Request, body []byte) *channel.Request {
+	req.NativeBody = body
+	return req
 }
 
 // parseResponsesRequest 解析一条 OpenAI Responses 协议的请求体。

@@ -143,30 +143,68 @@ var ErrClaimed = errors.New("这个幂等键已被另一个请求占用")
 // 客户端自己填的请求 id、时间戳、纯展示用的元数据。按原文哈希会把它们算进去，
 // 于是「同一个请求重发一次」被当成「同键不同体」拒掉——幂等键就白设了。
 //
-// # 为什么哈希的是**解析后**的请求
+// # 为什么哈希的是**解析后**的请求，而直通还要补一份残差
 //
-// 解析器（internal/relay）只把管道真正会用到的字段搬过来，其余一律丢掉。
-// 那些被丢掉的字段改不了上游调用，也就改不了结果，所以它们自动不进指纹——
-// 这一条不是靠这里少列几个字段做到的，是靠哈希的对象本来就是解析结果。
+// 按字段列而不是按整份原文哈希，理由在上一节：原文里那些重试时最容易变的
+// 东西（客户端自己填的 id、时间戳、展示用元数据）不该让一次重发被判成
+// 「同键不同体」。这一半在两条路上都成立，没有变。
+//
+// 变的是另一半。原来这套做法有一个前提：解析器（internal/relay）只把管道
+// 真正会用到的字段搬过来，其余一律丢掉，而丢掉的那些字段改不了上游调用。
+// **同协议直通推翻了这个前提**——适配器以调用方的原文为报文来源，原样发给
+// 上游，于是原文里那些统一结构不认识的字段（top_k、cache_control、
+// stop_sequences、历史 thinking 块……）现在真的会改变上游行为。少了它们，
+// 两份不同的报文会共用指纹，第二次拿到的是第一次的缓存应答。
+//
+// 所以指纹分两块：上面这份字段集合（解析结果），加上 NativeResidue——
+// 原文里**读到但没进指纹**的那部分（见 nativeResidueOf）。原文为 nil
+// （内部调用、跨协议请求）时残差是零值，指纹与加它之前逐字节相同。
+//
+// 残差里留什么、扣什么，按三分类：
+//
+//   - **读且无损** → 扣。值已经由上面某个字段携带，扣掉不会让两份报文合并。
+//     典型是 role 与字符串形式的 content：枢纽把它们逐字搬进 Message 与
+//     ContentBlock.Text。
+//   - **读但有损（多对一折算）** → 不扣。枢纽读到它，却把它折成了比原文粗的
+//     一个值；扣掉就等于宣称「凡折成同一个值的原文都是同一个请求」，而直通
+//     把原文原样发上游，上游分得出它们的差别。thinking 的 budget_tokens 是
+//     这一类的代表：枢纽把预算折成几档 effort（≤1024 是 low、≤8192 是
+//     medium、其余 high，0 与负数另有取值），512 与 1024 都折成 low，
+//     扣掉预算就让两份不同预算的报文共用指纹。注意这里**不是**「枢纽读不到」
+//     ——hashInput 里就有 ReasoningEffort，枢纽确实读了它，只是读得粗。
+//   - **读不到** → 不扣。直通把原文原样发上游，枢纽读不到的键对上游可能是
+//     活的（cache_control 是最典型的：上游转换器读它，而 channel.ContentBlock
+//     没有对应的字段，hashInput 里也就没有）。
 //
 // 逐字段的理由：
 //
 //   - Protocol：协议不同，响应体的**形状**就不同（OpenAI 与 Anthropic 的
 //     成功响应与错误体都不一样）。同一个键在两条入口上重放，会把一种形状
 //     的响应体发给按另一种形状解析的 SDK。
+//
 //   - Model：换模型就是换一次请求，答案与价格都不同。
+//
 //   - Messages：对话内容本身。
+//
 //   - MaxTokens：输出上界，影响预留金额与答案长度。
+//
 //   - Temperature / TopP / ReasoningEffort：采样参数，影响答案。
+//
 //   - Tools：工具定义，影响答案与上游是否走工具调用。
+//
 //   - Stream：流式与非流式的结果形状不同（一串 SSE 帧 vs 一个 JSON 对象），
 //     存下来的那份只能按它当初的样子重放。
+//
 //   - Extra：上游特有参数。**它当前恒为 nil**——入口唯一的解析出口
 //     （internal/relay 的 FromRelaykitRequest）不写这个字段，所以走公共入口
 //     的请求在这里永远是 null。留着它是因为适配器那一层会把它透传给上游
 //     （见 internal/relay 的 ToRelaykit）：哪天那条路接上了，改这个 map 就是
 //     改一次请求，该算成另一次。写在这里是为了让「它现在不生效」与
 //     「它为什么还在这张表里」两件事都留在同一处，而不是靠读代码去发现。
+//
+//     上一段说的「透传」今天实际生效的是下面的 NativeResidue：直通模式下
+//     原文里那些 dto 不认识的参数由它进指纹。将来谁想接 Extra，先读
+//     NativeResidue——不要造出两套机制管同一件事。
 //
 // 刻意**不**进来的：
 //
@@ -192,22 +230,38 @@ type hashInput struct {
 	Tools           []channel.Tool    `json:"tools"`
 	Stream          bool              `json:"stream"`
 	Extra           map[string]any    `json:"extra"`
+
+	// NativeResidue 是原文里**没被上面那几项覆盖**的部分（见 nativeResidueOf）。
+	//
+	// 直通模式下它才非空：原文为 nil 时它是零值，omitempty 让序列化结果与
+	// 加这个字段之前逐字节相同——指纹是公开契约（docs/api.md 写着同一份
+	// 请求两次得到同一个指纹），一个恒为 null 的新字段也会改变它的值。
+	NativeResidue map[string]any `json:"native_residue,omitempty"`
 }
 
-// HashRequest 算出一次请求的幂等指纹。
+// newHashInput 把一次请求折成进指纹的字段集合。
 //
-// 返回错误而不是在失败时回落到一个默认值：回落会让两个**不同**的请求
-// 得到同一个指纹，而后果是「第二个请求拿到第一个的响应」——那是对调用方
-// 撒谎，且看不出来。宁可不做幂等。
+// HashRequest 走它，测试的前提断言也走它（见 native_residue_test.go）：
+// 两处各拼一份的话，加一个字段时会出现「指纹算了、前提断言没算」，
+// 而那种偏差只在某条用例变红时才暴露。
 //
-// 实际能触发它的只有 Extra / ToolInput / InputSchema 那几个 map 里混进了
-// JSON 编不出来的值（NaN、函数、channel）。从 JSON 解析出来的请求走不到
-// 这里，但那些 map 也可能被插件写进去。
-func HashRequest(protocol channel.Protocol, req *channel.Request) ([32]byte, error) {
-	if req == nil {
-		return [32]byte{}, errors.New("请求为 nil")
+// 残差在这里就算好，不是留给调用方填：算残差会失败（原文不是 JSON 对象），
+// 而失败必须并进 HashRequest 那一个 error——签名不动。
+func newHashInput(protocol channel.Protocol, req *channel.Request) (hashInput, error) {
+	// 扣除集合按**入口协议**取。以 req.Protocol 为准：它是「这份原文是从哪条
+	// 入口收进来的」，扣键表认的正是这个。空串表示不知道入口是哪条（见
+	// channel.Request.Protocol），那时退回 protocol 参数——两边都由入口填成
+	// 同一个值，退回只是让「没有 req.Protocol 的调用点」不至于整份原文都进残差。
+	entry := req.Protocol
+	if entry == "" {
+		entry = protocol
 	}
-	raw, err := json.Marshal(hashInput{
+
+	residue, err := nativeResidueOf(entry, req.NativeBody)
+	if err != nil {
+		return hashInput{}, err
+	}
+	return hashInput{
 		Protocol:        protocol,
 		Model:           req.Model,
 		Messages:        req.Messages,
@@ -218,7 +272,30 @@ func HashRequest(protocol channel.Protocol, req *channel.Request) ([32]byte, err
 		Tools:           req.Tools,
 		Stream:          req.Stream,
 		Extra:           req.Extra,
-	})
+		NativeResidue:   residue,
+	}, nil
+}
+
+// HashRequest 算出一次请求的幂等指纹。
+//
+// 返回错误而不是在失败时回落到一个默认值：回落会让两个**不同**的请求
+// 得到同一个指纹，而后果是「第二个请求拿到第一个的响应」——那是对调用方
+// 撒谎，且看不出来。宁可不做幂等。
+//
+// 实际能触发它的只有 Extra / ToolInput / InputSchema 那几个 map 里混进了
+// JSON 编不出来的值（NaN、函数、channel），以及原文解析不出一个 JSON 对象。
+// 后者只可能在 NativeBody 非 nil 时出现，而那意味着有人把一份解析不了的
+// 字节塞进了这个字段；报错比落回空残差安全——空残差正是「两份不同原文
+// 共用指纹」的那条路。
+func HashRequest(protocol channel.Protocol, req *channel.Request) ([32]byte, error) {
+	if req == nil {
+		return [32]byte{}, errors.New("请求为 nil")
+	}
+	in, err := newHashInput(protocol, req)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	raw, err := json.Marshal(in)
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("序列化请求以计算幂等指纹: %w", err)
 	}

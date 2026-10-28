@@ -528,6 +528,9 @@ const (
 	responsesUpstreamResponseID = "resp-placeholder"
 	responsesUpstreamMessageID  = "resp-placeholder_msg_0"
 	responsesUpstreamCallItemID = "resp-placeholder_call_0"
+	// responsesUpstreamCreatedAt 是假上游报的创建时间。真上游带这个字段
+	// （见 real_stream_sequence_test.go），不带的话直通会把它原样转成 0。
+	responsesUpstreamCreatedAt = 1700000000
 )
 
 // fakeToolCall 是假上游要报出的一次工具调用。
@@ -607,7 +610,11 @@ func (f *fakeUpstream) responsesUsageBody() map[string]any {
 func (f *fakeUpstream) responsesBody(status string, output []any) map[string]any {
 	return map[string]any{
 		"id": responsesUpstreamResponseID, "object": "response", "status": status,
-		"model": f.upstreamModelName(), "output": output, "usage": f.responsesUsageBody(),
+		// created_at 由真上游给出（见 real_stream_sequence_test.go 的样本：
+		// 每一帧的 response 对象都带它）。假上游不带的话，非流式直通会把它
+		// 原样转成 0——那是夹具不完整，不是网关该替上游编一个时间戳。
+		"created_at": responsesUpstreamCreatedAt,
+		"model":      f.upstreamModelName(), "output": output, "usage": f.responsesUsageBody(),
 	}
 }
 
@@ -637,6 +644,14 @@ func (f *fakeUpstream) serveResponsesStream(w http.ResponseWriter) {
 	}
 
 	written := 0
+	// seq 是这一条流的 sequence_number。
+	//
+	// 真上游自己带这个字段（见 internal/channel/responsesadapter 的
+	// real_stream_sequence_test.go：从 response.created 的 0 一直排到
+	// response.completed 的 19），所以假上游也必须带——不带的话，直通把
+	// 上游字节原样转出去，客户端收到的每一帧都没有序号，而那不是上游的
+	// 行为，是夹具不完整。
+	seq := 0
 	// write 写一条事件。已经吐够 failAfterStreamEvents 条时改写成一条错误事件
 	// 并返回 false，调用方据此收工——那模拟的是「上游在流中途断了」，它与
 	// 「上游在接受请求之前就失败」是两条不同的路（后者回一个非 2xx）。
@@ -645,13 +660,21 @@ func (f *fakeUpstream) serveResponsesStream(w http.ResponseWriter) {
 			// type 必须写在载荷里，不能只写在 event: 行上：适配器跳过 event:
 			// 行，按载荷里的 type 分支（真实上游两处都有，而载荷那一处才是
 			// 它读的）。只写 event: 行的话这条事件会被当成不认识而静默丢掉。
+			//
+			// 这一帧**不带** sequence_number，也没有别的字段：真上游的流内
+			// 错误样本不在仓库里，所以这里只给适配器读的那个 type 与一句
+			// 可辨认的 message。带上一个我们没见过的字段，等于把「上游会发
+			// 它」这件事写进假上游，而那不是证据。
 			writeResponsesEvent(w, "error", map[string]any{
-				"type": "error", "message": "placeholder upstream failure",
+				"type":    "error",
+				"message": "placeholder upstream failure",
 			})
 			flush()
 			return false
 		}
 		payload["type"] = eventType
+		payload["sequence_number"] = seq
+		seq++
 		writeResponsesEvent(w, eventType, payload)
 		flush()
 		written++

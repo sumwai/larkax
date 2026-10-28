@@ -394,10 +394,10 @@ func TestResponsesEndToEnd(t *testing.T) {
 		Model           string `json:"model"`
 		Instructions    any    `json:"instructions"`
 		MaxOutputTokens int64  `json:"max_output_tokens"`
-		Input           []struct {
-			Role    string `json:"role"`
-			Content any    `json:"content"`
-		} `json:"input"`
+		// input 按 any 接：同协议直通把调用方原文原样送上游，而 Responses 的
+		// input 允许**字符串简写**，于是上游收到的是字符串而不是消息数组。
+		// 形状不同是直通的正常结果，但「内容对不对」仍然要判——见下面那段。
+		Input  any  `json:"input"`
 		Stream bool `json:"stream"`
 	}
 	if err := json.Unmarshal(bodies[0], &sent); err != nil {
@@ -417,16 +417,48 @@ func TestResponsesEndToEnd(t *testing.T) {
 		t.Errorf("上游收到的 instructions = %q，期望 %q（Responses 的 system 是顶层字段，转换时不能丢）",
 			got, "你是假上游")
 	}
-	if len(sent.Input) != 1 || sent.Input[0].Role != "user" {
-		t.Errorf("上游收到的 input = %+v，期望**只有**一条用户消息（instructions 不该被塞进这里）", sent.Input)
-	} else if got := textOf(t, sent.Input[0].Content); got != "你好" {
-		t.Errorf("上游收到的 input[0].content = %q，期望 你好", got)
+	// input 的**内容**要等于调用方写的那一句话，一处都不能多。
+	//
+	// 形状（字符串简写 vs 消息数组）不判：直通把调用方原文原样发上游，简写
+	// 是最自然的结果。但内容必须还是调用方那一句——instructions 被塞进
+	// input、或者 input 被丢掉，都是上游行为变了而调用方在响应上看不出来。
+	// 所以这里按内容判，不按形状判。
+	if got := responsesInputText(t, sent.Input); got != "你好" {
+		t.Errorf("上游收到的 input = %v（取文本 %q），期望只有调用方写的那一句 你好", sent.Input, got)
 	}
 	if sent.Stream {
 		t.Error("上游收到的请求里 stream 是 true——调用方没有要流式")
 	}
 	if paths := fake.sentPaths(); len(paths) != 1 || paths[0] != "/v1/responses" {
 		t.Errorf("上游收到的路径 = %v，期望 [/v1/responses]（Responses 上游的端点）", paths)
+	}
+}
+
+// responsesInputText 取 Responses 请求里 input 的文本，两种合法形态都认。
+//
+// 字符串简写（`"input":"你好"`）与消息数组（`[{"role":"user","content":…}]`）
+// 都是合法的 Responses 请求：枢纽那条路把它规范化成数组，同协议直通把调用方
+// 原文原样发上去，于是这里是简写。形状不是这个用例要判的东西，内容才是，
+// 所以两者都在这里收成一个字符串。
+func responsesInputText(t *testing.T, v any) string {
+	t.Helper()
+
+	switch in := v.(type) {
+	case string:
+		return in
+	case []any:
+		var out strings.Builder
+		for _, item := range in {
+			msg, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("input 的每一项是 %T，期望一个消息对象", item)
+			}
+			out.WriteString(textOf(t, msg["content"]))
+		}
+		return out.String()
+	default:
+		t.Fatalf("input 是 %T，期望字符串简写或消息数组", v)
+		return ""
 	}
 }
 

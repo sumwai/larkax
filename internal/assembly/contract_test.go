@@ -87,6 +87,20 @@ const (
 	// models 是 GET /v1/models 那条只读路径。它只**被列出来**，不会被调用：
 	// 清单里的名字来自目录行与渠道的 models 声明，与上游无关（见 #872）。
 	contractSuffixModels = "models"
+
+	// native 是同协议直通那条路（见 docs/api.md 的「同协议直通」）。
+	//
+	// 它的假上游不按固定形状回，而是**把收到的请求体原样回显进响应正文**
+	// ——这样 Python 那一侧能拿它与自己发出去的那份逐字段比，而不必在两边
+	// 各写一份夹具。两份夹具会各自漂移，而漂移的那一份不会报错。
+	contractSuffixNative = "native"
+
+	// contractNativeUpstreamSuffix 接在直通那条的规范名后面，得到上游名。
+	//
+	// 两个名字必须不同：直通要证「上游收到的是调用方原文（覆写项除外）」，
+	// 而 model 是覆写项之一。两边同名时，「上游名被写进去了」与「原文里的
+	// 名字没动」是同一件事，断言分不出来。
+	contractNativeUpstreamSuffix = "-upstream"
 )
 
 // contractModelsVendor 是模型清单那一行的 vendor。
@@ -156,12 +170,17 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 
 	prefix := unique("contract-" + string(protocol))
 	fake := &contractUpstream{
-		protocol:    protocol,
-		textModel:   prefix + "-" + contractSuffixText,
-		toolModel:   prefix + "-" + contractSuffixTools,
-		failModel:   prefix + "-" + contractSuffixFail,
-		drainModel:  prefix + "-" + contractSuffixDrain,
-		modelsModel: prefix + "-" + contractSuffixModels,
+		protocol:   protocol,
+		textModel:  prefix + "-" + contractSuffixText,
+		toolModel:  prefix + "-" + contractSuffixTools,
+		failModel:  prefix + "-" + contractSuffixFail,
+		drainModel: prefix + "-" + contractSuffixDrain,
+		// 直通那条：规范名给调用方，上游名发给上游（见下面种别名那段）。
+		// 上游名 = 规范名 + "-upstream"，与 Python 那一侧推法相同——两边靠
+		// 同一个后缀描述同一对名字，改一边要改另一边（与别的后缀同一约定）。
+		nativeCanonical: prefix + "-" + contractSuffixNative,
+		nativeModel:     prefix + "-" + contractSuffixNative + contractNativeUpstreamSuffix,
+		modelsModel:     prefix + "-" + contractSuffixModels,
 	}
 
 	upstreamSrv := httptest.NewServer(fake.handler())
@@ -191,6 +210,26 @@ func runContract(t *testing.T, protocol channel.Protocol) {
 	// 会把另外三条用例的账一起改掉。
 	seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL, fake.drainModel, string(protocol), 0)
 	seedRule(t, db, fake.drainModel, contractDrainRule)
+
+	// 同协议直通那条（见 docs/api.md 的「同协议直通」）：**只注册 Anthropic**。
+	//
+	// 这一条的范围就是 Anthropic——另外两条协议的直通由 internal/channel 各
+	// 适配器的 native 用例与 internal/api 的渲染器用例钉着，这里不重复。
+	// 给它们也注册一个模型名，只会得到一条 Python 侧没有对应用例的渠道。
+	//
+	// 它配了一条别名：调用方写**规范名**，上游收到**上游名**。这样一条断言
+	// 能同时钉两件事——上游收到的报文里 `model` 是上游名（原文被覆写了这一
+	// 项），而回给调用方的 `model` 是规范名（响应里回显的是他要的那个）。
+	// 两边同名的话，这两件事都变成恒真。
+	if protocol == channel.ProtocolAnthropic {
+		seedCatalogModel(t, db, fake.nativeCanonical)
+		// 渠道声明的是**规范名**（选路按它匹配，见 internal/route），上游名
+		// 来自那条别名。
+		channelID := seedChannelOfType(t, db, sealer, merchant, upstreamSrv.URL,
+			fake.nativeCanonical, string(protocol), 0)
+		seedAlias(t, db, channelID, fake.nativeModel, fake.nativeCanonical)
+		seedRule(t, db, fake.nativeCanonical, rule)
+	}
 
 	// 模型清单那条（见 #872）：**目录行**与**在供的渠道**两样都要，清单才
 	// 列得出它——只有渠道没有目录行时不列（判据是两者都在），而 vendor 也
@@ -297,6 +336,10 @@ type contractUpstream struct {
 	toolModel  string
 	failModel  string
 	drainModel string
+	// nativeCanonical / nativeModel 是同协议直通那条路（见
+	// contractSuffixNative）：前者是调用方写的名字，后者是发给上游的名字。
+	nativeCanonical string
+	nativeModel     string
 	// modelsModel 只用于 GET /v1/models 那条用例：它由目录行与渠道声明拼
 	// 出来，请求不会打到上游。
 	modelsModel string
@@ -324,6 +367,8 @@ func (u *contractUpstream) handler() http.Handler {
 			u.writeToolCall(w, req.Stream, req.Model)
 		case u.drainModel:
 			u.writeDrain(w, req.Stream, req.Model)
+		case u.nativeModel:
+			u.writeNative(w, req.Stream, req.Model, body)
 		case u.textModel:
 			u.writeText(w, req.Stream, req.Model)
 		default:
@@ -505,6 +550,109 @@ func (u *contractUpstream) writeToolCall(w http.ResponseWriter, stream bool, mod
 		contractPromptTokens+contractCompletionTokens)
 }
 
+// ── 同协议直通 ────────────────────────────────────────────────────────
+//
+// 这一段只在 Anthropic 协议下有意义：另外两套协议的入口译文不参与本组用例
+// （见 runContract 里的注册条件）。
+//
+// # 假上游为什么把请求体回显进响应
+//
+// 直通要证的是两件事：**上游收到的报文是调用方的原文**（覆写项除外），以及
+// **响应里的字段原样到了调用方**。前一件事在 Python 那一侧看不到——它只看得见
+// 响应。所以这里的假上游把收到的那份报文塞进响应的**顶层额外字段**
+// `native_echo`：SDK 容忍未知字段（`extra: allow`），Python 侧读得到它，于是
+// 「上游到底收到了什么」在客户端这边成了可断言的。
+//
+// 响应里另带三处统一结构不认识的真字段（`container`、`usage.service_tier`、
+// 非空 `stop_sequence`）：它们是「这次真的走了直通」的判据——枢纽那条路按
+// dto 裁剪，这三处会消失。
+func (u *contractUpstream) writeNative(w http.ResponseWriter, stream bool, model string, body []byte) {
+	if u.protocol != channel.ProtocolAnthropic {
+		// 别的协议上这个模型名没被注册（见 runContract），走到这里说明装配侧
+		// 与用例的口径对不上。显式报出来，而不是回一个看起来正常的响应。
+		u.writeFailure(w)
+		return
+	}
+	echo := string(body)
+	if stream {
+		u.anthropicNativeStream(w, model, echo)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"id":"msg_native","type":"message","role":"assistant","model":%q,`+
+		`"content":[{"type":"text","text":%q}],`+
+		`"stop_reason":"end_turn","stop_sequence":"\n\nHuman:",`+
+		`"container":{"id":"container_contract","expires_at":"2026-01-01T00:00:00Z"},`+
+		`"usage":{"input_tokens":%d,"output_tokens":%d,"service_tier":"standard"},`+
+		`"native_echo":%s}`,
+		upstreamModelName(model), contractTextPartA+contractTextPartB,
+		contractPromptTokens, contractCompletionTokens, echo)
+}
+
+// anthropicNativeStream 吐一条**真形状**的 Anthropic 流，并且把请求体原样
+// 回显在 message_start 的额外字段里。
+//
+// 形状上刻意比别的流复杂，因为直通要证的正是「原生块原样转发」：
+//
+//   - 一个纯注释块（上行心跳就是这种，它不是 SSE 字段）；
+//   - `event: ping` 心跳块；
+//   - 扩展思考的 `thinking_delta`——统一事件流会把它扔掉（见 anthropicadapter
+//     的 pump），所以它出现即证明走的是直通；
+//   - message_delta 块里多一行**空 data 行**（真样本里就有）；
+//   - message_delta **不带** `input_tokens`（真上游两种形状都发过）。
+//
+// 注释行与空 data 行都是 `parseFrames` 那类解析器读不了的东西，所以它们能
+// 到客户端这件事本身，就是「按字节转发」的证据。
+func (u *contractUpstream) anthropicNativeStream(w http.ResponseWriter, model, echo string) {
+	// 注释块与空 data 行不走 sse()：那个辅助函数只会写 `data:` / `event:`
+	// 两种规范行，而这里要写的正是规范之外的那两种。
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	flush := func() {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+	write := func(s string) {
+		_, _ = io.WriteString(w, s)
+		flush()
+	}
+
+	name := upstreamModelName(model)
+	write(fmt.Sprintf(`event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"msg_native",`+
+		`"type":"message","role":"assistant","model":%q,"content":[],`+
+		`"stop_reason":null,"stop_sequence":null,`+
+		`"usage":{"input_tokens":%d,"output_tokens":1},"native_echo":%s}}`+"\n\n",
+		name, contractPromptTokens, echo))
+	write(": keep-alive\n\n")
+	write("event: ping\ndata: {\"type\":\"ping\"}\n\n")
+	write("event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0," +
+		"\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n")
+	write("event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0," +
+		"\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"想一想。\"}}\n\n")
+	write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+	write("event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":1," +
+		"\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+	for _, part := range []string{contractTextPartA, contractTextPartB} {
+		write(fmt.Sprintf("event: content_block_delta\n"+
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":%q}}`+"\n\n",
+			part))
+	}
+	write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+	// 末行是**空 data 行**（真上游发过的形状），而 usage 里**带** input_tokens：
+	// 直通原样转发上游写的那个数，不补、不改。契约测试断言的就是「上游报的值
+	// 原样到了调用方」——夹具不带的话，这条断言能红的理由就只剩「网关自己补了
+	// 一个」，而那正是要删掉的行为。
+	write(fmt.Sprintf("event: message_delta\n"+
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
+		`"usage":{"input_tokens":%d,"output_tokens":%d}}`+"\ndata:\n\n",
+		contractPromptTokens, contractCompletionTokens))
+	write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+}
+
 // ── 假上游的流式分支 ──────────────────────────────────────────────────
 
 // sse 起一个 SSE 响应，返回写帧的函数。
@@ -661,9 +809,15 @@ func (u *contractUpstream) anthropicTextStream(w http.ResponseWriter, model stri
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
 	}
 	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	// message_delta 带 input_tokens，与 message_start 同一个数：真上游两种形状
+	// 都发过（带的是 adapter_test.go:594 那份，不带的是 native_test.go:772 那份）。
+	// 这里带上，是因为用户拿到的那条流里这一处确实有值，而契约测试断言它等于
+	// 上游报的数——带上的话那条断言钉的是「原样送达」；不带的话它钉的会是
+	// 「网关补了一个」，而补写已经删了。
 	event("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
+			`"usage":{"input_tokens":%d,"output_tokens":%d}}`,
+		contractPromptTokens, contractCompletionTokens))
 	event("message_stop", `{"type":"message_stop"}`)
 }
 
@@ -751,6 +905,9 @@ func (u *contractUpstream) anthropicDrainStream(w http.ResponseWriter, model str
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
 	}
 	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	// 这一条（余额耗尽）不看 message_delta 的 input_tokens：流会在这之前被我们
+	// 切断。所以这里不带那个键也无妨——它**不是**在替谁测「缺了怎么办」，
+	// 直通那边已经不补了（见 anthropicNativeStream 里的同一处）。
 	event("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
 			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
