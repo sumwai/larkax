@@ -466,27 +466,28 @@ func TestNativePassthroughFlushesFinishBlockBeforeCutoff(t *testing.T) {
 	}
 }
 
-// message_delta 缺 input_tokens 时补的是**上游报过的那个数**，不是本地估算。
+// 上游的 message_delta 报了 input_tokens 时原样转发，一个字节都不改。
 //
-// # 为什么不补估算
+// # 这里曾经钉的是「补写」
 //
-// contract/README.md 写着「无论哪条路，`message_delta.usage.input_tokens`
-// 都是真值」，contract/check.py 断言的正是它等于上游报的数。Anthropic 上游
-// 在 message_start 里就报了真值（那一帧是流的第一帧，直通原样转给了调用方），
-// 而 message_delta 里**可能不带**（真样本 native_test.go:772 就是不带的那种）。
-// 那时补一个按字数算的估算，客户端会在同一条流里看到一个 12 后面跟一个 3。
+// 直通曾经在 message_delta 缺这个键时补一个值：先是本地估算，后来改成上游在
+// message_start 报过的数。两种补法都错了同一个地方——那个数只进了客户端，
+// 结算走的是适配器累计出的 usage 事件，于是同一次请求里客户端读到 14、账上
+// 记 0，而两边都标着「实测」。补写的依据是「无论哪条路 message_delta 都是
+// 真值」，补了才让那句话成假。
 //
-// 钉两件事：补上了这个键；补的值是上游报的数而不是估算。
-func TestNativePassthroughFillsDeltaInputTokensFromUpstream(t *testing.T) {
-	// 上游报 42，本地估算必然不是 42（handler 给的 alias 与请求正文见
-	// newTestHandler 与 streamBody），所以「补的是 42」不会与估算混淆。
+// 现在没有补写：上游写什么就是什么。这一条钉「写了就原样到」，下一条钉
+// 「没写就没有」——两条合起来才是「逐字节转发」。
+func TestNativePassthroughForwardsDeltaInputTokensFromUpstream(t *testing.T) {
+	// 上游报 42，与本地估算（按字数估 "hi"）必然不同，所以「原样 42」不会
+	// 与「网关自己填了一个数」混淆。
 	const (
 		start = `event: message_start` + "\n" +
 			`data: {"type":"message_start","message":{"id":"req-native-test","type":"message",` +
 			`"role":"assistant","model":"m-1","content":[],"usage":{"input_tokens":42,"output_tokens":1}}}`
 		delta = `event: message_delta` + "\n" +
 			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
-			`"usage":{"output_tokens":7}}`
+			`"usage":{"input_tokens":42,"output_tokens":7}}`
 		stop = `event: message_stop` + "\n" + `data: {"type":"message_stop"}`
 	)
 
@@ -498,31 +499,27 @@ func TestNativePassthroughFillsDeltaInputTokensFromUpstream(t *testing.T) {
 		channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
 	)
 
-	body := rec.Body.String()
-	if !strings.Contains(body, `"input_tokens":42`) {
-		t.Errorf("message_delta 里没补上上游报的 input_tokens=42：%q", body)
-	}
-	if !strings.Contains(body, `"output_tokens":7`) {
-		t.Errorf("上游报的 output_tokens 没保留：%q", body)
-	}
-
-	// message_start 那一块原样转发（上游报了就不动），所以 42 出现两次：
-	// 一次在 start 里，一次是补进 delta 的那个。
-	if n := strings.Count(body, `"input_tokens":42`); n != 2 {
-		t.Errorf("input_tokens=42 出现 %d 次，期望 2 次（message_start 原样 + 补进 message_delta 的）\n%s", n, body)
+	// 三个块逐字节等于上游原文，中间只隔块分隔符。
+	want := sseBody(start) + sseBody(delta) + sseBody(stop)
+	if got := rec.Body.String(); got != want {
+		t.Errorf("message_delta 没有原样转发\n got = %q\nwant = %q", got, want)
 	}
 }
 
-// 上游从头到尾没报输入量时，补本地估算——不补的话这个键就不存在，而承诺
-// 说的是它总是有值。
+// 上游没在 message_delta 里报 input_tokens 时，**那个键就是不存在**——不补估算。
 //
-// 这一条是上一条的另一半：上游在 message_start 里也不报 input_tokens 时，
-// 适配器不发 usage_input（见 anthropicadapter 的
-// TestChatStreamWithoutInputUsageEmitsNoEarlyUsage），于是 reportedInputTokens
-// 一直是 0，只能退回估算。
-func TestNativePassthroughFallsBackToEstimateForDeltaInputTokens(t *testing.T) {
-	// newTestHandler 的本地估算（见 streamBody 与 alias）：断言它确实被用了，
-	// 比断言「有个正数」直接。
+// # 为什么不是「补一个至少量级对的数」
+//
+// 补进去的数只有客户端看得到。结算层拿的是适配器累计出的 usage 事件，那条路上
+// 没有这个数（上游确实没报），于是账上记 0。两份数就分叉了，而调用方拿客户端
+// 那一份去对账会永远对不上。
+//
+// 与枢纽那条路一致：没实测 usage 时 anthropicStream.finish 整个不写 usage，
+// 而不是写一个估计值（见那里 `s.usage != nil` 的判据）。两条路给同一个答案：
+// **上游没说的事，两边都不编。**
+func TestNativePassthroughForwardsDeltaWithoutInputTokens(t *testing.T) {
+	// 本地估算确实存在（handler 按 streamBody 估出来的那个），断言它**没有**
+	// 出现在响应里——只断言「键不存在」的话，实现改成填 0 也照样绿。
 	wantEstimate := strconv.FormatInt(tokens.EstimatedTokens("m-1", "hi"), 10)
 
 	rec := nativeStreamPost(t, PathMessages,
@@ -537,38 +534,15 @@ func TestNativePassthroughFallsBackToEstimateForDeltaInputTokens(t *testing.T) {
 	)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `"input_tokens":`+wantEstimate) {
-		t.Errorf("message_delta 里没补上估算的 input_tokens=%s：%q", wantEstimate, body)
+	if strings.Contains(body, `"input_tokens"`) {
+		t.Errorf("上游没报输入量，响应里却有 input_tokens：%q", body)
 	}
-}
-
-// 上游报过输入量时不覆盖：message_delta 自己带了就以它为准。
-//
-// 与上一条合起来钉死「只补缺的键」：两条都出现，说明实现是「有就留、没就补」，
-// 而不是「一律改写」。
-func TestNativePassthroughKeepsDeltaInputTokensFromUpstream(t *testing.T) {
-	const delta = `event: message_delta` + "\n" +
-		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
-		`"usage":{"input_tokens":77,"output_tokens":7}}`
-
-	rec := nativeStreamPost(t, PathMessages,
-		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic,
-			Frame: []byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1",` +
-				`"type":"message","role":"assistant","model":"m-1","content":[],` +
-				`"usage":{"input_tokens":42,"output_tokens":1}}}`)},
-		channel.StreamEvent{Kind: "usage_input", Usage: &channel.Usage{PromptTokens: 42}},
-		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(delta)},
-	)
-
-	body := rec.Body.String()
-	if !strings.Contains(body, `"input_tokens":77`) {
-		t.Errorf("上游在 message_delta 里报的 77 被改掉了：%q", body)
+	if strings.Contains(body, `"input_tokens":`+wantEstimate) {
+		t.Errorf("本地估算 %s 被补进了响应，而账上没有这个数：%q", wantEstimate, body)
 	}
-	// 42 只该在 message_start 里出现一次。它若也出现在 message_delta 里，
-	// 说明实现是「一律用上游报过的数改写」，而不是「缺了才补」——上游在那
-	// 一帧报的 77 就不作数了，那同样是替上游改数。
-	if n := strings.Count(body, `"input_tokens":42`); n != 1 {
-		t.Errorf("input_tokens=42 出现 %d 次，期望 1 次（只在 message_start 里）\n%s", n, body)
+	// 上游报的 output_tokens 照旧原样在。
+	if !strings.Contains(body, `"output_tokens":7`) {
+		t.Errorf("上游报的 output_tokens 没到调用方：%q", body)
 	}
 }
 

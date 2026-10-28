@@ -26,11 +26,15 @@ package api
 //     分片。分开写会让按 choices[0] 取值的朴素客户端读到空数组而崩，合并
 //     则是多一个它们不认识的字段——后者是更安全的偏差。
 //   - Anthropic 的 message_start 里的 input_tokens 在**上游没在流的最前面报过
-//     输入用量**时是本地的输入估算（就是预留用的那个数）。上游报过就是真值：
-//     Anthropic 上游在自己的 message_start 里就给了输入用量，适配器把它发成
-//     一个 usage_input 事件，第一帧因此等得到它。跨协议那条路（OpenAI 上游的
-//     用量在结束分片里）没有这个数，只能填估算——**等下去会把整个流卡到结束**，
-//     那比填估算更坏。真值在 message_delta 里也给，那一处一直是真的。
+//     输入用量**时是本地的输入估算。上游报过就是真值：Anthropic 上游在自己的
+//     message_start 里就给了输入用量，适配器把它发成一个 usage_input 事件，第一帧
+//     因此等得到它。跨协议那条路（OpenAI 上游的用量在结束分片里）没有这个数，只能
+//     填估算——**等下去会把整个流卡到结束**，那比填估算更坏。
+//
+//     这一处只在**枢纽**分支上存在。同协议直通转发的是上游原文，那一帧由上游写，
+//     我们不重新序列化它——上游报 0 就转 0（见 docs/api.md 的「同协议直通」一节）。
+//     message_delta 那一处两条路一致：没有实测值就不写这个键，不拿估算顶上（见
+//     anthropicStream.finish 与 nativeStreamPassthrough.event）。
 
 import (
 	"encoding/json"
@@ -148,7 +152,10 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 	default:
 		return nil, fmt.Errorf("协议 %q 没有流式响应形状", protocol)
 	}
-	return &nativeStreamPassthrough{inner: inner, protocol: protocol, id: id, model: model, inputTokens: inputTokens}, nil
+	// inputTokens 只交给 anthropicStream：它在**枢纽**那条路上填 message_start
+	// 的输入量（那里没有上游 early usage 可用）。直通那条路不补任何数——上游
+	// 没报就什么都不写，理由见 event 里那块。
+	return &nativeStreamPassthrough{inner: inner, protocol: protocol, id: id, model: model}, nil
 }
 
 // ── 同协议直通 ─────────────────────────────────────────────────────────
@@ -199,16 +206,6 @@ type nativeStreamPassthrough struct {
 	id string
 	// model 是回显给调用方的模型名（他要的那个，见 modelNames）。
 	model string
-	// inputTokens 是本地估算的输入量。只在 message_delta 没报 input_tokens
-	// **且上游也没在别处报过**时用它补那个键（见 rewriteMessageDeltaInputTokens）。
-	inputTokens int64
-	// reportedInputTokens 是上游自己报过的输入量，0 表示还没报。
-	//
-	// Anthropic 上游在流的最前面（message_start）就报它，而 message_delta
-	// 里可能不再带。那种情况下补进去的必须是这个真值，不是本地估算：本地
-	// 估算按字数算，认得「你好」两个字是 3，而上游报的是 12。契约测试断言的
-	// 正是 message_delta 里这一处等于上游报的数（见 contract/check.py）。
-	reportedInputTokens int64
 	// nativeSeen 表示这条流见过与本协议匹配的 native 帧，此后整条流走直通。
 	nativeSeen bool
 	// nextSeq 是下一条**我们造的帧**该用的 sequence_number（仅 Responses 用）。
@@ -296,12 +293,16 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			p.finishBlock = block
 			return nil
 		}
-		if rewritten, ok := rewriteMessageDeltaInputTokens(p.protocol, block, p.inputTokensForDelta()); ok {
-			// 上游的 message_delta 没报 input_tokens，而我们承诺过那一处是真值
-			// （见 contract/README.md 的「跨协议流式的 message_start」一节）。
-			// 只补缺的那个键；上游报了就原样留。
-			block = rewritten
-		}
+		// 这里**不补** message_delta 缺的 usage.input_tokens。
+		//
+		// 上游没在那一帧报输入量时，我们手上只剩本地估算，而本地估算与结算层
+		// 的估算**不是同一个数**：两者刻意取了不同的包装常数（一个怕多收取下界，
+		// 一个怕少冻取实测，见 internal/tokens 的 payload.go）。补进客户端那一份
+		// 就成了一条只有调用方看得到的数——账本上仍然是 0，而两边都声称是实测。
+		//
+		// 不补的时候客户端读到什么：与枢纽那条路一致，那个键不存在（见
+		// anthropicStream.finish 的同一条判据）。「上游报 0 就转 0」也是同一件事
+		// 的另一面：原样转发，不替上游改数。
 		return writeNativeBlock(w, block)
 	}
 
@@ -358,11 +359,6 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			}
 			return p.inner.errorFrame(w, ev.Err)
 		}
-	}
-	// 上游报过的输入量记下来：message_delta 若没带 input_tokens，补进去的
-	// 得是它，不是本地估算（见 reportedInputTokens 的注释）。
-	if ev.Kind == "usage_input" && ev.Usage != nil && ev.Usage.PromptTokens > 0 {
-		p.reportedInputTokens = ev.Usage.PromptTokens
 	}
 	// 推进 inner 的状态，输出丢弃。
 	return p.inner.event(io.Discard, ev)
@@ -576,67 +572,6 @@ func rewriteBlockKeys(protocol channel.Protocol, frame []byte, wantID, wantModel
 	return []byte(b.String()), true
 }
 
-// rewriteMessageDeltaInputTokens 给缺了 input_tokens 的 message_delta 补上那个键。
-//
-// # 它补的是「我们承诺过的那一处」
-//
-// `contract/README.md` 写着「无论哪条路，`message_delta.usage.input_tokens`
-// 都是真值」，而 `contract/check.py` 断言的正是这一处。真 Anthropic 上游的
-// message_delta **可能带也可能不带**这个字段（真样本 `adapter_test.go:594`
-// 带的是 77；假上游从不带）。带的原样留，不带的补。
-//
-// # 为什么补的是估算值而不是省略
-//
-// 上游没在 message_delta 里报它，就只剩本地的输入估算（就是预留用的那个数）。
-// 不补的话客户端拿到的是「这个字段不存在」，而承诺说的是它总是有值；补一个
-// 估算值至少量级是对的，且与非流式那条路的估算口径一致。
-//
-// # 只认 Anthropic，认不出就不动
-//
-// 其余两套协议没有 message_delta。判据同样只认肯定形状：解析不了、不是
-// message_delta、usage 已有 input_tokens——一律返回 false 原样转发。
-func rewriteMessageDeltaInputTokens(protocol channel.Protocol, frame []byte, estimate int64) ([]byte, bool) {
-	if protocol != channel.ProtocolAnthropic || estimate <= 0 {
-		return frame, false
-	}
-	eventName, payloads := sseBlockParts(frame)
-	if len(payloads) == 0 {
-		return frame, false
-	}
-	payload := strings.Join(payloads, "\n")
-	var m map[string]any
-	if err := json.Unmarshal([]byte(payload), &m); err != nil || m == nil {
-		return frame, false
-	}
-	if t, _ := m["type"].(string); t != "message_delta" && eventName != "message_delta" {
-		return frame, false
-	}
-	usage, _ := m["usage"].(map[string]any)
-	if usage == nil {
-		// 上游连 usage 都没给：这一块整体没有可补的落点，不动它。补一个
-		// usage 对象等于替上游编一帧，越过了「只补缺键」的边界。
-		return frame, false
-	}
-	if _, ok := usage["input_tokens"]; ok {
-		return frame, false
-	}
-	usage["input_tokens"] = estimate
-
-	raw, err := json.Marshal(m)
-	if err != nil {
-		return frame, false
-	}
-	var b strings.Builder
-	if eventName != "" {
-		b.WriteString("event: ")
-		b.WriteString(eventName)
-		b.WriteString("\n")
-	}
-	b.WriteString("data: ")
-	b.Write(raw)
-	return []byte(b.String()), true
-}
-
 // observeSequence 记住上游在这块里报过的 sequence_number，供我们造的帧接排。
 //
 // 只认 Responses：另外两套协议没有这个字段，也不会因此写什么。判据与别处
@@ -786,18 +721,6 @@ func mergeUsageIntoBlock(block []byte, usage map[string]any) ([]byte, bool) {
 	m["usage"] = usage
 	eventName, _ := sseBlockParts(block)
 	return rebuildBlock(eventName, m)
-}
-
-// inputTokensForDelta 是 message_delta 缺 input_tokens 时该补的那个数。
-//
-// 上游自己报过就用它报的（message_start 里的 usage.input_tokens 是**真值**），
-// 没报过才退回本地估算。顺序不能反：本地估算按字数算，比上游报的数低得多，
-// 而契约测试断言的正是 message_delta 那一处等于上游报的数。
-func (p *nativeStreamPassthrough) inputTokensForDelta() int64 {
-	if p.reportedInputTokens > 0 {
-		return p.reportedInputTokens
-	}
-	return p.inputTokens
 }
 
 // writeNativeBlock 写一个原生块：原字节 + 一个空行。

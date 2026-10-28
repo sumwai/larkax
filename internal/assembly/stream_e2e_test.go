@@ -316,11 +316,9 @@ func (u *streamUpstream) serveAnthropic(w io.Writer, r *http.Request, flush func
 	write("content_block_stop", `{"type":"content_block_stop","index":0}`)
 	// message_delta **不带** input_tokens：真上游两种形状都发过（带的是
 	// anthropicadapter 的 adapter_test.go:594 那份，不带的是它 native_test.go:772
-	// 那份）。
-	//
-	// 让假上游不带，是为了把网关那一层测进去：缺了它就把上游在 message_start
-	// 报过的**真值**补进来（见 internal/api 的 inputTokensForDelta）。假上游
-	// 自己带上，那一层在 e2e 里就是死代码——两条路都绿，但绿的理由不同。
+	// 那份）。这里保持不带，是让这条枢纽用例覆盖「上游只报了输出」那种形状：
+	// 适配器只在 input_tokens 为正时才累计它，所以渲染器那一帧的输入量是 0
+	// （见 internal/api 的 claudeUsageOf），而不是拿本地估算顶上。
 	//
 	// usage 为 nil 时 message_start 里也报 0，走的是「上游没报过，退回本地
 	// 估算」那条分支。

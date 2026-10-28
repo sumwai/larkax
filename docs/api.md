@@ -789,7 +789,7 @@ the account balance ran out while this response was streaming, so it was cut sho
 
 ### 直通保证逐字段等价，不保证逐字节相同
 
-有的块必须重新序列化才能改（`id` 与 `model` 改写、补 `usage.input_tokens`、合并用量），
+有的块必须重新序列化才能改（`id` 与 `model` 改写、合并用量），
 而重新序列化会带来两处与上游字节的差别：
 
 - **键序**按序列化器的规则重排，与上游出报文的顺序不同；
@@ -810,14 +810,15 @@ the account balance ran out while this response was streaming, so it was cut sho
 | 上游流内的错误块**不转发**，换成我们的错误帧 | `message` 里不回上游原文，见上面「流中途的错误」一节 |
 | 含 `id` 的块只改 `id` 这一个键 | 响应里的 `id` 是本次请求的关联标识：你查账单、问客服报的是它，而枢纽那两条路与非流式直通写的都是这个值。原样转发上游的 id 会让同一个响应对象在两条路上有相反的答案 |
 | 含 `model` 的块只改 `model` 这一个键 | 响应里的 `model` 回显你写的名字 |
-| `message_delta` 缺 `usage.input_tokens` 时补上 | 那一处我们承诺是真值；补的是上游在 `message_start` 报过的数，不是本地估算 |
+| OpenAI 那个 `choices` 为空的用量分片**不单独转发**，合进结束分片 | 分开写会让按 `choices[0]` 取值的朴素客户端读到空数组而崩，见下面「与上游契约的已知偏差」第一条 |
 
 只改**那一层**的 `id`：`content_block.id`（Anthropic 工具调用的 `toolu_…`）、
 Responses 的 `item_id` 与 `output[].id` 是上游内容自己的标识，客户端靠它们在同一
 块流里配对，不动。
 
-外加一条**不是例外而是刻意偏离**的：OpenAI 的用量分片合并进结束分片，见下面
-「与上游契约的已知偏差」第一条。
+**用量里的数字我们不改，包括 0。** 上游在 `message_start` 或 `message_delta` 里
+报多少，你读到的就是多少：报了 0 就是 0，没报那个键就不存在。网关不拿自己的估算
+替你补上——那个数只在你这一侧生效，账本上不会有它，两边就会给出两个答案。
 
 ### 直通与重放
 
@@ -827,8 +828,9 @@ Responses 的 `item_id` 与 `output[].id` 是上游内容自己的标识，客�
 ## 与上游契约的已知偏差
 
 完整的清单在 [contract/README.md](../contract/README.md) 的「已知偏差」一节
-（那一份由真 SDK 的契约测试钉着，含跨协议流式的 `input_tokens` 是估算、
-`[DONE]` 在 SDK 那一侧看不到、以及我们总是给流式响应带 usage 这几条）。
+（那一份由真 SDK 的契约测试钉着，含 `message_start` 的 `input_tokens` 在枢纽那
+两条路上是估算、`[DONE]` 在 SDK 那一侧看不到、以及我们总是给流式响应带 usage
+这几条）。
 这里只列**调用方在自己的响应里直接看得到的形状差异**：
 
 - **OpenAI 的用量合并在结束分片里**，而官方是在它之后另发一个 `choices` 为空的

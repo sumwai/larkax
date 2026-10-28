@@ -590,10 +590,10 @@ def anthropic_stream(ctx: Ctx) -> str:
     # 看不见（打印里露得出来，断言看不见）。**一个够宽的断言会把缺陷一直放过去**，
     # 这与「跳过」在输出里和「通过」长得一样是同一类问题（见 LESSONS 第 16、23 条）。
     #
-    # Anthropic 上游的第一帧就是 message_start 且带 usage.input_tokens，渲染器
-    # 在第一个事件到达时才写这一帧，所以这里拿到的就是上游报的值。跨协议那条路
-    # （OpenAI 上游）仍是估算——它的用量在结束分片里，第一帧不能等；那条路由
-    # internal/assembly 的流式 e2e 钉着，见 contract/README.md 的「已知偏差」。
+    # **它钉的是这台假上游的形状，不是所有上游的行为。** 假上游自己在这一帧写了
+    # `input_tokens`（见 contract_test.go 的 anthropicTextStream），断言的是那个值
+    # 被原样送达。另有上游在这一帧报 0、把真值只放在 `message_delta` 里——那种形状
+    # 契约测试覆盖不到，也不能靠把断言放宽成「> 0」来覆盖（上面那段说的就是这件事）。
     check("message_start 里的 usage.input_tokens", start_input_tokens, PROMPT_TOKENS)
 
     return (f"{len(seen)} 个事件，末事件={seen[-1]}；"
@@ -909,7 +909,7 @@ def anthropic_native_nonstream(ctx: Ctx) -> str:
 
 
 def anthropic_native_stream(ctx: Ctx) -> str:
-    """同协议直通·流式：真 SDK 能读完这条原生流，且两处承诺的补全生效。
+    """同协议直通·流式：真 SDK 能读完这条原生流，且改写只落在那两处承诺上。
 
     逐字节那条判据（帧序列与上游字节相同、零合成帧）在 Go 那一侧
     （`internal/assembly` 的直通用例），这里验的是**SDK 认不认**：
@@ -919,8 +919,7 @@ def anthropic_native_stream(ctx: Ctx) -> str:
     - `message_start.message.model` 回显的是调用方写的名字（上游报的是它自己的）；
     - `message_start.message.id` 是网关给的响应标识（等于响应头 x-request-id），
       不是上游的 `msg_native`——与非流式直通同一条口径；
-    - `message_delta.usage.input_tokens` 有值，且等于上游在 `message_start`
-      报的那个数——上游只在 message_start 报过它，网关补的是那个真值。
+    - `message_delta.usage.input_tokens` 原样是上游报的那个数——直通不补、不改。
     """
     params = native_request()
     stream = ctx.client.messages.create(
@@ -974,8 +973,9 @@ def anthropic_native_stream(ctx: Ctx) -> str:
     check("message_start.message.id 等于响应头 x-request-id",
           start_id, stream_headers.get("x-request-id"))
     check("message_start 的 input_tokens", start_input_tokens, PROMPT_TOKENS)
-    # 上游的 message_delta **不带** input_tokens，这一处是网关补的，补的是
-    # message_start 里那个真值——不是本地按字数估出来的数。
+    # 上游的 message_delta **自己带** input_tokens，这一处原样到达调用方：
+    # 直通不补、不改上游报的数（补过的那个版本拿本地估算顶上，而那个数只进
+    # 了客户端、没进账本。见 internal/api 的 nativeStreamPassthrough.event）。
     check("message_delta 的 input_tokens", delta_input_tokens, PROMPT_TOKENS)
     check("message_delta 的 output_tokens", out_tokens, COMPLETION_TOKENS)
 

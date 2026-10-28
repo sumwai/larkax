@@ -33,17 +33,21 @@ import (
 // `data: ` 两种行，遇到注释行判红、同块多条 data 只留最后一条——直通原生块
 // 两者都带，解析一遍再比会把「原样转发」测成「能从里面解析出什么」。
 //
-// # 三处**刻意偏离**上游字节，各自都有出处
+// # 两处**刻意偏离**上游字节，各自都有出处
 //
 //  1. 含 `id` 与 `model` 的块要改写（docs/api.md 的「入站别名」一节：响应体里的
 //     model 回显调用方写的名字，流式与非流式一样；「同协议直通」一节：`id` 是
 //     本次请求的关联标识）。实现见 internal/api 的 rewriteBlockKeys。
-//  2. `message_delta` 缺 `input_tokens` 时要补（contract/README.md 写着那一处
-//     总是真值；真上游两种形状都发过）。实现见 internal/api 的
-//     rewriteMessageDeltaInputTokens。
+//  2. OpenAI 的用量分片合并进结束分片（docs/api.md 的「与上游契约的已知偏差」
+//     第一条）。Anthropic 这条流里没有那个分片，所以本文件的流式用例碰不到它。
 //
 // 所以下面断言的是「除这几块外逐字节相同」，不是「整份相同」——把这几处也
 // 纳入逐字节比较，等于让夹具替实现圆谎。
+//
+// **`message_delta` 的 `usage.input_tokens` 不在这张单子上。** 直通曾经补过它，
+// 补的是只有客户端看得到的数，而结算走的是适配器累计出的用量——同一次请求
+// 客户端读到 14、账上记 0，两边都标着实测。现在上游写什么就是什么：写了原样
+// 到，没写就没有这个键。
 //
 // # 没有 LARKAX_DB_DSN 时跳过
 //
@@ -497,8 +501,10 @@ func TestNativePassthroughMessagesNonStreamAppliesOverrides(t *testing.T) {
 //   - 扩展思考的 `content_block_start` / `thinking_delta`；
 //   - `message_delta` 块里多一行**空 data 行**（真样本里就有，见 native_test.go
 //     「块边界」那条用例的 message_delta 块）；
-//   - `message_delta` **不带** `input_tokens`（真上游两种形状都发过，这一种
-//     是 native_test.go 里那份）。
+//   - `message_delta` **带** `input_tokens`（文档里的那种形状：首帧与
+//     `message_delta` 都报；本机验证过的另一台上游是首帧报 0、只在这里报）。
+//     这一块因此**整块原样转发**，下面按字节比——夹具若不带它，「上游报的值
+//     有没有被改」与「网关有没有自己补一个」就分不开了。
 //
 // `model` 与 `id` 故意写成上游自己的值：这两处是刻意偏离，下面按「只改这两个
 // 键」判它们。id 用的是上游那种 `msg_…` 形状，与我们的 request_id 明显不同——
@@ -533,14 +539,14 @@ event: content_block_stop
 data: {"type":"content_block_stop","index":1}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":7}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":12,"output_tokens":7}}
 data:
 
 event: message_stop
 data: {"type":"message_stop"}` + "\n\n"
 
-// 流式直通：客户端收到的块序列与上游发来的块序列逐字节相同，两处刻意偏离
-// 之外一个字节都不差。
+// 流式直通：客户端收到的块序列与上游发来的块序列逐字节相同——**只有**含
+// `id` 与 `model` 的那一块是重建的。
 //
 // # 判据怎么实现
 //
@@ -549,12 +555,9 @@ data: {"type":"message_stop"}` + "\n\n"
 // 合成信封、多渲一条归一化事件，块数就对不上；而逐字节比抓住了另一半
 // 「合成帧恰好替换了某帧」。
 //
-// 两处刻意偏离按「最小改动」判：
-//
-//   - message_start：只把 `message.id` 与 `message.model` 换成网关决定的那两个
-//     值，其余键一个不动；
-//   - message_delta：只补 `usage.input_tokens`，且补的是**上游在
-//     message_start 报过的 12**，不是本地按字数估出来的那个数。
+// 唯一按「最小改动」判的是 message_start：只把 `message.id` 与 `message.model`
+// 换成网关决定的那两个值，其余键一个不动。**message_delta 整块逐字节比**——
+// 它自己带了 `usage.input_tokens`，网关不补也不改。
 //
 // `id` 的期望值取响应头 `x-request-id`：那是非流式直通那条路用的同一个来源
 // （`renderNativePassthrough` 的 id 就是它），所以这条同时钉住「两条路给同一个
@@ -617,21 +620,18 @@ func TestNativePassthroughMessagesStreamForwardsUpstreamBytes(t *testing.T) {
 		t.Errorf("响应体按块切分后拼不回原字节\n got = %q\n拼回 = %q", got, rejoined)
 	}
 
-	// 两处刻意偏离的位置：id 与 model 都在 message_start，input_tokens 在
-	// message_delta。其余每一块都逐字节等于上游。
+	// 两处刻意偏离的位置：id 与 model 都在 message_start。其余每一块都逐字节
+	// 等于上游——包括 message_delta（它自己带了 input_tokens，网关不碰）。
 	wantID := resp.Header.Get("x-request-id")
 	if wantID == "" {
 		t.Fatal("响应头里没有 x-request-id——id 改写那条判据没有期望值可比（见 observe.Middleware）")
 	}
 	for i, want := range upstreamBlocks {
-		switch {
-		case strings.HasPrefix(want, "event: message_start"):
+		if strings.HasPrefix(want, "event: message_start") {
 			assertRewrittenModelBlock(t, i, gotBlocks[i], want, wantID, model)
-		case strings.HasPrefix(want, "event: message_delta"):
-			assertFilledDeltaBlock(t, i, gotBlocks[i], want)
-		default:
-			assertBlockDiff(t, fmt.Sprintf("第 %d 块", i), gotBlocks[i], want)
+			continue
 		}
+		assertBlockDiff(t, fmt.Sprintf("第 %d 块", i), gotBlocks[i], want)
 	}
 
 	// 二、任务书点名的四项要原样到调用方。
@@ -700,51 +700,7 @@ func assertRewrittenModelBlock(t *testing.T, i int, got, upstream, wantID, wantM
 	assertBlockDiff(t, fmt.Sprintf("第 %d 块（message_start，只改 id 与 model）", i), got, want)
 }
 
-// assertFilledDeltaBlock 判「只补了 input_tokens 这一个键」。
-//
-// 补的值必须是**上游报过的** 12，不是本地估算。判据写成具体数字而不是
-// 「非零」：本地估算按字数算，与上游报的数不是同一个东西，而「非零」对两者
-// 一视同仁（同 contract/check.py 里那段注释的理由）。
-func assertFilledDeltaBlock(t *testing.T, i int, got, upstream string) {
-	t.Helper()
-
-	wantPayload := decodeJSONObject(t, []byte(dataPayloadOf(t, upstream)))
-	wantUsage, _ := wantPayload["usage"].(map[string]any)
-	if wantUsage == nil {
-		t.Fatalf("第 %d 块（message_delta）的夹具里没有 usage：补 input_tokens 的那条路走不到", i)
-	}
-	if _, ok := wantUsage["input_tokens"]; ok {
-		t.Fatalf("第 %d 块的夹具自己带了 input_tokens，补缺的那个分支就成了死代码", i)
-	}
-	wantUsage["input_tokens"] = float64(12)
-
-	// 客户端收到的这一块：event 行保留，载荷按字段等价判（这一块是被重建的，
-	// 块里那行空 `data:` 不再保留——它是空隙不是内容）。
-	lines := strings.Split(got, "\n")
-	if len(lines) == 0 || lines[0] != "event: message_delta" {
-		t.Fatalf("第 %d 块的首行 = %q，期望 event: message_delta", i, got)
-	}
-	var gotPayload map[string]any
-	for _, line := range lines {
-		if payload, ok := strings.CutPrefix(line, "data:"); ok {
-			if p := strings.TrimSpace(payload); p != "" {
-				gotPayload = decodeJSONObject(t, []byte(p))
-			}
-		}
-	}
-	if gotPayload == nil {
-		t.Fatalf("第 %d 块里找不到 data 载荷：%q", i, got)
-	}
-	assertSameFields(t, fmt.Sprintf("第 %d 块（message_delta）的载荷", i), gotPayload, wantPayload)
-
-	gotUsage, _ := gotPayload["usage"].(map[string]any)
-	if gotUsage["input_tokens"] != float64(12) {
-		t.Errorf("第 %d 块的 usage.input_tokens = %v，期望 12（上游在 message_start 报过的真值，"+
-			"不是本地按字数估出来的数）", i, gotUsage["input_tokens"])
-	}
-}
-
-// dataPayloadOf 取出一块里第一行非空 data 的载荷（夹具都是单行载荷）。
+// assertRewrittenModelBlock 判「只改了 id 与 model 这两个键」。
 func dataPayloadOf(t *testing.T, block string) string {
 	t.Helper()
 

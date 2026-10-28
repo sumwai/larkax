@@ -36,7 +36,7 @@
 | 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`；OpenAI 与 Responses 的 `error.code` 是 `upstream_http_error`（`error.type` 仍是 `api_error`），Anthropic 的 `error.type` 就是那个码 |
 | 同协议直通·非流式 | 上游收到的报文与调用方原文逐字段等价（`model`、`stream` 除外）；响应里 `container`、`usage.service_tier`、非空的 `stop_sequence` 原样到达——枢纽那条路会裁掉它们；`id` 等于响应头 `x-request-id`，不是上游那个 |
-| 同协议直通·流式 | 扩展思考的 `thinking_delta` 到了调用方（统一事件流不转发它）；`message_start.message.model` 回显调用方写的名字；`message_start.message.id` 等于响应头 `x-request-id`；`message_delta.usage.input_tokens` 是上游报的真值 |
+| 同协议直通·流式 | 扩展思考的 `thinking_delta` 到了调用方（统一事件流不转发它）；`message_start.message.model` 回显调用方写的名字；`message_start.message.id` 等于响应头 `x-request-id`；`message_delta.usage.input_tokens` 是上游自己报的那个数，原样到达 |
 | 模型清单 | `models.list()` 与 `models.retrieve()` 读到的是可用模型：`object`、`id`、`owned_by`（取目录里的 vendor）、`created`；`models.list()` 的响应顶层还有 `currency`（站点级常量，默认资产 `CNY`；`data` 每一条与单条 `models.retrieve()` 都不带）；配了计价规则的模型带 `offers`，且规则写了输入价时 `offers[].price` 与 `prices.prompt` 都等于种子规则算出的每 1000 个输入 token 金额（断绝对值，不断两者相等）；不可用时抛 `NotFoundError`，`error.code` 是 `model_not_found`。这条只在 `openai` 那一套里跑——两条路径与调用协议无关，而 `anthropic` 客户端没有对应的资源方法 |
 
 「流式·余额耗尽」那一条需要一个**真的**余额不足：假上游没法让服务端走进那条路，
@@ -66,11 +66,15 @@
 | `model` 换成上游名 | 选路在别名翻名之后（`internal/route` 的 `upstreamRequest`），上游要它的名字 |
 | `stream` 总是重写 | 这次走流式还是非流式只由入口决定（`channel.Request.Stream`），不能由原文说了算 |
 
-`api.md` 的「同协议直通」一节另列了四处**响应**方向的例外：含 `id` 的块只改
-那一个键（响应标识由网关决定）、含 `model` 的块只改那一个键、`message_delta`
-缺 `usage.input_tokens` 时补上游报过的真值、上游流内的错误块换成我们的错误帧。
-后三处的逐字节判据在 Go 那侧的 `internal/assembly` 直通用例里；`id` 那一条两边
-都有——Go 侧判「只改了一个键」，这一侧判「改成了响应头报的那个值」。
+`api.md` 的「同协议直通」一节另列了**四处**响应方向的例外：含 `id` 的块只改
+那一个键（响应标识由网关决定）、含 `model` 的块只改那一个键、OpenAI 的用量分片
+合并进结束分片、上游流内的错误块换成我们的错误帧。前两处的逐字节判据在 Go 那侧
+的 `internal/assembly` 直通用例里；`id` 那一条两边都有——Go 侧判「只改了一个键」，
+这一侧判「改成了响应头报的那个值」。
+
+**`message_delta` 的 `usage.input_tokens` 不在这张单子上。** 直通曾经在缺这个键时
+补一个值，补的是只有客户端看得到的数，而结算走的是适配器累计出的用量——同一次
+请求客户端读到 14、账上记 0，两边都标着实测。现在上游写什么就是什么。
 
 **逐字节那条判据不在这一份里。** Python 只看得见 SDK 解析后的事件对象，判不了
 「上游的字节有没有原样转发」——SSE 注释行与同块多条 `data:` 在这种视角下根本
@@ -209,24 +213,50 @@ python3 contract/check.py \
 
 ## 已知偏差
 
-**跨协议流式的 `message_start.message.usage.input_tokens` 仍是估算值。**
-Anthropic 客户端配 OpenAI 上游时，那一帧给的是本地估算，不是上游报的真值。
+**`message_start.message.usage.input_tokens` 在枢纽那条路上可能是估算值，不只是
+跨协议时。**
 
-原因是时序：OpenAI 上游的用量在**结束分片**里，而 `message_start` 是流的
-第一帧，不能等到那里。所以渲染器在**第一个事件到达时**写这一帧——事件带用量
-就用真值，不带就用请求进来时按分词估出来的那个（见 `internal/api` 的
-`inputTokensOf`）。Anthropic 上游的第一帧就是 `message_start` 且带
-`usage.input_tokens`，所以那条路拿到的是真值；OpenAI 上游的第一个事件是正文帧，
-拿到的是估算。
+那一帧是流的第一帧，而渲染器在**第一个事件到达时**才写它：带用量就用真值，
+不带就用请求进来时按分词估出来的那个（见 `internal/api` 的 `inputTokensOf` 与
+`anthropicStream.writeStart`）。两条路会走到估算：
 
-无论哪条路，`message_delta.usage.input_tokens` 都是真值。所以**以最后一个
-usage 为准**的客户端读到的是对的；**只读 `message_start` 的客户端**在跨协议
-那条路上会读到偏低的数（成本统计、用量面板是常见的那类）。
+- **跨协议**（Anthropic 客户端配 OpenAI 上游）：OpenAI 的用量在**结束分片**里，
+  流的开头没有输入用量可给，只能填估算；
+- **同协议但走枢纽**（挂了插件 hook 等，见 `docs/api.md` 的「什么时候不直通」）：
+  上游的 `message_start` 若一个输入量都没报（**报 0 与不带这个键都算「没报」**，
+  见 `internal/channel/anthropicadapter` 的 `readUsage`），适配器就不发
+  `usage_input`，第一帧同样回落到估算。
+
+实测例子（`internal/assembly/stream_e2e_test.go` 的
+`TestStreamMessagesFirstFrameBeforeUpstreamFinishes`）：调用方说 Anthropic，
+上游的用量在结束分片里，首帧给的是按「你好」两个字估出来的 **3**；
+同一套夹具里若上游在 `message_start` 报真值，首帧给的就是它报的那个数。
+
+**同协议直通不在这一条里**：那一帧是上游原文，网关不重新序列化它——上游报什么
+就转什么，报 0 就转 0。要改它就得重新序列化那一块，那是加新例外，不是修偏差。
+
+`message_delta.usage.input_tokens` 在**上游报了它**的时候是真值（枢纽与直通都是
+原样送达）。上游没报的时候那个键不存在——两套路径都不拿估算顶上。所以
+**以最后一个 usage 为准**的客户端读到的是对的；**只读 `message_start` 的客户端**
+在上面那两条路上会读到偏低的数（成本统计、用量面板是常见的那类）。
 
 契约测试那条 Anthropic 流式用例**断言 `message_start` 的 `input_tokens` 等于
 上游报的值**——它曾经只断言「是个正数」，而那个宽断言让上面这条偏差长期看不见
-（实测：上游报 12，那一帧给 3，用例照样绿）。跨协议那条路的估算由
+（实测：上游报 12，那一帧给 3，用例照样绿）。
+
+**它钉的是这台假上游的形状。** 假上游在那一帧自己写了 `input_tokens`，断言验的是
+那个值被原样送达；「上游在那一帧报 0、真值只放在 `message_delta` 里」那种形状
+契约测试覆盖不到（那是本机验证过的一条上游的行为，不是 Anthropic 协议的常态：
+官方文档的例子在 `message_start` 里报 25 / 472 / 2679）。所以不要把它读成
+「所有上游首帧都有真值」，也不要为了覆盖那种形状把断言放宽成 `> 0`——上面那段
+说的就是宽断言会吃掉偏差。跨协议那条路的估算由
 `internal/assembly/stream_e2e_test.go` 钉着。
+
+**直通曾经补 `message_delta` 缺的 `input_tokens`，那个行为已删。** 补进去的是
+本地估算（或上游在 `message_start` 报过的数），而它只进了客户端——结算走的是
+适配器累计出的 `usage` 事件，那条路上没有这个数，账上记 0。同一次请求客户端
+读到 14、账上记 0，两边都标着实测。现在两条路给同一个答案：上游没说的事，
+两边都不编。
 
 **OpenAI 流式的 `[DONE]` 从 SDK 这一侧看不到。** 它由 SDK 的 SSE 解码器吃掉，
 不会作为分片交给调用方。能看到的正向证据是「迭代正常结束」加上「最后一个带

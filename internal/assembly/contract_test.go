@@ -642,12 +642,14 @@ func (u *contractUpstream) anthropicNativeStream(w http.ResponseWriter, model, e
 			part))
 	}
 	write("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
-	// 末行是**空 data 行**，且不带 input_tokens：两处都是真上游发过的形状，
-	// 而且网关必须在这个块上补 `usage.input_tokens`——补的是 message_start
-	// 报过的真值，不是本地估算。
+	// 末行是**空 data 行**（真上游发过的形状），而 usage 里**带** input_tokens：
+	// 直通原样转发上游写的那个数，不补、不改。契约测试断言的就是「上游报的值
+	// 原样到了调用方」——夹具不带的话，这条断言能红的理由就只剩「网关自己补了
+	// 一个」，而那正是要删掉的行为。
 	write(fmt.Sprintf("event: message_delta\n"+
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-		`"usage":{"output_tokens":%d}}`+"\ndata:\n\n", contractCompletionTokens))
+		`"usage":{"input_tokens":%d,"output_tokens":%d}}`+"\ndata:\n\n",
+		contractPromptTokens, contractCompletionTokens))
 	write("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 }
 
@@ -807,14 +809,15 @@ func (u *contractUpstream) anthropicTextStream(w http.ResponseWriter, model stri
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
 	}
 	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
-	// message_delta 不带 input_tokens：真上游两种形状都发过（带的是
-	// adapter_test.go:594 那份，不带的是 native_test.go:772 那份），而契约测试
-	// 断言 message_delta 里这一处等于上游报的数（见 contract/check.py）。
-	// 让假上游**不带**，是把网关那一层（缺了就补上游在 message_start 报过的
-	// 真值）测进去——带上的话，那一层在契约测试里是死代码。
+	// message_delta 带 input_tokens，与 message_start 同一个数：真上游两种形状
+	// 都发过（带的是 adapter_test.go:594 那份，不带的是 native_test.go:772 那份）。
+	// 这里带上，是因为用户拿到的那条流里这一处确实有值，而契约测试断言它等于
+	// 上游报的数——带上的话那条断言钉的是「原样送达」；不带的话它钉的会是
+	// 「网关补了一个」，而补写已经删了。
 	event("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
+			`"usage":{"input_tokens":%d,"output_tokens":%d}}`,
+		contractPromptTokens, contractCompletionTokens))
 	event("message_stop", `{"type":"message_stop"}`)
 }
 
@@ -902,11 +905,9 @@ func (u *contractUpstream) anthropicDrainStream(w http.ResponseWriter, model str
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
 	}
 	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
-	// message_delta 不带 input_tokens：真上游两种形状都发过（带的是
-	// adapter_test.go:594 那份，不带的是 native_test.go:772 那份），而契约测试
-	// 断言 message_delta 里这一处等于上游报的数（见 contract/check.py）。
-	// 让假上游**不带**，是把网关那一层（缺了就补上游在 message_start 报过的
-	// 真值）测进去——带上的话，那一层在契约测试里是死代码。
+	// 这一条（余额耗尽）不看 message_delta 的 input_tokens：流会在这之前被我们
+	// 切断。所以这里不带那个键也无妨——它**不是**在替谁测「缺了怎么办」，
+	// 直通那边已经不补了（见 anthropicNativeStream 里的同一处）。
 	event("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
 			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
