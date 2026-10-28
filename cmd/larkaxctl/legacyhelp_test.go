@@ -46,8 +46,20 @@ var legacyAlias = []struct {
 //     `apikey consent doctor migrate plan reconcile rotate settings user`。
 //
 // 所以「流由层级决定」这个说法是错的，拿它当判据会把约定记成缺陷。真正的
-// 分界是**实现方式**：手写 `-h` case 的打 stdout，交给 `fs.Usage` 的打
-// stderr。这是本仓一处既有不一致，与旧路径无关，P2 收口时一并看（记在
+// 分界是**顺序**：在 `fs.Parse` 之前自己看第一个参数的打 stdout（`account`、
+// `version` 这一派）；先交给 `fs.Parse` 的打 stderr。
+//
+// **`consent` 是这条分界的反例，也是它唯一需要说清的地方**：它手写了
+// `case "-h", "--help"`（consent.go:123），却打 stderr——因为 `runConsent`
+// 一进门就 `fs.Parse(args)`（consent.go:108），flag 包遇到 `-h` 当场返回
+// `ErrHelp` 并调 `fs.Usage`，那一行 switch **根本到不了**。实测 `consent -h`
+// 打 stderr 704 字节，而 `consent help` 走手写 case 打 stdout 2464 字节。
+//
+// 「手写 `-h` case」这个观察可以留着，但要读成**必要不充分**：19 条 stdout
+// 确实都有手写 case，而它不保证流。写成「分界」会在 `consent` 上翻车，然后
+// 读者不再信这段。
+//
+// 这是本仓一处既有不一致，与旧路径无关，P2 收口时一并看（记在
 // `leaders/CLI.md`）。这条门要钉的是正文，流不归它管。
 func TestLegacyCommandsShareTheirTargetsHelp(t *testing.T) {
 	for _, alias := range legacyAlias {
