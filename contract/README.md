@@ -23,7 +23,8 @@
 三套协议（`openai` / `anthropic` / `openai-responses`）各跑七条；Responses
 另多一条**空 `input`** 的 400（共八条），因为它的 400 文案要点的是另一个字段；
 `openai` 另多一条**模型清单**（共八条），因为 `GET /v1/models` 只在那一套
-客户端里有现成的资源方法：
+客户端里有现成的资源方法；`anthropic` 另多两条**同协议直通**（共九条），
+理由见下面「同协议直通」一节：
 
 | 用例 | 验什么 |
 |---|---|
@@ -34,12 +35,45 @@
 | 客户端错误 400 | SDK 抛 `BadRequestError`，`error.type` 是 `invalid_request_error`；Responses 另有「缺 `max_output_tokens`」与「空 `input`」两条，文案分别点名这两个字段 |
 | 认证错误 401 | SDK 抛 `AuthenticationError`；OpenAI 与 Responses 的 `error.code` 是 `invalid_api_key`，Anthropic 的 `error.type` 是 `authentication_error` |
 | 上游错误 5xx | 上游回 500 时我们回 502，SDK 抛 `APIStatusError`；OpenAI 与 Responses 的 `error.code` 是 `upstream_http_error`（`error.type` 仍是 `api_error`），Anthropic 的 `error.type` 就是那个码 |
+| 同协议直通·非流式 | 上游收到的报文与调用方原文逐字段等价（`model`、`stream` 除外）；响应里 `container`、`usage.service_tier`、非空的 `stop_sequence` 原样到达——枢纽那条路会裁掉它们 |
+| 同协议直通·流式 | 扩展思考的 `thinking_delta` 到了调用方（统一事件流不转发它）；`message_start.message.model` 回显调用方写的名字；`message_delta.usage.input_tokens` 是上游报的真值 |
 | 模型清单 | `models.list()` 与 `models.retrieve()` 读到的是可用模型：`object`、`id`、`owned_by`（取目录里的 vendor）、`created`；`models.list()` 的响应顶层还有 `currency`（站点级常量，默认资产 `CNY`；`data` 每一条与单条 `models.retrieve()` 都不带）；配了计价规则的模型带 `offers`，且规则写了输入价时 `offers[].price` 与 `prices.prompt` 都等于种子规则算出的每 1000 个输入 token 金额（断绝对值，不断两者相等）；不可用时抛 `NotFoundError`，`error.code` 是 `model_not_found`。这条只在 `openai` 那一套里跑——两条路径与调用协议无关，而 `anthropic` 客户端没有对应的资源方法 |
 
 「流式·余额耗尽」那一条需要一个**真的**余额不足：假上游没法让服务端走进那条路，
 所以它配了单独一份价目（几个阈值段就把余额花光）与一条很长的流
 （见 `contract_test.go` 的 `contractDrainRule` 与 `contractDrainChunks`）。
 流短了这条用例会红在一个与它无关的原因上——上游先没词了。
+
+### 同协议直通：为什么只有 Anthropic 有这两条
+
+同协议直通是「调用方与上游说的是同一套协议」时，把调用方的原文当报文发给上游、
+把上游的原文当响应交给调用方（见 [api.md](../docs/api.md) 的同名一节）。它只在
+**这条渠道的协议与本条入口的协议相同**时才成立。
+
+三套入口里只有 `anthropic` 这一套的契约假上游说的也是 Anthropic 协议，所以只有
+它跑得出直通。另外两条要是也注册，得到的会是一条**永远走枢纽分支**的用例——而
+那种用例绿的理由与被测行为无关（见 [LESSONS.md](../LESSONS.md) 第 23 条）。
+
+**上游收到的那份报文，Python 这一侧本来验不到**（它只看得见响应）。所以这两条
+用例的假上游把收到的请求体塞进响应的一个额外字段（`native_echo`）：SDK 容忍未知
+字段并原样留着，于是「上游到底收到了什么」成了客户端可断言的东西。这比在两边
+各写一份夹具好——两份夹具会各自漂移，而漂移的那一份不会报错。
+
+判据里有两处是**刻意偏离**调用方原文的，它们各由一条承诺支撑，不是漏网的差异：
+
+| 偏离 | 出处 |
+|---|---|
+| `model` 换成上游名 | 选路在别名翻名之后（`internal/route` 的 `upstreamRequest`），上游要它的名字 |
+| `stream` 总是重写 | 这次走流式还是非流式只由入口决定（`channel.Request.Stream`），不能由原文说了算 |
+
+`api.md` 的「同协议直通」一节另列了三处**响应**方向的例外：含 `model` 的块只改
+那一个键、`message_delta` 缺 `usage.input_tokens` 时补上游报过的真值、上游流内的
+错误块换成我们的错误帧。那三处的逐字节判据在 Go 那侧的 `internal/assembly`
+直通用例里。
+
+**逐字节那条判据不在这一份里。** Python 只看得见 SDK 解析后的事件对象，判不了
+「上游的字节有没有原样转发」——SSE 注释行与同块多条 `data:` 在这种视角下根本
+不存在。那一条由 `internal/assembly` 的直通用例用字节比较钉着。
 
 ### 流内错误帧：三套协议在客户端那一边长得不一样
 
@@ -148,6 +182,9 @@ python3 contract/check.py \
 
 它要求上游已经能按 `<前缀>-text` / `<前缀>-tools` / `<前缀>-fail` 三个模型名
 回出对应的响应；脱离 `contract_test.go` 跑时，那份上游要自己准备。
+`anthropic` 另需要 `<前缀>-native`（该渠道要配一条别名，把规范名翻成
+`<前缀>-native-upstream`——`model` 是直通的覆写项之一，两个名字相同的话
+「上游名被写进去了」与「原文没动」就分不出来）。
 
 ## 怎么加一条用例
 

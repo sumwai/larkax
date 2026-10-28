@@ -45,6 +45,10 @@ FAIL_SUFFIX = "fail"
 # 而假上游备了一条很长的流——切断因此是**余额**造成的（见 contract_test.go
 # 的 contractDrainRule 与 contractDrainChunks）。
 DRAIN_SUFFIX = "drain"
+# 同协议直通那条。上游名 = 规范名 + 这个后缀（见 contract_test.go 的
+# contractNativeUpstreamSuffix）：两个名字必须不同，`model` 是覆写项之一。
+NATIVE_SUFFIX = "native"
+NATIVE_UPSTREAM_SUFFIX = "-upstream"
 
 # 模型清单那条只读路径用的模型名后缀与 vendor。
 #
@@ -744,6 +748,219 @@ def anthropic_auth_error(ctx: Ctx) -> str:
     raise CaseFailure("凭证无效时本该回 401，但请求没有报错")
 
 
+# ── 同协议直通 ────────────────────────────────────────────────────────
+
+
+def native_upstream_name(ctx: Ctx) -> str:
+    """直通那条模型在**上游那一侧**的名字。
+
+    调用方写规范名（`ctx.model(NATIVE_SUFFIX)`），渠道上配了一条别名把它翻成
+    这一个。两个名字必须不同——`model` 是直通的覆写项之一，同名的话「上游名
+    被写进去了」与「原文没被动过」是同一件事，断言分不出来。
+    """
+    return ctx.model(NATIVE_SUFFIX) + NATIVE_UPSTREAM_SUFFIX
+
+
+def native_request() -> dict:
+    """一份**真形状**的 Anthropic 请求参数，带着统一结构读不到的键。
+
+    `thinking` / `cache_control` / `top_k` / `stop_sequences` 都是调用方会发、
+    而本项目的统一结构里没有对应位置的东西。它们能不能到上游，只有直通那条路
+    做得到——所以这一份同时是「直通在不在」的判据。
+
+    **不带 `temperature` / `top_p`**：开启扩展思考时 Anthropic 要求这两项保持
+    缺省，带上会被上游拒。夹具造一份生产上会被拒的报文，测的就不是真实那条路。
+    """
+    return {
+        "max_tokens": 1024,
+        "system": [
+            {
+                "type": "text",
+                "text": "你是助手。",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "北京天气怎么样？",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ],
+        "thinking": {"type": "enabled", "budget_tokens": 512},
+        "stop_sequences": ["\n\nHuman:"],
+        "top_k": 40,
+    }
+
+
+def native_create_kwargs(params: dict) -> dict:
+    """把线上报文形状的参数转成这个 SDK 版本的 `create()` 参数。
+
+    `top_k` 不在 pinned 版本的 `create()` 签名里（它是**线上**的合法字段，
+    只是这个 SDK 没有显式参数），所以走 `extra_body` —— 发出去的请求体里
+    它仍然是一个顶层键，与 `native_request()` 描述的形状一致。
+
+    **不多加别的**：这里只搬这一个键，而不是「反正 extra_body 能塞什么都塞
+    进去」。塞进去的键绕过了 SDK 的类型检查，而这条用例要证的正是「调用方
+    原文里那些键能不能到上游」——夹具自己造一个 SDK 根本发不出的键，测的是
+    一条不存在的路。
+    """
+    kwargs = dict(params)
+    top_k = kwargs.pop("top_k", None)
+    if top_k is not None:
+        kwargs["extra_body"] = {"top_k": top_k}
+    return kwargs
+
+
+def upstream_echo(resp) -> dict:
+    """取出假上游回显进响应里的请求体。
+
+    假上游把收到的报文塞进一个**它自己的**字段（`native_echo`），SDK 容忍未知
+    字段并原样留着。于是「上游到底收到了什么」在客户端这边成了可断言的——
+    而这正是直通的另一半（发出去的那份是不是原文），只看得见响应的客户端本来
+    验不到它。
+    """
+    echo = getattr(resp, "native_echo", None)
+    if not isinstance(echo, dict):
+        raise CaseFailure(
+            f"响应里没有 native_echo（得到 {echo!r}）——假上游回显请求体那条路"
+            "没走到：这次请求多半没走同协议直通")
+    return echo
+
+
+def check_native_sent_body(echo: dict, stream: bool) -> str:
+    """上游收到的报文与调用方原文**逐字段等价**（`model` 与 `stream` 除外）。
+
+    这两处是覆写项，判据在调用方那一侧另外写死：
+
+    - `model` 到这里必须是别名翻出来的**上游名**（调用方写的是规范名）；
+    - `stream` 由入口决定，原文里没有这个键，适配器总是写它。
+
+    所以两边都按期望值填好再整体比，而不是「两边都抹平」——抹平会让
+    「适配器把 stream 写反了」与「原文没动」长得一样。
+    """
+    want = dict(native_request())
+    want["model"] = "upstream-name-placeholder"
+    want["stream"] = stream
+
+    got = dict(echo)
+    got["model"] = "upstream-name-placeholder"
+    if got != want:
+        missing = sorted(set(want) - set(got))
+        extra = sorted(set(got) - set(want))
+        raise CaseFailure(
+            f"上游收到的报文与调用方原文不等价：少 {missing}，多 {extra}\n"
+            f" got={got!r}\nwant={want!r}")
+    return "报文逐字段等价"
+
+
+def anthropic_native_nonstream(ctx: Ctx) -> str:
+    """同协议直通·非流式：原文进、原文出。
+
+    三条一起判，缺一条这条用例就测不到直通：
+
+    - **上游收到的报文**是调用方原文（`model` 与 `stream` 除外）；
+    - **响应里的 model** 是调用方写的规范名，不是上游回报的那个；
+    - **统一结构不认识的响应字段**（`container`、`usage.service_tier`、非空的
+      `stop_sequence`）原样到了调用方。枢纽那条路按 dto 裁剪，这三处会消失
+      ——所以它们到了，就是这次真的走了直通。
+    """
+    params = native_request()
+    resp = ctx.client.messages.create(
+        model=ctx.model(NATIVE_SUFFIX), **native_create_kwargs(params))
+
+    echo = upstream_echo(resp)
+    check("上游收到的 model", echo.get("model"), native_upstream_name(ctx))
+    detail = check_native_sent_body(echo, stream=False)
+
+    check("model", resp.model, ctx.model(NATIVE_SUFFIX))
+    check("type", resp.type, "message")
+    check("role", resp.role, "assistant")
+    check("stop_reason", resp.stop_reason, "end_turn")
+    check("stop_sequence", resp.stop_sequence, "\n\nHuman:")
+    check("content 块数", len(resp.content), 1)
+    check("content[0].text", resp.content[0].text, TEXT)
+    check("usage.input_tokens", resp.usage.input_tokens, PROMPT_TOKENS)
+    check("usage.output_tokens", resp.usage.output_tokens, COMPLETION_TOKENS)
+    # 这两个是**直通的判据**，不是可有可无的花边：枢纽那条路读不出来。
+    check("usage.service_tier", getattr(resp.usage, "service_tier", None), "standard")
+    container = getattr(resp, "container", None)
+    check_true("container 在", container is not None)
+    check("container.id", container.id, "container_contract")
+
+    return f"{detail}；container 与 usage.service_tier 原样到达"
+
+
+def anthropic_native_stream(ctx: Ctx) -> str:
+    """同协议直通·流式：真 SDK 能读完这条原生流，且两处承诺的补全生效。
+
+    逐字节那条判据（帧序列与上游字节相同、零合成帧）在 Go 那一侧
+    （`internal/assembly` 的直通用例），这里验的是**SDK 认不认**：
+
+    - 扩展思考的 `thinking_delta` 到了调用方——统一事件流把它当中间产物扔掉，
+      所以它出现即证明走的是直通；
+    - `message_start.message.model` 回显的是调用方写的名字（上游报的是它自己的）；
+    - `message_delta.usage.input_tokens` 有值，且等于上游在 `message_start`
+      报的那个数——上游只在 message_start 报过它，网关补的是那个真值。
+    """
+    params = native_request()
+    stream = ctx.client.messages.create(
+        model=ctx.model(NATIVE_SUFFIX), stream=True, **native_create_kwargs(params))
+
+    seen = []
+    text = ""
+    thinking = ""
+    echo = None
+    start_model = None
+    start_input_tokens = None
+    delta_input_tokens = None
+    out_tokens = None
+
+    with stream:
+        for event in stream:
+            seen.append(event.type)
+            if event.type == "message_start":
+                start_model = event.message.model
+                start_input_tokens = event.message.usage.input_tokens
+                echo = getattr(event.message, "native_echo", None)
+            elif event.type == "content_block_delta":
+                if event.delta.type == "text_delta":
+                    text += event.delta.text
+                elif event.delta.type == "thinking_delta":
+                    thinking += event.delta.thinking
+            elif event.type == "message_delta":
+                delta_input_tokens = event.usage.input_tokens
+                out_tokens = event.usage.output_tokens
+
+    if not isinstance(echo, dict):
+        raise CaseFailure(
+            f"message_start 里没有 native_echo（得到 {echo!r}）——这次请求多半"
+            "没走同协议直通")
+    check("上游收到的 model", echo.get("model"), native_upstream_name(ctx))
+    detail = check_native_sent_body(echo, stream=True)
+
+    check("拼起来的正文", text, TEXT)
+    # 思考增量只在直通下到得了调用方：统一事件流不转发它。
+    check("思考增量", thinking, "想一想。")
+    check("message_start.message.model", start_model, ctx.model(NATIVE_SUFFIX))
+    check("message_start 的 input_tokens", start_input_tokens, PROMPT_TOKENS)
+    # 上游的 message_delta **不带** input_tokens，这一处是网关补的，补的是
+    # message_start 里那个真值——不是本地按字数估出来的数。
+    check("message_delta 的 input_tokens", delta_input_tokens, PROMPT_TOKENS)
+    check("message_delta 的 output_tokens", out_tokens, COMPLETION_TOKENS)
+
+    # 事件顺序：思考块在正文块之前（与上游发的一致），终止是 message_stop。
+    check("首事件", seen[0], "message_start")
+    check("末事件", seen[-1], "message_stop")
+
+    return f"{detail}；{len(seen)} 个事件，思考增量 {thinking!r}"
+
+
 ANTHROPIC_CASES = [
     ("非流式", anthropic_nonstream),
     ("流式", anthropic_stream),
@@ -752,6 +969,8 @@ ANTHROPIC_CASES = [
     ("客户端错误 400", anthropic_bad_request),
     ("认证错误 401", anthropic_auth_error),
     ("上游错误 5xx", anthropic_upstream_error),
+    ("同协议直通·非流式", anthropic_native_nonstream),
+    ("同协议直通·流式", anthropic_native_stream),
 ]
 
 
