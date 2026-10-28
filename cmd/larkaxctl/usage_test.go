@@ -446,6 +446,20 @@ func helpTextsForGate(t *testing.T) []struct{ what, text string } {
 			)
 		}
 	}
+	// legacyCommands 也要进来：它们是搬过家、旧路径仍要能用的那几条（reconcile、
+	// rotate、idempotency、calendar）。**不遍历它们的话，这四条彻底在管辖之外**——
+	// 它们照样打得出帮助、照样进补全表，却没有任何一道门看过那两份文案。
+	//
+	// 它们的 help 与正式命令共用一份（reconcile 用 ledgerHelp、rotate 用
+	// rotateHelp……），所以这一趟检查的是同一个值两遍。**重复不是浪费**：这正是
+	// 「旧路径打出的是不是与新路径同一份」这件事的断言位置；哪天有人给旧路径换了
+	// 一份自己的文案，这里会照出来。
+	for _, c := range legacyCommands {
+		texts = append(texts,
+			struct{ what, text string }{c.name + "（旧路径）的短版", c.help.short},
+			struct{ what, text string }{c.name + "（旧路径）的长版", c.help.long},
+		)
+	}
 	for _, path := range groupPathsDerived(t) {
 		parts := strings.Fields(path)
 		for _, form := range []struct {
@@ -497,9 +511,41 @@ func TestHelpPointersTargetRealDocSections(t *testing.T) {
 		}
 		checked++
 	}
+	// 下限与**应有的条数**对账，不是「非零就放过」。
+	//
+	// `checked == 0` 只防得住「一条都没扫到」：那时这张门确实什么都没查。但
+	// 它防不住「扫到的比该扫的少」——`helpTextsForGate` 少返回一半、或者某个
+	// 入口被判空，`checked` 仍然大于零，门照绿。这两种坏法在输出上完全一样
+	// （见 LESSONS.md 第 16 条：跳过与通过长得一样）。
+	//
+	// 应有的条数从同一份注册表派生：每个一级命令与每个组路径各一份长版。
+	// 两边同源，所以新加一条命令时这个下限自动跟着涨。
+	want := helpTextsForGateLongCount(t)
+	if checked != want {
+		t.Errorf("检查了 %d 条长版的去向，而注册表里有 %d 条："+
+			"少掉的那些没被任何断言看过——先确认 helpTextsForGate 有没有静默少返回",
+			checked, want)
+	}
 	if checked == 0 {
 		t.Fatal("一条去向都没检查到：这一条会安静地通过，所以先在这里拦住")
 	}
+}
+
+// helpTextsForGateLongCount 是 helpTextsForGate 应当交出的长版条数：
+// 一级命令 + 每个组路径，各一份。
+//
+// 单独抽出来是为了让「该有多少条」与「实际检查了多少条」在两处独立算出——
+// 直接拿 len(helpTextsForGate(t)) 当期望值的话，那个函数少返回十条，期望值
+// 也跟着少十条，两边一起错，比对仍然相等（与 LESSONS.md 第 58 条的「同构」
+// 是同一个形状）。
+func helpTextsForGateLongCount(t *testing.T) int {
+	t.Helper()
+
+	top := len(legacyCommands)
+	for _, g := range commandGroups {
+		top += len(g.commands)
+	}
+	return top + len(groupPathsDerived(t))
 }
 
 // TestQuietDoesNotSuppressHelp 钉住既有行为：`-q` 压的是「给人看」那一档的
