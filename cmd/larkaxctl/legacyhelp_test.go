@@ -7,27 +7,21 @@ import (
 	"github.com/sumwai/larkax/cmd/larkaxctl/internal/cli"
 )
 
-// legacyAlias 是「旧路径 → 它现在接在哪个正式命令上」，以及两者**是否同一层级**。
+// legacyAlias 是「旧路径 → 它现在接在哪个正式命令上」。
 //
 // 这四条（reconcile、rotate、idempotency、calendar）是搬过家、旧名字必须继续
 // 能用的命令。它们不进根帮助页，但真的生效——`main.go` 的 legacyCommands
 // 让它们直接接在同一个处理函数上。
-//
-// sameLevel 决定「流」比不比：`-h` 打哪个流在本仓按层级分档，一级命令与组
-// 不是一个档。四对今天**全是跨层级**，所以这一栏现在全 false；留着它是因为
-// 判据本身要能表达「同层级时必须连流一起比」，而今天没有这样的配对。
 var legacyAlias = []struct {
 	// from 是旧名字（一级命令）。
 	from string
 	// to 是新路径（可能是组，也可能是组下一个动作）。
 	to string
-	// sameLevel 为 true 时连 stdout/stderr 的归属一起比。
-	sameLevel bool
 }{
-	{from: "reconcile", to: "ledger", sameLevel: false},
-	{from: "rotate", to: "secret rotate", sameLevel: false},
-	{from: "idempotency", to: "maintenance idempotency", sameLevel: false},
-	{from: "calendar", to: "price calendar", sameLevel: false},
+	{from: "reconcile", to: "ledger"},
+	{from: "rotate", to: "secret rotate"},
+	{from: "idempotency", to: "maintenance idempotency"},
+	{from: "calendar", to: "price calendar"},
 }
 
 // TestLegacyCommandsShareTheirTargetsHelp 钉住旧路径打出来的**正文**就是新路径那一份。
@@ -38,19 +32,21 @@ var legacyAlias = []struct {
 // 不了。那是 LESSONS.md 第 58 条「同构期望」的另一个形态——期望值不是从被测
 // 函数取的，而是**两条被测项本身就是同一份数据**。
 //
-// # 为什么跨层级只比正文、不比流
+// # 为什么只比正文、不比流
 //
-// `-h` 打哪个流由**层级**决定，这是既有约定而不是缺陷：
+// 旧名字留下的前提是**仍打出同一份说明**，不是「连 stdout/stderr 归属也一致」。
+// 流在两个方向上都不一致，而且与新旧无关：
 //
-//   - 一级命令进 `c.run(rest)` 后由各命令自己的 `fs.Usage` 处理，那几处写的是
-//     `PrintUsage(os.Stderr, …)`（见 runReconcile、runIdempotency、runCalendar）
-//   - 组下的动作同理，走各自命令的 flag 集
+//   - 旧路径内部就不齐：`rotate`、`reconcile` 的 `-h` 走 `fs.Usage`，打
+//     **stderr**；`idempotency`、`calendar` 手写了 `case "-h", "--help"`，打
+//     **stdout**。四条旧命令本身分两派。
+//   - 一级命令整体上也不齐：26 条一级命令里，`-h` 打 stdout 的 17 条、
+//     打 stderr 的 9 条（2026-10-28 实测，无一条两个流都非空）。
 //
-// 所以 `reconcile`（一级）与 `ledger`（组）的流本来就不该相同，拿它判红等于
-// 把约定记成缺陷。**但正文必须逐字相同**——旧名字留着的前提就是它打出的仍是
-// 同一份说明。`rotate` 是这四条里唯一自己判 `-h` 并打 stdout 的（见
-// rotate.go），所以它恰好与新路径一致；这一条差异由 sameLevel 那一栏表达，
-// 不是判据的漏洞。
+// 所以「流由层级决定」这个说法是错的，拿它当判据会把约定记成缺陷。真正的
+// 分界是**实现方式**：手写 `-h` case 的打 stdout，交给 `fs.Usage` 的打
+// stderr。这是本仓一处既有不一致，与旧路径无关，P2 收口时一并看（记在
+// `leaders/CLI.md`）。这条门要钉的是正文，流不归它管。
 func TestLegacyCommandsShareTheirTargetsHelp(t *testing.T) {
 	for _, alias := range legacyAlias {
 		t.Run(alias.from, func(t *testing.T) {
@@ -79,20 +75,6 @@ func TestLegacyCommandsShareTheirTargetsHelp(t *testing.T) {
 					t.Errorf("%s %s 打出来的正文与 %q 不同：\n旧：%q\n新：%q\n"+
 						"旧名字留着的前提是它仍打出同一份说明",
 						alias.from, form, alias.to, got, want)
-				}
-
-				if !alias.sameLevel {
-					continue
-				}
-				// 同层级时流也要一样。今天没有这样的配对，这一支不会跑到——
-				// 留着是因为判据要能表达它，而不是等哪天有人补配对时才想起。
-				if fromOut != toOut {
-					t.Errorf("%s %s 的 stdout 归属与 %q 不同（两者同层级，流该一样）：\n旧：%q\n新：%q",
-						alias.from, form, alias.to, fromOut, toOut)
-				}
-				if fromErrOut != toErrOut {
-					t.Errorf("%s %s 的 stderr 归属与 %q 不同（两者同层级，流该一样）：\n旧：%q\n新：%q",
-						alias.from, form, alias.to, fromErrOut, toErrOut)
 				}
 			}
 		})
