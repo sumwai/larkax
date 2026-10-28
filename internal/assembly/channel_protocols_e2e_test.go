@@ -82,11 +82,18 @@ func (f *dualProtocolUpstream) reset() {
 const (
 	// 两套协议各回各的形状，正文与用量相同：金额因此可以共用一个期望值，
 	// 而形状不同足以证明分派去了哪个适配器。
-	dualOpenAIBody = `{"id":"cmpl-1","model":"upstream-model",
+	//
+	// `object` 与 `created` 必须给：真上游的响应体里有它们（见
+	// internal/channel 各适配器的 native 真样本）。假上游不给的话，同协议
+	// 直通把上游原文原样交出，调用方收到的响应就没有这个字段——那不是我们
+	// 允许缺的，是夹具不完整。枢纽路径会自己补上，所以以前看不出来。
+	dualOpenAIBody = `{"id":"cmpl-1","object":"chat.completion","created":1700000000,
+		"model":"upstream-model",
 		"choices":[{"index":0,"finish_reason":"stop",
 			"message":{"role":"assistant","content":"你好"}}],
 		"usage":{"prompt_tokens":12,"completion_tokens":7}}`
 	dualAnthropicBody = `{"id":"msg_1","type":"message","role":"assistant",
+		"model":"upstream-model",
 		"content":[{"type":"text","text":"你好"}],"stop_reason":"end_turn",
 		"usage":{"input_tokens":12,"output_tokens":7}}`
 )

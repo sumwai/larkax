@@ -11,6 +11,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,12 @@ type nativeStreamCase struct {
 	hubBaseline string
 	// balanceErrorFrame 是余额切断在直通流里写出的那一帧。
 	balanceErrorFrame string
+	// upstreamErrorBlock 是上游自己发的那一块错误原文（三套协议的形状各不
+	// 相同）。它**不该**出现在响应里：错误帧的措辞由我们给，不回显上游原文。
+	upstreamErrorBlock string
+	// errorFrameAfterUpstream 是上游流内错误时我们写出的那一帧。与
+	// balanceErrorFrame 的差别只在措辞（它是「上游失败」而不是「余额不足」）。
+	errorFrameAfterUpstream string
 	// firstEventErrorBody 是**首事件就是 error** 时写出的响应体（见
 	// TestStreamErrorAsFirstEventWritesNoPreamble）。
 	firstEventErrorBody string
@@ -116,6 +123,8 @@ func nativeStreamCases() []nativeStreamCase {
 			firstEventErrorBody: sseBody(
 				`data: {"error":{"message":"upstream call failed","type":"server_error","param":null,"code":null}}`,
 			),
+			upstreamErrorBlock:      `data: {"error":{"message":"placeholder upstream failure","type":"server_error"}}`,
+			errorFrameAfterUpstream: `data: {"error":{"message":"upstream call failed","type":"server_error","param":null,"code":null}}`,
 		},
 		{
 			name:     "Anthropic",
@@ -141,6 +150,8 @@ func nativeStreamCases() []nativeStreamCase {
 			firstEventErrorBody: sseBody(
 				`event: error` + "\n" + `data: {"type":"error","error":{"type":"api_error","message":"upstream call failed"}}`,
 			),
+			upstreamErrorBlock:      `event: error` + "\n" + `data: {"type":"error","error":{"type":"api_error","message":"placeholder upstream failure"}}`,
+			errorFrameAfterUpstream: `event: error` + "\n" + `data: {"type":"error","error":{"type":"api_error","message":"upstream call failed"}}`,
 		},
 		{
 			name:     "Responses",
@@ -160,10 +171,18 @@ func nativeStreamCases() []nativeStreamCase {
 				`event: response.output_item.done`+"\n"+`data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item_id":"req-native-test_msg_0","item":{"type":"message","id":"req-native-test_msg_0","status":"completed","role":"assistant","content":[{"type":"output_text","text":"你好","annotations":[]}]}}`,
 				`event: response.completed`+"\n"+`data: {"type":"response.completed","sequence_number":5,"response":{"id":"req-native-test","object":"response","created_at":1700000000,"status":"completed","model":"m-1","output":[{"type":"message","id":"req-native-test_msg_0","status":"completed","role":"assistant","content":[{"type":"output_text","text":"你好","annotations":[]}]}],"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":19},"parallel_tool_calls":false,"tool_choice":"auto","tools":[]}}`,
 			),
-			balanceErrorFrame: `event: error` + "\n" + `data: {"type":"error","sequence_number":0,"code":"server_error","message":"` + msg + `"}`,
+			// 4 是接着上游那三帧排的（0..3，见上面的 nativeFrames）：
+			// 直通下客户端手里的序号是上游给的，这一帧插在它们后面（见
+			// nativeStreamPassthrough.observeSequence）。
+			balanceErrorFrame: `event: error` + "\n" + `data: {"type":"error","sequence_number":4,"code":"server_error","message":"` + msg + `"}`,
 			firstEventErrorBody: sseBody(
 				`event: error` + "\n" + `data: {"type":"error","sequence_number":0,"code":"server_error","message":"upstream call failed"}`,
 			),
+			upstreamErrorBlock: `event: error` + "\n" + `data: {"type":"error","sequence_number":3,"message":"placeholder upstream failure"}`,
+			// 序号接着上游那三帧（0..3）排——错误块自己带的是 3，我们这一帧
+			// 排在它之后，所以是 4。上游那一块**不转发**，但它的序号也不该
+			// 被我们用（它是上游的编号）。
+			errorFrameAfterUpstream: `event: error` + "\n" + `data: {"type":"error","sequence_number":4,"code":"server_error","message":"upstream call failed"}`,
 		},
 	}
 }
@@ -220,8 +239,124 @@ func TestNativePassthroughForwardsRawFrames(t *testing.T) {
 	}
 }
 
-// 零事件的流：三协议都一帧都不写（纯 EOF）。
+// 上游块里的 model 被改写调用方请求的名字，其余键一个不动。
 //
+// # 为什么这条要单独钉
+//
+// 上面那些夹具的原生帧里 model 恰好就是请求名（m-1），所以改写是空操作——
+// 把 rewriteModelKey 整个短路掉，它们照样全绿。那样一条恒真的路径不能证明
+// 改写生效（见 LESSONS 里「钉住改动前后都成立的行为」）。
+//
+// 这条造一份 model 与请求名**不同**的上游字节，逐字段判两件事：
+//   - model 变成了调用方要的那个名字（docs/api.md 的「入站别名」一节承诺
+//     流式与非流式一样）；
+//   - 其余键与值原样保留（改写只动那一个键，不是重造整帧）。
+func TestNativePassthroughRewritesModelInRawFrames(t *testing.T) {
+	const upstreamModel = "upstream-real-name"
+	// 调用方要的名字由测试处理器固定（见 newTestHandler 的别名/模型名）。
+	const wantedModel = "m-1"
+
+	cases := []struct {
+		name     string
+		path     string
+		protocol channel.Protocol
+		frame    string
+	}{
+		{
+			name:     "OpenAI",
+			path:     PathChatCompletions,
+			protocol: channel.ProtocolOpenAI,
+			frame: `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,` +
+				`"model":"` + upstreamModel + `","choices":[{"index":0,"delta":{"content":"你好"},` +
+				`"finish_reason":null}]}`,
+		},
+		{
+			name:     "Anthropic",
+			path:     PathMessages,
+			protocol: channel.ProtocolAnthropic,
+			frame: `event: message_start` + "\n" +
+				`data: {"type":"message_start","message":{"id":"msg_1","type":"message",` +
+				`"role":"assistant","model":"` + upstreamModel + `","content":[],` +
+				`"usage":{"input_tokens":42,"output_tokens":1}}}`,
+		},
+		{
+			name:     "Responses",
+			path:     PathResponses,
+			protocol: channel.ProtocolOpenAIResponses,
+			// Responses 把 model 嵌在 response 对象里，与另外两套的顶层位置不同。
+			frame: `event: response.created` + "\n" +
+				`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1",` +
+				`"object":"response","status":"in_progress","model":"` + upstreamModel + `",` +
+				`"output":[]}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := nativeStreamPost(t, tc.path, channel.StreamEvent{
+				Kind:         "native",
+				NativeFormat: tc.protocol,
+				Frame:        []byte(tc.frame),
+			})
+
+			got := rec.Body.String()
+			if strings.Contains(got, upstreamModel) {
+				t.Errorf("上游的模型名泄漏给了调用方：%q\n"+
+					"响应里的 model 必须是调用方请求的那个（见 docs/api.md 的「入站别名」）", got)
+			}
+			inner := jsonObjectOf(t, got)
+			// model 的落点按协议不同，与 rewriteModelKey 里那三层对应。
+			switch tc.protocol {
+			case channel.ProtocolAnthropic:
+				nested, _ := inner["message"].(map[string]any)
+				if nested == nil {
+					t.Fatalf("message 对象没了：%q", got)
+				}
+				inner = nested
+			case channel.ProtocolOpenAIResponses:
+				nested, _ := inner["response"].(map[string]any)
+				if nested == nil {
+					t.Fatalf("response 对象没了：%q", got)
+				}
+				inner = nested
+			}
+			if model, _ := inner["model"].(string); model != wantedModel {
+				t.Errorf("model = %q，期望 %q", model, wantedModel)
+			}
+			// 其余键原样：这条造的是 OpenAI 那块，它至少有 id 与 object。
+			if tc.protocol == channel.ProtocolOpenAI {
+				if id, _ := inner["id"].(string); id != "chatcmpl-1" {
+					t.Errorf("id = %q，期望原样保留的 chatcmpl-1（改写只动 model 一个键）", id)
+				}
+				if object, _ := inner["object"].(string); object != "chat.completion.chunk" {
+					t.Errorf("object = %q，期望原样保留的 chat.completion.chunk", object)
+				}
+			}
+		})
+	}
+}
+
+// jsonObjectOf 取响应体里第一帧的 JSON 载荷。
+//
+// 直通写的帧就是上游那一块的字节，所以这里按 SSE 的 data: 行取出第一条载荷
+// 就够了——本用例每条都只发一帧。
+func jsonObjectOf(t *testing.T, body string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
+		if !ok {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &m); err != nil {
+			t.Fatalf("响应帧的载荷不是 JSON: %v\n%s", err, body)
+		}
+		return m
+	}
+	t.Fatalf("响应体里没有 data: 行：%q", body)
+	return nil
+}
+
 // 这是有意改变：零事件流本就是失败流（不计费、没有 done、按截断处置），
 // 写一帧 role 片 / response.created 会让客户端以为流正常开始了。Anthropic
 // 的 start 本来就是空的，另外两套以前会写。
@@ -271,17 +406,38 @@ func TestNativePassthroughIgnoresForeignFormat(t *testing.T) {
 
 // 上游流内的错误：native 字节已经把那份错误块送到客户端手里了，再写一帧
 // 合成的错误就是同一件事说两遍。响应体只剩上游那几块。
-func TestNativePassthroughSuppressesUpstreamError(t *testing.T) {
+// 上游流内的错误块**不转发**，改成我们自己的错误帧。
+//
+// docs/api.md 的「流中途的错误」一节写着「`message` 里不回上游的错误原文」——
+// 上游的错误体可能回显请求内容。所以原生块里认出上游错误（OpenAI
+// `{"error":…}` / Anthropic 与 Responses 的 `type:"error"`）就不写它，由随后
+// 到达的归一化 error 事件走 inner 的 errorFrame 说我们自己的措辞。
+//
+// 判据是**逐字节**的：期望体 = 上游那些非错误帧 + 我们的错误帧，既不能多出
+// 一块上游原文，也不能少了这一帧终止信号。
+func TestNativePassthroughReplacesUpstreamErrorBlock(t *testing.T) {
 	for _, tc := range nativeStreamCases() {
 		t.Run(tc.name, func(t *testing.T) {
+			// 把上游的错误块也塞进 native 帧里：真实上游就是先发这块、再发
+			// 由它解析出的归一化 error 事件（见 channel.StreamEvent 的 Frame）。
 			events := nativeStreamEvents(tc)
+			events = append(events, channel.StreamEvent{
+				Kind:         "native",
+				NativeFormat: tc.protocol,
+				Frame:        []byte(tc.upstreamErrorBlock),
+			})
 			events = append(events, channel.StreamEvent{Kind: "error", Err: errStreamTest{}})
 
 			rec := nativeStreamPost(t, tc.path, events...)
 
-			want := sseBody(tc.nativeFrames...)
+			if strings.Contains(rec.Body.String(), "placeholder upstream failure") {
+				t.Errorf("上游错误块被原样转发了：%q\n"+
+					"错误帧的措辞必须由我们给，不能回显上游原文（见 docs/api.md）",
+					rec.Body.String())
+			}
+			want := sseBody(tc.nativeFrames...) + sseBody(tc.errorFrameAfterUpstream)
 			if got := rec.Body.String(); got != want {
-				t.Errorf("上游流内错误不该被合成\n got = %q\nwant = %q", got, want)
+				t.Errorf("错误帧的形状不对\n got = %q\nwant = %q", got, want)
 			}
 		})
 	}

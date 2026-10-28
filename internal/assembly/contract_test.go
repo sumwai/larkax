@@ -661,9 +661,12 @@ func (u *contractUpstream) anthropicTextStream(w http.ResponseWriter, model stri
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
 	}
 	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	// input_tokens 要带：真上游带它（见 anthropicadapter 的 adapter_test.go:594），
+	// 而契约测试断言 message_delta 里这一处是真值（见 contract/check.py）。假上游
+	// 不带的话，直通原样转发上游字节，那个断言就会落空。
 	event("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
+			`"usage":{"input_tokens":%d,"output_tokens":%d}}`, contractPromptTokens, contractCompletionTokens))
 	event("message_stop", `{"type":"message_stop"}`)
 }
 
@@ -751,9 +754,12 @@ func (u *contractUpstream) anthropicDrainStream(w http.ResponseWriter, model str
 			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, part))
 	}
 	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	// input_tokens 要带：真上游带它（见 anthropicadapter 的 adapter_test.go:594），
+	// 而契约测试断言 message_delta 里这一处是真值（见 contract/check.py）。假上游
+	// 不带的话，直通原样转发上游字节，那个断言就会落空。
 	event("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-			`"usage":{"output_tokens":%d}}`, contractCompletionTokens))
+			`"usage":{"input_tokens":%d,"output_tokens":%d}}`, contractPromptTokens, contractCompletionTokens))
 	event("message_stop", `{"type":"message_stop"}`)
 }
 

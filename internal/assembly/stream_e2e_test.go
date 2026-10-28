@@ -158,6 +158,22 @@ func (u *streamUpstream) serveOpenAI(w io.Writer, r *http.Request, flush func())
 		flush()
 	}
 
+	// 开场分片：只带 role，正文是空串。
+	//
+	// 真上游就是这么发的（见 internal/channel/openaiadapter 的
+	// nativeStreamFrames：第一帧是 `delta:{"role":"assistant","content":""}`）。
+	// 假上游以前不发它——枢纽路径会自己合成一个 role 片，所以看不出来；直通
+	// 原样转发上游字节，缺了它就少一帧。这是夹具不完整，不是网关该补。
+	//
+	// 它同时是 failAfter 计数的第 0 片之外的东西：失败点按正文分片算，
+	// 开场片不占 failAfter 的下标，见下面循环的 i 与 u.chunks 的对应。
+	if u.status == 0 {
+		write(fmt.Sprintf(
+			`{"id":"chatcmpl-placeholder","object":"chat.completion.chunk","model":%q,`+
+				`"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
+			u.model))
+	}
+
 	for i, text := range u.chunks {
 		if u.failAfter > 0 && i == u.failAfter {
 			write(`{"error":{"message":"placeholder upstream failure","type":"server_error"}}`)
@@ -298,9 +314,21 @@ func (u *streamUpstream) serveAnthropic(w io.Writer, r *http.Request, flush func
 	}
 
 	write("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	// message_delta 带上 input_tokens：真上游的样本里带（见
+	// anthropicadapter 的 adapter_test.go:594，那一份是
+	// `usage:{"input_tokens":77,"output_tokens":25}`）。假上游以前只给
+	// output_tokens，靠网关那一层补——那恰好把「上游给不给」这件事测成了
+	// 无关变量。带上它，直通与枢纽两条路才对得上同一个上游。
+	//
+	// usage 为 nil 时**不写这个键**：报一个 0 等于上游声称「输入零 token」，
+	// 与「没报」是两件事（见 fakeUpstream 的 cacheRead 注释，同一个理由）。
+	deltaUsage := fmt.Sprintf(`"output_tokens":%d`, output)
+	if u.usage != nil {
+		deltaUsage = fmt.Sprintf(`"input_tokens":%d,"output_tokens":%d`, input, output)
+	}
 	write("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},`+
-			`"usage":{"output_tokens":%d}}`, output))
+			`"usage":{%s}}`, deltaUsage))
 	write("message_stop", `{"type":"message_stop"}`)
 }
 
@@ -749,10 +777,15 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 		t.Errorf("Content-Type = %q，期望 text/event-stream", ct)
 	}
 
-	// 一、帧序列。五帧：角色分片、两片正文、带用量的结束分片、[DONE]。
+	// 一、帧序列。六帧：角色分片、两片正文、带 finish_reason 的结束分片、
+	// 带用量的分片、[DONE]。
+	//
+	// 六个而不是五个：直通把上游字节原样转发，上游把用量放在**结束分片之后
+	// 另发的一个 choices 为空的分片**里（见 nativeStreamFrames 真样本）。枢纽
+	// 路径把两者合并成一片（见 stream.go 开篇「两处已知的简化」），直通不合并。
 	frames := readFrames(t, resp.Body, 0)
-	if len(frames) != 5 {
-		t.Fatalf("收到 %d 帧，期望 5 帧：%+v", len(frames), frames)
+	if len(frames) != 6 {
+		t.Fatalf("收到 %d 帧，期望 6 帧：%+v", len(frames), frames)
 	}
 	for i, f := range frames {
 		if f.event != "" {
@@ -782,14 +815,17 @@ func TestStreamChatCompletionsEndToEnd(t *testing.T) {
 	if last.Choices[0].FinishReason == nil || *last.Choices[0].FinishReason != "stop" {
 		t.Errorf("结束分片的 finish_reason = %s，期望 stop", showPtr(last.Choices[0].FinishReason))
 	}
-	if last.Usage == nil {
-		t.Fatal("结束分片里没有 usage——流式的用量必须在结束之前给出来")
+	// 用量在紧跟着的下一片里（choices 为空）。直通不合并这两片。
+	usage := decodeChunk(t, frames[4])
+	if usage.Usage == nil {
+		t.Fatal("用量分片里没有 usage——流式的用量必须在结束之前给出来")
 	}
-	if last.Usage.PromptTokens != 12 || last.Usage.CompletionTokens != 7 || last.Usage.TotalTokens != 19 {
-		t.Errorf("usage = %+v，期望上游报的 12/7/19", *last.Usage)
+	if usage.Usage.PromptTokens != 12 || usage.Usage.CompletionTokens != 7 ||
+		usage.Usage.TotalTokens != 19 {
+		t.Errorf("usage = %+v，期望上游报的 12/7/19", *usage.Usage)
 	}
-	if frames[4].data != "[DONE]" {
-		t.Errorf("最后一帧 = %q，期望 [DONE]", frames[4].data)
+	if frames[5].data != "[DONE]" {
+		t.Errorf("最后一帧 = %q，期望 [DONE]", frames[5].data)
 	}
 
 	// 二、钱：12 × 0.00001 + 7 × 0.00003 = 0.00033000，与非流式那条路同一个数。

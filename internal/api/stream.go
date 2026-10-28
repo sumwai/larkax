@@ -148,7 +148,7 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 	default:
 		return nil, fmt.Errorf("协议 %q 没有流式响应形状", protocol)
 	}
-	return &nativeStreamPassthrough{inner: inner, protocol: protocol}, nil
+	return &nativeStreamPassthrough{inner: inner, protocol: protocol, model: model, inputTokens: inputTokens}, nil
 }
 
 // ── 同协议直通 ─────────────────────────────────────────────────────────
@@ -189,8 +189,23 @@ func newStreamRenderer(protocol channel.Protocol, id, model string, now time.Tim
 type nativeStreamPassthrough struct {
 	inner    streamRenderer
 	protocol channel.Protocol
+	// model 是回显给调用方的模型名（他要的那个，见 modelNames）。
+	model string
+	// inputTokens 是本地估算的输入量。只在 message_delta 没报 input_tokens
+	// 时用它补那个键（见 rewriteMessageDeltaInputTokens）。
+	inputTokens int64
 	// nativeSeen 表示这条流见过与本协议匹配的 native 帧，此后整条流走直通。
 	nativeSeen bool
+	// nextSeq 是下一条**我们造的帧**该用的 sequence_number（仅 Responses 用）。
+	//
+	// 它取「上游在各帧里报过的最大序号 + 1」：直通下客户端手里的序号是上游
+	// 给的，我们后来补的那一帧（余额切断、上游错误）必须接着那个数往下排，
+	// 否则客户端按序号排序时会把它当成乱序（见 docs/api.md 的「流中途的
+	// 错误」一节：错误帧仍带 sequence_number）。
+	nextSeq int64
+	// upstreamError 表示刚刚拦下了一个上游错误块。随后到达的归一化 error
+	// 事件据此补一帧我们自己的错误帧（见 event）。
+	upstreamError bool
 }
 
 // start 什么都不写。
@@ -209,10 +224,34 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 			return nil
 		}
 		p.nativeSeen = true
+		if isUpstreamErrorBlock(p.protocol, ev.Frame) {
+			// 上游的错误块**不转发**（见 docs/api.md 的「流中途的错误」一节：
+			// `message` 里不回上游原文）。记下这一刻，由随后到达的归一化
+			// error 事件走 inner 的 errorFrame 说我们自己的措辞。
+			//
+			// 判据落在**这里**而不是 error 事件上：适配器先发 native 帧、
+			// 再发由它解析出的归一化事件（见 channel.StreamEvent 的 Frame），
+			// 所以等 error 事件到了再判，那块字节已经写出去了。
+			p.upstreamError = true
+			return nil
+		}
+		block := ev.Frame
+		if rewritten, ok := rewriteModelKey(p.protocol, block, p.model); ok {
+			// 上游在这块里报了它自己的模型名，而后我们承诺回显调用方写的名字
+			// （见 docs/api.md 的「入站别名」一节）。只改那个键，其余键不动。
+			block = rewritten
+		}
+		p.observeSequence(block)
+		if rewritten, ok := rewriteMessageDeltaInputTokens(p.protocol, block, p.inputTokens); ok {
+			// 上游的 message_delta 没报 input_tokens，而我们承诺过那一处是真值
+			// （见 contract/README.md 的「跨协议流式的 message_start」一节）。
+			// 只补缺的那个键；上游报了就原样留。
+			block = rewritten
+		}
 		// 原样写出，再补一个空行：Frame 是块内各行用 `\n` 连起来的字节，
 		// 不带末尾换行，也不带那个起分隔作用的空行（见 channel.StreamEvent
 		// 的 Frame）。两处都要检查：写失败意味着调用方已经不在了。
-		if _, err := w.Write(ev.Frame); err != nil {
+		if _, err := w.Write(block); err != nil {
 			return err
 		}
 		_, err := io.WriteString(w, "\n\n")
@@ -223,22 +262,51 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 		return p.inner.event(w, ev)
 	}
 
-	// 直通流：归一化事件一个字都不写——上游原文已经把同一份内容送出去了。
+	// 直通流：归一化事件**照旧送给 inner**，但它的输出不落到 w。
 	//
-	// 唯一的例外是余额切断：它是网关**自己注入**的错误事件（见
-	// internal/gateway 的 streamFreeze），上游那条流里没有对应的 native 帧，
-	// 抑制它等于无因截断——客户端只会看到一条没有结束标记的流，分不出是
-	// 余额用尽、上游断了还是网络问题。
+	// 「送给 inner」不是可省的：渲染器在 event 里推进内部状态（Anthropic 的
+	// usage 累计、三者的惰性首帧标记）。不送的话我们自己造的帧（余额切断的
+	// 错误帧）会拿一个没累计过的用量。
 	//
-	// 上游流内的错误则相反：native 字节已经把那份错误块送到客户端手里，
-	// 再写一帧合成的错误就是同一件事说两遍。
-	if ev.Kind == "error" && errors.Is(ev.Err, store.ErrInsufficientAvailable) {
-		// 走 errorFrame 而不是 event：inner.event 会顺带写出惰性首帧，
-		// 而在直通流里那帧是重复的（上游已经发过自己的 message_start /
-		// response.created）。
-		return p.inner.errorFrame(w, ev.Err)
+	// 「不落到 w」是因为上游原文已经把同一份内容送出去了，再写一遍就是重复。
+	//
+	// # 为什么不靠 inner 的 seq 定序号
+	//
+	// Responses 的 sequence_number 在直通里**不能用 inner 的计数器**：那个
+	// 计数器数的是归一化事件，而上游一条原生帧可能对应零个、一个或多个
+	// 归一化事件（一个 delta 块里塞两行 data 就是多个），两者条数不对应，
+	// 补出来的号会与客户端手里上游那几帧对不上。序号改由 observeSequence
+	// 从**上游原文**读（见 event 里的 native 分支）。
+	//
+	// 两个例外，都是「我们承诺过、而上游那份字节没有兑现」：
+	//
+	//   - 余额切断：网关**自己注入**的错误事件（见 internal/gateway 的
+	//     streamFreeze），上游那条流里没有对应的 native 帧，抑制它等于无因
+	//     截断——客户端只会看到一条没有结束标记的流，分不出是余额用尽、上游
+	//     断了还是网络问题。
+	//   - 上游流内的错误：那块 native 字节**已被拦下没转发**（见上面
+	//     isUpstreamErrorBlock），所以这里必须补一帧，否则客户端看不到任何
+	//     终止信号。措辞由 errorFrame 给，不回上游原文。
+	if ev.Kind == "error" {
+		if errors.Is(ev.Err, store.ErrInsufficientAvailable) || p.upstreamError {
+			// 走 errorFrame 而不是 event：inner.event 会顺带写出惰性首帧，
+			// 而在直通流里那帧是重复的。
+			//
+			// 先把 inner 的序号**对齐到上游那几帧之后**：直通下客户端手里的
+			// 序号是上游给的（见 observeSequence），这一帧插在它们后面，序号
+			// 就得接着排，否则客户端按序号排序会把它当成乱序。
+			//
+			// 是「对齐」不是「取较大值」：inner 的计数器数的是归一化事件
+			// （上面那些 io.Discard 的调用把它推到了远大于上游帧数的地方），
+			// 那个数在直通流里没有任何意义，拿它当序号会直接跳号。
+			if s, ok := p.inner.(*responsesStream); ok {
+				s.seq = p.nextSeq
+			}
+			return p.inner.errorFrame(w, ev.Err)
+		}
 	}
-	return nil
+	// 推进 inner 的状态，输出丢弃。
+	return p.inner.event(io.Discard, ev)
 }
 
 func (p *nativeStreamPassthrough) finish(w io.Writer) error {
@@ -260,6 +328,244 @@ func (p *nativeStreamPassthrough) finish(w io.Writer) error {
 // 注释：注释只对读代码的人有效，而这里要防的正是读代码时被误导。
 func (p *nativeStreamPassthrough) errorFrame(io.Writer, error) error {
 	panic("nativeStreamPassthrough.errorFrame 不该被调用：错误帧由 inner.event 或 p.event 写")
+}
+
+// isUpstreamErrorBlock 判断一个原生块是不是上游的错误块。
+//
+// 这三条形状各自来自真实上游（不是照 dto 猜的）：
+//
+//   - OpenAI chat：`{"error":{"message":…,"type":…}}`，没有 `choices`；
+//   - Anthropic：`event: error` 行，载荷 `{"type":"error","error":{…}}`；
+//   - OpenAI Responses：`event: error` 行，载荷是**平铺**的
+//     `{"type":"error","code":…,"message":…}`（没有 `error` 外层）。
+//
+// # 只认已知结构，认不出就当内容
+//
+// 与 internal/idempotency 的残差表同一个纪律：判据是**肯定**的形状，不是
+// 否定。解析不了、没有 data 行、`type` 是别的值——一律返回 false，那块照旧
+// 原样转发。认错的方向必须是「多转了一块内容」，而不是「把内容当错误吞掉」：
+// 前者调用方看得见、能自己判断，后者是静默丢数据。
+func isUpstreamErrorBlock(protocol channel.Protocol, frame []byte) bool {
+	eventName, payloads := sseBlockParts(frame)
+	if len(payloads) == 0 {
+		return false
+	}
+	// 多行 data 的块按 SSE 规范用 \n 拼成一条载荷；错误块只会有一行，
+	// 拼接在这里只是为了不把「恰好分了两行」的块判成认不出。
+	payload := strings.Join(payloads, "\n")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		return false
+	}
+	if m == nil {
+		return false
+	}
+
+	switch protocol {
+	case channel.ProtocolOpenAI:
+		_, hasError := m["error"]
+		_, hasChoices := m["choices"]
+		return hasError && !hasChoices
+	case channel.ProtocolAnthropic:
+		// 真上游两处都写：`event: error` 行与载荷里的 `type`。只要有一处
+		// 说是错误就算——这句判据的方向是「认得出来就拦」，而靠得住的是
+		// 载荷那个 type（见 anthropicadapter 的注释：event: 行可能被省略）。
+		if t, _ := m["type"].(string); t == "error" {
+			return true
+		}
+		return eventName == "error"
+	case channel.ProtocolOpenAIResponses:
+		if t, _ := m["type"].(string); t == "error" {
+			return true
+		}
+		return eventName == "error"
+	}
+	return false
+}
+
+// sseBlockParts 拆出一个 SSE 块的事件名与全部 data 载荷。
+//
+// 与 frame{} 的分工：那个是**写**，这个是**读**，而且它只服务于「认块」这一
+// 件事——不重建块、不重新序列化，所以块内结构（注释行、多行 data、event:
+// 行）在这里只被读取。
+func sseBlockParts(block []byte) (eventName string, payloads []string) {
+	for _, raw := range strings.Split(string(block), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if v, ok := strings.CutPrefix(line, "event:"); ok {
+			eventName = strings.TrimSpace(v)
+			continue
+		}
+		if v, ok := strings.CutPrefix(line, "data:"); ok {
+			payloads = append(payloads, strings.TrimSpace(v))
+		}
+	}
+	return eventName, payloads
+}
+
+// rewriteModelKey 把一块原生帧里汇报的模型名改成调用方写的那个。
+//
+// # 为什么只改这一个键
+//
+// 同协议直通把上游那份字节原样交给调用方，而上游在每一块里都报它自己的模型
+// 名（OpenAI chat 五个分片每个都有 `model`）。`docs/api.md` 的「入站别名」
+// 一节承诺**响应体里的 `model` 回显调用方写的名字**，且明写流式与非流式一样。
+// 不回显就是把上游的真名泄漏给调用方，也让按响应判断模型的 SDK 出错。
+//
+// 只改 `model`，其余键一个不动：这是「逐字段等价、不逐字节相同」那条偏差的
+// 流式形态（非流式见 api.go 的 renderNativePassthrough）。重新序列化会让键序
+// 与上游不同、大整数过一遍 float64——这一点与那边是同一个代价，不再重复解释。
+//
+// # 认不出就不改
+//
+// 返回 false 表示「这块里没有可改的 model」，调用方照原字节转发。判据与
+// isUpstreamErrorBlock 同一个纪律：解析不了、没有 data 行、model 已经是目标
+// 名字——一律不动。认错的方向必须是「多转了一块原文」，不是「把内容改坏」。
+func rewriteModelKey(protocol channel.Protocol, frame []byte, want string) ([]byte, bool) {
+	if want == "" {
+		return frame, false
+	}
+	eventName, payloads := sseBlockParts(frame)
+	if len(payloads) == 0 {
+		return frame, false
+	}
+	payload := strings.Join(payloads, "\n")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload), &m); err != nil || m == nil {
+		return frame, false
+	}
+
+	// model 的位置按协议不同，三套协议各有各的嵌套：
+	//   - OpenAI chat：顶层；
+	//   - Anthropic：`message.model`（message_start 里）；
+	//   - Responses：`response.model`（每个流事件的 response 对象里）。
+	// 认错一层就等于没改——那时上游真名照样泄漏出去，而用例可能因为夹具
+	// 恰好同名而全绿（本文件的对应用例专门造了不同的名字来盯这一点）。
+	target := m
+	switch protocol {
+	case channel.ProtocolAnthropic:
+		nested, ok := m["message"].(map[string]any)
+		if !ok {
+			return frame, false
+		}
+		target = nested
+	case channel.ProtocolOpenAIResponses:
+		nested, ok := m["response"].(map[string]any)
+		if !ok {
+			return frame, false
+		}
+		target = nested
+	}
+	got, ok := target["model"].(string)
+	if !ok || got == want {
+		return frame, false
+	}
+	target["model"] = want
+
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return frame, false
+	}
+	// 重建这一块：保留原块的 event: 行（如果有），data 换成改过的载荷。
+	// 其余字段（注释行、id: 行）在正常上游的 model 块里不会出现——真出现就
+	// 走下面这条路重建，而它们本来也不是数据。
+	var b strings.Builder
+	if eventName != "" {
+		b.WriteString("event: ")
+		b.WriteString(eventName)
+		b.WriteString("\n")
+	}
+	b.WriteString("data: ")
+	b.Write(raw)
+	return []byte(b.String()), true
+}
+
+// rewriteMessageDeltaInputTokens 给缺了 input_tokens 的 message_delta 补上那个键。
+//
+// # 它补的是「我们承诺过的那一处」
+//
+// `contract/README.md` 写着「无论哪条路，`message_delta.usage.input_tokens`
+// 都是真值」，而 `contract/check.py` 断言的正是这一处。真 Anthropic 上游的
+// message_delta **可能带也可能不带**这个字段（真样本 `adapter_test.go:594`
+// 带的是 77；假上游从不带）。带的原样留，不带的补。
+//
+// # 为什么补的是估算值而不是省略
+//
+// 上游没在 message_delta 里报它，就只剩本地的输入估算（就是预留用的那个数）。
+// 不补的话客户端拿到的是「这个字段不存在」，而承诺说的是它总是有值；补一个
+// 估算值至少量级是对的，且与非流式那条路的估算口径一致。
+//
+// # 只认 Anthropic，认不出就不动
+//
+// 其余两套协议没有 message_delta。判据同样只认肯定形状：解析不了、不是
+// message_delta、usage 已有 input_tokens——一律返回 false 原样转发。
+func rewriteMessageDeltaInputTokens(protocol channel.Protocol, frame []byte, estimate int64) ([]byte, bool) {
+	if protocol != channel.ProtocolAnthropic || estimate <= 0 {
+		return frame, false
+	}
+	eventName, payloads := sseBlockParts(frame)
+	if len(payloads) == 0 {
+		return frame, false
+	}
+	payload := strings.Join(payloads, "\n")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload), &m); err != nil || m == nil {
+		return frame, false
+	}
+	if t, _ := m["type"].(string); t != "message_delta" && eventName != "message_delta" {
+		return frame, false
+	}
+	usage, _ := m["usage"].(map[string]any)
+	if usage == nil {
+		// 上游连 usage 都没给：这一块整体没有可补的落点，不动它。补一个
+		// usage 对象等于替上游编一帧，越过了「只补缺键」的边界。
+		return frame, false
+	}
+	if _, ok := usage["input_tokens"]; ok {
+		return frame, false
+	}
+	usage["input_tokens"] = estimate
+
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return frame, false
+	}
+	var b strings.Builder
+	if eventName != "" {
+		b.WriteString("event: ")
+		b.WriteString(eventName)
+		b.WriteString("\n")
+	}
+	b.WriteString("data: ")
+	b.Write(raw)
+	return []byte(b.String()), true
+}
+
+// observeSequence 记住上游在这块里报过的 sequence_number，供我们造的帧接排。
+//
+// 只认 Responses：另外两套协议没有这个字段，也不会因此写什么。判据与别处
+// 同一个纪律——解析不了、没有这个键、值不是数字，一律不动。
+func (p *nativeStreamPassthrough) observeSequence(block []byte) {
+	if p.protocol != channel.ProtocolOpenAIResponses {
+		return
+	}
+	_, payloads := sseBlockParts(block)
+	if len(payloads) == 0 {
+		return
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(strings.Join(payloads, "\n")), &m); err != nil || m == nil {
+		return
+	}
+	v, ok := m["sequence_number"].(float64)
+	if !ok {
+		return
+	}
+	if seq := int64(v) + 1; seq > p.nextSeq {
+		p.nextSeq = seq
+	}
 }
 
 // ── 帧 ─────────────────────────────────────────────────────────────────
