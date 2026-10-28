@@ -20,7 +20,7 @@ curl -s 127.0.0.1:9090/metrics
 
 | 指标 | 类型 | 标签 | 含义 |
 |---|---|---|---|
-| `larkax_billing_settlements_total` | counter | `usage_source` | 按实际用量结算完成的次数。`usage_source` 取 `measured` / `tokenized` / `estimated` / `unreported`，即这笔账用的是实测值、本地精确计数、启发式估算，还是**上游压根没报用量**（响应里没有 usage 块，用量按零值占位） |
+| `larkax_billing_settlements_total` | counter | `usage_source` | 按实际用量结算完成的次数。`usage_source` 取 `measured` / `tokenized` / `estimated` / `unreported`，即这笔账用的是实测值、本地精确计数、启发式估算，还是**上游压根没报用量**（响应里没有 usage 块，用量按零值占位）。其中 `unreported` **只由非流式请求产出**，见下面「怎么读」里那一条 |
 | `larkax_billing_capped_settlements_total` | counter | `protocol` | 结算金额被预留上界截住的次数，按入口协议分。`protocol` 取 `channel.Protocol` 的取值：`openai` / `anthropic` / `openai-responses` / `systemone` |
 | `larkax_billing_capped_amount_total` | counter | `protocol`, `asset` | 结算被预留上界截住的那部分**金额**，按入口协议与资产品种分。与上一条是一对：那个数次数，这个数少收了多少钱。`protocol` 同上一行；`asset` 取 `ledger.Asset` 的取值：`CNY`。**单位是最小计价单位（`money.Scale` 位定点，1e-8），不是元**——理由见下面的命名约定 |
 | `larkax_billing_unbilled_settlements_total` | counter | 无 | 未计费的结算次数：上游失败，或请求在结算之前中止 |
@@ -104,13 +104,33 @@ SELECT request_id, reserved_amount, plan_reserved_amount, computed_amount,
 与 `capped` 指的不是同一件事——那里是我们的上界算错，这里多半是用户真的没钱了。
 
 **`settlements_total{usage_source="estimated"}` 上涨。** 这笔账是按估算的用量
-收的，误差范围见 `internal/tokens` 的 `ErrorBounds`。它不该成为常态。
+收的，误差范围见 `internal/tokens` 的 `ErrorBounds`。它不该成为常态。**这一族
+只由流式请求产出**——非流式那两条路的来源只有 `measured` 与 `unreported`
+（见下一条）。
 
 **`settlements_total{usage_source="unreported"}` 上涨。** 上游那次响应里没有
 usage 块，用量按零值占位（不是上游说的 0），于是这次结算的金额是零——这类请求
 实际上没有被计费。上游换协议、把用量挪到别处、或者干脆不回，都长这个样子，所以
 这一族最该被看见。按 `sum by (usage_source)` 配看板时别漏掉它：漏掉的那一族看
 起来会像「没有这类请求」。
+
+**`unreported` 这一族只由非流式请求产出。** 全仓唯一产出这个来源的是
+`internal/gateway` 的 `usageSourceOf`（它只回 `measured` 与 `unreported`），而它的
+调用点也只有非流式的 `Chat` 与 `Decide` 两处——即 chat 与决策表面
+（`/v1/systemone`）。流式的来源走 `internal/gateway` 的 `streamUsage`：有上游实测时
+是 `measured`，没有时取自 `internal/tokens` 的 `StreamEstimator`，而 `internal/tokens`
+包里没有任何一处产出 `unreported`：估算器内部也有 `measured`，它是起始值与空增量的
+占位，而合并走 `internal/tokens` 的 `Count.Add`、取较不可信的一侧，合不出
+`unreported`。所以只跑流式流量的部署上，这一族**一条序列都不会出现**，那是正常的：
+它说明这些请求不走这条路，而不是这一族的计数器没接上（后者看同一次查询里别的
+`usage_source` 序列在不在）。要判流式有没有拿到上游实测，看 `estimated`（就是上面
+那一条）与 `tokenized` 两族：它们出现，说明那一次的用量是本地算的。
+
+**为什么非流式没有估算兜底。** 那条路**不估算**：用量要么来自上游响应体，要么
+上游整块没报——那时记 `unreported`、金额为零（见 `internal/gateway` 的
+`Gateway.Counter` 字段注释）。估算要解决的是「已经产出多少、但用量永远到不了」
+这个状态：客户端在途中断开、上游吐了一半就死，而已经产生的 token 上游照收钱。
+流式有这一段在途期，所以它带估算器；非流式没有这一段，也就没有可回落的估算。
 
 **`ratelimit_exact` 是 0。** RPM 限流的计数退回了进程内，那一刻判定是近似的
 （各实例各算各的，放行量偏大）。**它单独看分不出两种情形，要连着
