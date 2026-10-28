@@ -40,8 +40,10 @@ var legacyAlias = []struct {
 //   - 旧路径内部就不齐：`rotate`、`reconcile` 的 `-h` 走 `fs.Usage`，打
 //     **stderr**；`idempotency`、`calendar` 手写了 `case "-h", "--help"`，打
 //     **stdout**。四条旧命令本身分两派。
-//   - 一级命令整体上也不齐：26 条一级命令里，`-h` 打 stdout 的 17 条、
-//     打 stderr 的 9 条（2026-10-28 实测，无一条两个流都非空）。
+//   - 一级命令整体上也不齐：28 条一级命令（24 `commandGroups` + 4
+//     `legacyCommands`）里，`-h` 打 stdout 的 19 条、打 stderr 的 9 条，
+//     无一条两个流都非空（2026-10-28 实测）。九条 stderr 是
+//     `apikey consent doctor migrate plan reconcile rotate settings user`。
 //
 // 所以「流由层级决定」这个说法是错的，拿它当判据会把约定记成缺陷。真正的
 // 分界是**实现方式**：手写 `-h` case 的打 stdout，交给 `fs.Usage` 的打

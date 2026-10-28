@@ -237,6 +237,29 @@ var actionHelpNotApplicable = map[string]string{
 		"internal/migrate/sql/*_help.sql 并嵌进二进制",
 }
 
+// answersLongHelp 判一条动作路径的 `help` 是否真的打出了**长版帮助**。
+//
+// 它与 runHelpForm 是两件事，不能合并：runHelpForm 判的是「没报错」（`err == nil`
+// 或 `cli.HelpRequested`），而「没报错」在这里恰恰是病灶——140 条欠账把 `help`
+// 当成位置参数吃下去之后**正常成功返回**，rc=0。拿 runHelpForm 判它们，在连得上
+// 库的环境里全都会算成「有 help 入口」。
+//
+// 而门的另三处（TestGroupPathsAnswerBothHelpForms、TestSubGroupShortUsageStaysWithinBudget、
+// TestEveryDerivedPathAnswersHelpFlag）要的正是「没报错」，且它们各自另用
+// docPointerRE 断言长/短两版。把 runHelpForm 改成「有指针行」会让门一的 `-h`
+// 调用永远为假（短版按定义没有指针行）、门二门三的 199 条路径全红。两个概念，
+// 两种判据，各归各的门。
+//
+// 判据取**结构特征**而不是行数或文案：长版末尾那条去向
+// `docs/cli-reference.md 的「…」一节` 是长版独有的（见 helpentries_test.go 里
+// 门一的注释），改一次断行也不会变。实测无库与真库两侧各扫 153 条，带指针行的
+// 都是同一批 12 条。
+func answersLongHelp(t *testing.T, path string) (bool, string) {
+	t.Helper()
+	_, out := runHelpForm(t, path, "help")
+	return docPointerRE.MatchString(out), out
+}
+
 // TestEveryActionAnswersHelpForm 钉住动作层的 `help` 入口，按租约把欠账关在
 // 笼子里。
 //
@@ -244,7 +267,23 @@ var actionHelpNotApplicable = map[string]string{
 // 只是一条永远绿的断言。更糟的是它**会在 141 条没有自己短版的命令上也绿**——
 // 那些命令的 `-h` 打的是父组（甚至根）的短版，拿它断言「这条命令有短版」是
 // 断言了一件不成立的事。扫到了但扫错了对象，比扫不到更坏。
+//
+// # 这条门必须在没有数据库的状态下跑
+//
+// 它要在 153 条动作上敲 `<路径> help`，而那些命令**真的会执行**：真库上实测
+// `user add help` 建出一个叫 help 的用户（rc=0）、`migrate down help` 回滚了一条
+// 迁移（rc=0）、`snapshot cleanup help` 删快照分区（rc=0）。门为了数「缺哪些
+// help」自己成了这些命令的调用方。
+//
+// 所以进门第一件事是清掉 DSN：清空之后 153 条跑完，工作目录树的 sha256 不变
+// （实测），而 12 条真帮助在连库之前就打出来——那正是 P0/P1 修的东西。不清的话，
+// 这条门会在有库时红、无库时绿，同一份代码两种判决，而「绿」的那一侧什么也
+// 没证明。
 func TestEveryActionAnswersHelpForm(t *testing.T) {
+	// 见上面那段：这条门敲下去的命令里有会写库的，必须挡住。
+	// t.Setenv 与 TestMain 里 testdb.Main 的 os.Setenv 不冲突——后者先跑完。
+	t.Setenv("LARKAX_DB_DSN", "")
+
 	paths := actionPathsDerived(t)
 	missing := make(map[string]bool, len(actionHelpMissing))
 	for _, path := range actionHelpMissing {
@@ -258,14 +297,14 @@ func TestEveryActionAnswersHelpForm(t *testing.T) {
 				// 这一档不是欠入口：`help` 在这条命令上有别的含义，所以它
 				// 打不出帮助是**对的**。但它不能就这么消失在名单外——
 				// 豁免要带理由，且下面那条门会把理由背后的行为钉住。
-				if ok, _ := runHelpForm(t, path, "help"); ok {
+				if ok, _ := answersLongHelp(t, path); ok {
 					t.Errorf("%s 被登记为「help 有别的含义」，而它现在能打出帮助了："+
 						"豁免过期了，把它从 actionHelpNotApplicable 里删掉", path)
 				}
 				_ = reason
 				return
 			}
-			ok, _ := runHelpForm(t, path, "help")
+			ok, _ := answersLongHelp(t, path)
 			listed := missing[path]
 
 			switch {
@@ -283,9 +322,9 @@ func TestEveryActionAnswersHelpForm(t *testing.T) {
 
 	// 反向锚：「一条都打不开」与「全都修好了」在输出上长得一样，两者都不该
 	// 让这条门安静地通过。至少要有 1 条能用的，否则说明不是租约全销了，
-	// 而是这条门测的入口整个失效了（比如 runHelpForm 坏了、dispatch 改了）。
+	// 而是这条门测的入口整个失效了（比如 answersLongHelp 坏了、dispatch 改了）。
 	if answered == 0 {
 		t.Fatal("一条动作都打不开 `help`：不是欠账修完了，是这条门失效了——" +
-			"先确认 runHelpForm 与 dispatch 还能取到帮助")
+			"先确认 answersLongHelp 与 dispatch 还能取到帮助")
 	}
 }
