@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -343,6 +344,47 @@ const versionUsage = `larkaxctl version 打印版本号与编译元数据。
 
 // migrationsDir 是迁移文件所在目录，相对于仓库根目录。
 const migrationsDir = "internal/migrate/sql"
+
+// migrationNameRE 是 `migrate create` 接受的迁移名的形状。
+//
+// 白名单而不是黑名单：goose 的 snakeCase（helpers.go 的 snakeCase）会把不合法的
+// 字符**洗掉**而不是报错——`-h` 变成 `h`、`a.b` 变成 `a_b`、`a b` 变成 `a_b`。
+// 洗完之后看不出原文哪里不对，于是黑名单只能挡住想得到的写法。白名单一次到底。
+//
+// 字符类写成显式的 [a-zA-Z]，不用 \w：`\w` 在 Go 的 regexp 里含 unicode 字母，
+// 而 `migrate create 中文名` 今天能建出 `xxx_中文名.sql`——那个名字会被
+// //go:embed 嵌进二进制，并且在按 locale 处理文件名的工具链上层层出问题。
+// 放宽到大写是因为 `migrate create AddUser` 今天能用（落成 adduser.sql），
+// 拒掉它是一次行为回退，而 `-h` 首字符是 `-`，大小写都挡得住。
+//
+// 末尾那一段 `([a-zA-Z0-9_]*[a-zA-Z0-9])?` 是「不许以下划线结尾」：`x_` 会被
+// 落成 `xxx_x_.sql`，读起来像个残缺的名字。写成一条正则而不是「正则 + 另判
+// HasSuffix」，是因为两条判据会给出两份错误文案，而它们对用户是同一件事——
+// 「这个名字形状不对」。一处真相，一处文案。
+var migrationNameRE = regexp.MustCompile(`^[a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])?$`)
+
+// validateMigrationName 判一个迁移名能不能用。
+//
+// 除了形状，还要单独拒掉 `help`：它**符合**上面那条正则，却会与 `migrate <子命令>
+// help` 这条帮助入口撞在一起。注意拒的是「会静默变成一个迁移文件」这件事，不是
+// 「这个词不能用」——`migrate create help` 不带任何旗标，HelpOnly 认不出它。
+func validateMigrationName(name string) error {
+	if !migrationNameRE.MatchString(name) {
+		return fmt.Errorf(
+			"迁移名只能用「字母开头、字母数字与下划线组成、不以 _ 结尾」：%q 不行。"+
+				"goose 会先把名字过一遍 snake_case 再写进 %s/，而那是 "+
+				"//go:embed sql/*.sql 的目录——不合法的字符会被洗掉而不是报错"+
+				"（-h 落成 h、空串落成 _），洗出来的文件看起来完全正常",
+			name, migrationsDir)
+	}
+	if name == "help" {
+		return fmt.Errorf(
+			"迁移名不能是 help：这个名字会被写成 %s/*_help.sql 并嵌进二进制，"+
+				"而 `migrate <子命令> help` 是看用法的写法。换一个名字",
+			migrationsDir)
+	}
+	return nil
+}
 
 func run() error {
 	// 全局选项先摘出来，再分派子命令：它们必须在**任何**子命令之前生效——
@@ -826,6 +868,9 @@ func runMigrate(args []string) error {
 	case "create":
 		if len(rest) < 1 {
 			return cli.UsageErr(errors.New("用法：larkaxctl migrate create <名称>"))
+		}
+		if nameErr := validateMigrationName(rest[0]); nameErr != nil {
+			return cli.UsageErr(nameErr)
 		}
 	case "up", "down", "status", "version":
 		// 这四条不吃取值。
