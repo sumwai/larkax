@@ -856,7 +856,10 @@ func TestNativePassthroughIDIsSameOnStreamAndNonStream(t *testing.T) {
 	// 到调用方手里。
 	upstreamIDs := []string{"msg_01XFDUDYJgAACzvnptvVoYEL", `"msg_01"`}
 
-	post := func(clientID string, body []byte) (*http.Response, []byte) {
+	// 交回件数而不是 *http.Response：响应体在这个函数里读完就关了，把
+	// Response 交出去只会让调用方拿到一个已经关掉的 Body（bodyclose 报的
+	// 正是这个形状）。状态码与响应头是两条用例唯一要用的两样东西。
+	post := func(clientID string, body []byte) (int, http.Header, []byte) {
 		t.Helper()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 			public.URL+"/v1/messages", bytes.NewReader(body))
@@ -870,22 +873,22 @@ func TestNativePassthroughIDIsSameOnStreamAndNonStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("发请求失败: %v", err)
 		}
-		raw, err := io.ReadAll(resp.Body)
+		raw, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		if err != nil {
-			t.Fatalf("读响应失败: %v", err)
+		if readErr != nil {
+			t.Fatalf("读响应失败: %v", readErr)
 		}
-		return resp, raw
+		return resp.StatusCode, resp.Header, raw
 	}
 
 	// 一、非流式：直通换 id 是既有行为，这里钉住它的口径。
 	const nonStreamClientID = "native-id-nonstream"
-	nonStreamResp, nonStreamRaw := post(nonStreamClientID, nativeThinkingBody(model, false))
-	if nonStreamResp.StatusCode != http.StatusOK {
-		t.Fatalf("非流式状态码 = %d，期望 200。响应体：%s", nonStreamResp.StatusCode, nonStreamRaw)
+	nonStreamStatus, nonStreamHeader, nonStreamRaw := post(nonStreamClientID, nativeThinkingBody(model, false))
+	if nonStreamStatus != http.StatusOK {
+		t.Fatalf("非流式状态码 = %d，期望 200。响应体：%s", nonStreamStatus, nonStreamRaw)
 	}
 	nonStreamID, _ := decodeJSONObject(t, nonStreamRaw)["id"].(string)
-	if want := nonStreamResp.Header.Get("x-request-id"); nonStreamID != want {
+	if want := nonStreamHeader.Get("x-request-id"); nonStreamID != want {
 		t.Errorf("非流式：响应体的 id = %q，响应头 x-request-id = %q——两处必须是同一个值",
 			nonStreamID, want)
 	}
@@ -897,12 +900,12 @@ func TestNativePassthroughIDIsSameOnStreamAndNonStream(t *testing.T) {
 
 	// 二、流式：同一个口径。
 	const streamClientID = "native-id-stream"
-	streamResp, streamRaw := post(streamClientID, nativeThinkingBody(model, true))
-	if streamResp.StatusCode != http.StatusOK {
-		t.Fatalf("流式状态码 = %d，期望 200。响应体：%s", streamResp.StatusCode, streamRaw)
+	streamStatus, streamHeader, streamRaw := post(streamClientID, nativeThinkingBody(model, true))
+	if streamStatus != http.StatusOK {
+		t.Fatalf("流式状态码 = %d，期望 200。响应体：%s", streamStatus, streamRaw)
 	}
 	streamID := messageStartID(t, string(streamRaw))
-	if want := streamResp.Header.Get("x-request-id"); streamID != want {
+	if want := streamHeader.Get("x-request-id"); streamID != want {
 		t.Errorf("流式：message_start 的 id = %q，响应头 x-request-id = %q——两处必须是同一个值；"+
 			"与非流式那条路同一条口径\n%s", streamID, want, streamRaw)
 	}

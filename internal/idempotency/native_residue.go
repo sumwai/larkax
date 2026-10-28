@@ -67,7 +67,10 @@ import (
 // 落回就是「两份不同原文共用指纹」的那条路。
 func nativeResidueOf(protocol channel.Protocol, body []byte) (map[string]any, error) {
 	if body == nil {
-		return nil, nil
+		// nil 残差是合法值，不是「出错了但没报」——直通之外（内部调用、
+		// 跨协议）手上本来就没有原文。所以这里显式 nolint，而不是造一个
+		// 哨兵错误让每个调用方多判一条永不可达的分支。
+		return nil, nil //nolint:nilnil // 见上
 	}
 
 	var m map[string]any
@@ -76,7 +79,8 @@ func nativeResidueOf(protocol channel.Protocol, body []byte) (map[string]any, er
 	}
 	if len(m) == 0 {
 		// JSON 的 null 解进 map 得到 nil 而不报错；它没有字段，也就没有残差。
-		return nil, nil
+		// 同上：空对象是合法的无残差，不是错误。
+		return nil, nil //nolint:nilnil // 见上
 	}
 
 	// 顶层的扣除集合**按协议取，不取并集**：并集会把另一种协议的键也扣掉，
@@ -128,7 +132,9 @@ func nativeResidueOf(protocol channel.Protocol, body []byte) (map[string]any, er
 	}
 
 	if len(m) == 0 {
-		return nil, nil
+		// 原文的键全部进了 hashInput——没有残差可留，是正常的合取结果，
+		// 不是「出错了但没报」。
+		return nil, nil //nolint:nilnil // 见上
 	}
 	return m, nil
 }
