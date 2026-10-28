@@ -518,8 +518,13 @@ func TestNativePassthroughForwardsDeltaInputTokensFromUpstream(t *testing.T) {
 //
 // 枢纽不拿估算顶上去，但它**也不表现为「键不存在」**：anthropicStream.finish 只在
 // `s.usage != nil` 时写整个 usage 对象，一旦写出来，`claudeUsage` 的 input_tokens
-// 没有 omitempty，没读到输入量时就是 `0`。所以枢纽上「没报」与「报了 0」同形，
-// 而这条路上两者都表现为键不存在（报 0 才写 0）。那条不对称归 #1284 的 B 节。
+// 没有 omitempty，没读到输入量时就是 `0`。所以枢纽上「上游没报」与「上游报了 0」
+// 同形、都是 0；而这条路上两者**不同形**：上游报 0 就转一个 0（键在、值是 0），
+// 上游没报就没有那个键。那条不对称归 #1284 的 B 节。
+//
+// 本条用例钉的是后一半（没报 → 键不存在）。「报了 0 → 键在、值是 0」由下面
+// 那条零值用例钉着——**不能指望这条或上面那条顺带钉住它**：上面那条喂的是 42，
+// 把「值为 0 的 input_tokens 删掉」注入进去，本文件全部用例照样绿（实测过）。
 func TestNativePassthroughForwardsDeltaWithoutInputTokens(t *testing.T) {
 	// 本地估算确实存在（handler 按 streamBody 估出来的那个），断言它**没有**
 	// 出现在响应里——只断言「键不存在」的话，实现改成填 0 也照样绿。
@@ -546,6 +551,48 @@ func TestNativePassthroughForwardsDeltaWithoutInputTokens(t *testing.T) {
 	// 上游报的 output_tokens 照旧原样在。
 	if !strings.Contains(body, `"output_tokens":7`) {
 		t.Errorf("上游报的 output_tokens 没到调用方：%q", body)
+	}
+}
+
+// 上游报的 input_tokens 是 0 时，直通**转一个 0 出去**（键在、值是 0），
+// 不是把它当成「没报」删掉。
+//
+// # 为什么要单开一条
+//
+// 「报了正数就原样到」钉不住这一条：42 那条用例在「值为 0 就删键」的实现上照样绿，
+// 而那个实现正是 #1284 A 节要修的那种错读（把真值 0 当成没报）。整段 prompt 命中
+// 缓存时上游报的 0 就是真值——缓存量另在 `cache_read_input_tokens` 里——丢掉它
+// 等于把一次真实的输入量抹成「不知道」。
+//
+// 断言是**逐字节等于上游原文**：只断言「响应里有 input_tokens」的话，实现改成把
+// 0 改成别的数（比如本地估算）也照样绿。
+func TestNativePassthroughForwardsZeroDeltaInputTokens(t *testing.T) {
+	const (
+		start = `event: message_start` + "\n" +
+			`data: {"type":"message_start","message":{"id":"req-native-test","type":"message",` +
+			`"role":"assistant","model":"m-1","content":[],"usage":{"input_tokens":0,"output_tokens":0,` +
+			`"cache_read_input_tokens":31}}}`
+		delta = `event: message_delta` + "\n" +
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},` +
+			`"usage":{"input_tokens":0,"output_tokens":7}}`
+		stop = `event: message_stop` + "\n" + `data: {"type":"message_stop"}`
+	)
+
+	rec := nativeStreamPost(t, PathMessages,
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(start)},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(delta)},
+		channel.StreamEvent{Kind: "native", NativeFormat: channel.ProtocolAnthropic, Frame: []byte(stop)},
+		channel.StreamEvent{Kind: "done", FinishReason: "end_turn"},
+	)
+
+	want := sseBody(start) + sseBody(delta) + sseBody(stop)
+	if got := rec.Body.String(); got != want {
+		t.Errorf("上游报的 0 没有被原样转发\n got = %q\nwant = %q", got, want)
+	}
+	// 单独再钉一次键在不在：整段比对上一条已经覆盖，但失败时那句话读不出
+	// 「是键丢了还是值变了」，这里给出更具体的一条。
+	if !strings.Contains(rec.Body.String(), `"input_tokens":0`) {
+		t.Errorf("input_tokens 的 0 没到调用方（真值 0 被当成没报？）：%q", rec.Body.String())
 	}
 }
 
