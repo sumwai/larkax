@@ -514,9 +514,12 @@ func TestNativePassthroughForwardsDeltaInputTokensFromUpstream(t *testing.T) {
 // 没有这个数（上游确实没报），于是账上记 0。两份数就分叉了，而调用方拿客户端
 // 那一份去对账会永远对不上。
 //
-// 与枢纽那条路一致：没实测 usage 时 anthropicStream.finish 整个不写 usage，
-// 而不是写一个估计值（见那里 `s.usage != nil` 的判据）。两条路给同一个答案：
-// **上游没说的事，两边都不编。**
+// # 与枢纽的差别（别把两者写成一条）
+//
+// 枢纽不拿估算顶上去，但它**也不表现为「键不存在」**：anthropicStream.finish 只在
+// `s.usage != nil` 时写整个 usage 对象，一旦写出来，`claudeUsage` 的 input_tokens
+// 没有 omitempty，没读到输入量时就是 `0`。所以枢纽上「没报」与「报了 0」同形，
+// 而这条路上两者都表现为键不存在（报 0 才写 0）。那条不对称归 #1284 的 B 节。
 func TestNativePassthroughForwardsDeltaWithoutInputTokens(t *testing.T) {
 	// 本地估算确实存在（handler 按 streamBody 估出来的那个），断言它**没有**
 	// 出现在响应里——只断言「键不存在」的话，实现改成填 0 也照样绿。

@@ -33,8 +33,12 @@ package api
 //
 //     这一处只在**枢纽**分支上存在。同协议直通转发的是上游原文，那一帧由上游写，
 //     我们不重新序列化它——上游报 0 就转 0（见 docs/api.md 的「同协议直通」一节）。
-//     message_delta 那一处两条路一致：没有实测值就不写这个键，不拿估算顶上（见
-//     anthropicStream.finish 与 nativeStreamPassthrough.event）。
+//
+//     message_delta 那一处两条路**不同形**，别把它们写成一条：直通转发上游字节，
+//     上游没报那个键就不存在；枢纽只要发了 usage 事件就必写 input_tokens——
+//     `claudeUsage` 那个字段没有 omitempty，没读到输入量时写的是 0（见
+//     anthropicStream.finish）。两者都不拿估算顶上，但「没报」在直通上是缺席、
+//     在枢纽上是 0。那条不对称归 #1284 的 B 节。
 
 import (
 	"encoding/json"
@@ -300,9 +304,11 @@ func (p *nativeStreamPassthrough) event(w io.Writer, ev channel.StreamEvent) err
 		// 一个怕少冻取实测，见 internal/tokens 的 payload.go）。补进客户端那一份
 		// 就成了一条只有调用方看得到的数——账本上仍然是 0，而两边都声称是实测。
 		//
-		// 不补的时候客户端读到什么：与枢纽那条路一致，那个键不存在（见
-		// anthropicStream.finish 的同一条判据）。「上游报 0 就转 0」也是同一件事
-		// 的另一面：原样转发，不替上游改数。
+		// 不补之后客户端读到什么：**那个键不存在**。注意这里与枢纽**不同形**：
+		// 枢纽只要发了 usage 事件就必写 input_tokens（`claudeUsage` 那个字段没有
+		// omitempty），没读到输入量时写的是 0。所以枢纽上「没报」与「报了 0」
+		// 在输出里同形，而这条路上两者都表现为键不存在——上游报 0 就原样转 0，
+		// 上游没报就没有这个键。
 		return writeNativeBlock(w, block)
 	}
 

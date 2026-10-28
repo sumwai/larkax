@@ -213,33 +213,51 @@ python3 contract/check.py \
 
 ## 已知偏差
 
-**`message_start.message.usage.input_tokens` 在枢纽那条路上可能是估算值，不只是
-跨协议时。**
+**`message_start.message.usage.input_tokens` 是估算还是真值，取决于走哪条路，
+以及上游在流的最前面报过什么。** 下面把直通与枢纽分开写，两者不是同一个答案。
 
-那一帧是流的第一帧，而渲染器在**第一个事件到达时**才写它：带用量就用真值，
-不带就用请求进来时按分词估出来的那个（见 `internal/api` 的 `inputTokensOf` 与
-`anthropicStream.writeStart`）。两条路会走到估算：
+**同协议直通**：那一帧是上游原文，网关不重新序列化它。上游报什么就转什么，
+报 0 就转 0，**没有那个键就没有那个键**。这条路上既没有估算，也没有补写。
+
+**枢纽**：要重新渲染，于是会走到估算。那一帧是流的第一帧，而渲染器在**第一个
+事件到达时**才写它：带用量就用真值，不带就用请求进来时按分词估出来的那个（见
+`internal/api` 的 `inputTokensOf` 与 `anthropicStream.writeStart`）。两种情形会
+走到估算：
 
 - **跨协议**（Anthropic 客户端配 OpenAI 上游）：OpenAI 的用量在**结束分片**里，
   流的开头没有输入用量可给，只能填估算；
 - **同协议但走枢纽**（挂了插件 hook 等，见 `docs/api.md` 的「什么时候不直通」）：
-  上游的 `message_start` 若**没有** `input_tokens` 这个键，适配器就不发
-  `usage_input`，第一帧同样回落到估算。**报了 0 不算「没报」**——整段 prompt
-  命中缓存时 0 就是真值（缓存量在 `cache_read_input_tokens` 里），那一帧给的是
-  上游报的数。
+  上游的 `message_start` 若没报输入量，适配器就不发 `usage_input`，第一帧同样
+  回落到估算。
+
+**枢纽这条路今天对「报 0」也回落到估算**，不是「照转 0」。两处判据用的都是
+「值大不大」而不是「键在不在」：`readUsage` 读 `input_tokens` 时用 `v > 0`
+（`internal/channel/anthropicadapter/stream.go`），`usage_input` 的发射又用
+`inputTokens > 0` 再判一次。于是整段 prompt 命中缓存、上游真的报了 0 时，那一帧
+给的是本地估算。#1284 的 A 节在改这两处；**改完之后「报 0 照转」才会在枢纽上
+成真**，今天它只对直通成立。
 
 实测例子（`internal/assembly/stream_e2e_test.go` 的
 `TestStreamMessagesFirstFrameBeforeUpstreamFinishes`）：调用方说 Anthropic，
 上游的用量在结束分片里，首帧给的是按「你好」两个字估出来的 **3**；
 同一套夹具里若上游在 `message_start` 报真值，首帧给的就是它报的那个数。
 
-**同协议直通不在这一条里**：那一帧是上游原文，网关不重新序列化它——上游报什么
-就转什么，报 0 就转 0。要改它就得重新序列化那一块，那是加新例外，不是修偏差。
+`message_delta.usage.input_tokens` 在**上游报了它**的时候是真值。上游没报的时候，
+两条路给出的形状**不一样**：
 
-`message_delta.usage.input_tokens` 在**上游报了它**的时候是真值（枢纽与直通都是
-原样送达）。上游没报的时候那个键不存在——两套路径都不拿估算顶上。所以
-**以最后一个 usage 为准**的客户端读到的是对的；**只读 `message_start` 的客户端**
-在上面那两条路上会读到偏低的数（成本统计、用量面板是常见的那类）。
+- **直通**：那个键不存在。网关不改上游的字节，也不补估算。
+- **枢纽**：只要适配器发出了 `usage` 事件，`input_tokens` 就**一定写出来**——那个
+  字段没有 `omitempty`（`internal/api/response.go` 的 `claudeUsage`），没读到输入量
+  时写的就是 `0`。Anthropic 适配器今天**无条件**发 `usage`，所以配 Anthropic 上游
+  走枢纽时，`message_delta` 里永远有这个键（另两个适配器有 `if …Usage != nil` 的
+  守卫，它们没用量时整个 `usage` 键都不出现）。**于是枢纽上「上游没报」与「上游
+  报了 0」在输出里同形，都长成 `input_tokens: 0`**，调用方分不出来。#1284 的 B 节
+  在改这一点。
+
+估算不会顶上这条：枢纽写的是 `0`，不是本地估算——那个估算只进 `message_start`。
+所以**以最后一个 usage 为准**的客户端在直通上读到的是对的，在枢纽上会读到一个
+`0`（可能是真 0，也可能是没报）；**只读 `message_start` 的客户端**在上面那两条
+路上会读到偏低的数（成本统计、用量面板是常见的那类）。
 
 契约测试那条 Anthropic 流式用例**断言 `message_start` 的 `input_tokens` 等于
 上游报的值**——它曾经只断言「是个正数」，而那个宽断言让上面这条偏差长期看不见
@@ -256,8 +274,8 @@ python3 contract/check.py \
 **直通曾经补 `message_delta` 缺的 `input_tokens`，那个行为已删。** 补进去的是
 本地估算（或上游在 `message_start` 报过的数），而它只进了客户端——结算走的是
 适配器累计出的 `usage` 事件，那条路上没有这个数，账上记 0。同一次请求客户端
-读到 14、账上记 0，两边都标着实测。现在两条路给同一个答案：上游没说的事，
-两边都不编。
+读到 14、账上记 0，两边都标着实测。删掉之后，直通上**上游没说的事就不出现**，
+估算不再进客户端。
 
 **OpenAI 流式的 `[DONE]` 从 SDK 这一侧看不到。** 它由 SDK 的 SSE 解码器吃掉，
 不会作为分片交给调用方。能看到的正向证据是「迭代正常结束」加上「最后一个带
