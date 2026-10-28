@@ -893,8 +893,8 @@ func runMigrate(args []string) error {
 	// 收到那两条之前会把「拼错的命令」变成一次静默成功，脚本分不出这两种情形。
 	// 与 `migrate down-to abc -h` 仍报取值错是同一条：先认命令，再谈帮助。
 	//
-	// 只认「子命令后面只有一个 -h/--help」：`migrate create help` 里的 help 是
-	// 迁移文件名，仍然是位置参数。
+	// 只认「子命令后面第一个词就是 -h/--help」，尾巴上带着什么不管：
+	// `migrate create help` 里的 help 是迁移文件名，仍然是位置参数，不归这一层。
 	if cli.HelpOnly(rest) {
 		fs.Usage()
 		return nil

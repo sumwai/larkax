@@ -39,8 +39,10 @@ func HelpOnly(args []string) bool {
 	return len(args) > 0 && (args[0] == "-h" || args[0] == "--help")
 }
 
-// AnswerHelpFlag 处理「参数只有一个 -h 或 --help」：把短版打到 stderr 并返回
+// AnswerHelpFlag 处理「第一个参数是 -h 或 --help」：把短版打到 stderr 并返回
 // true（调用方直接 return nil，收尾与 `flag` 返回 ErrHelp 时一致）。
+//
+// 尾巴上还有什么都不影响：判据在 HelpOnly 里，`-h` 打头即收。
 //
 // 打 stderr 而不打 stdout，是跟着**叶子**的既有做法：走 flag 集的那一批
 // （`wallet credit -h`、`channel list -h`）本来就把用法打在 stderr 上，而这一层
